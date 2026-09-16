@@ -12,10 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The client deliberately carries no MCP dependency, so it can keep a
-        # much lower floor than the hub - it has to run wherever the user's MCP
-        # servers already run.
-        python-version: ["3.9", "3.13"]
+        python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

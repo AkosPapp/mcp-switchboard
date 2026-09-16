@@ -7,7 +7,7 @@ name = "mcp-switchboard-client"
 version = "0.2.0"
 description = "Tunnels local stdio MCP servers to an mcp-switchboard hub over one outbound WebSocket"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Akos Papp" }]
 keywords = ["mcp", "model-context-protocol", "tunnel", "reverse-proxy", "switchboard"]

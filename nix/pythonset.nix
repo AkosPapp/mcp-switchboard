@@ -16,8 +16,7 @@
   uv2nix,
   pyproject-build-systems,
   workspaceRoot,
-  # The hub needs >= 3.10 and the lock is resolved for >= 3.10; the client is
-  # happy on anything from 3.9 up, so one interpreter covers both.
+  # Both packages require >= 3.10, so one interpreter covers both.
   python ? pkgs.python313,
 }:
 

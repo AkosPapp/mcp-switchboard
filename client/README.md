@@ -9,7 +9,7 @@ works from behind NAT with nothing forwarded.
 
 The client speaks no MCP itself — it is a pipe, shuttling each server's
 stdin/stdout across the tunnel. All MCP logic lives in the hub. That is why its
-only dependency is `websockets`, and why it runs on Python 3.9.
+only dependency is `websockets`.
 
 ## Running
 
