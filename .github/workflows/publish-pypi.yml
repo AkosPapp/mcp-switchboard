@@ -3,6 +3,7 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -15,6 +16,7 @@ jobs:
           python-version: "3.12"
 
       - name: Verify tag matches package version
+        if: github.event_name == 'release'
         run: |
           tag="${GITHUB_REF_NAME#v}"
           version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
