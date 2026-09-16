@@ -1,0 +1,446 @@
+# NixOS module for mcp-switchboard-hub.
+#
+# Usage, with sops-nix providing the tunnel token:
+#
+#   {
+#     inputs.mcp-switchboard.url = "github:AkosPapp/mcp-switchboard";
+#
+#     # ... in your nixosSystem modules:
+#     imports = [ inputs.mcp-switchboard.nixosModules.default ];
+#     nixpkgs.overlays = [ inputs.mcp-switchboard.overlays.default ];
+#
+#     sops.secrets."mcp-switchboard/tunnel-token" = {
+#       # DynamicUser=true means the uid is not known ahead of time, so the file
+#       # has to be world-readable-by-nobody or owned by a group the unit joins.
+#       # Simplest is mode 0400 + owner root plus `SupplementaryGroups`, or just
+#       # let sops write it 0444 if the host is single-purpose.
+#       mode = "0440";
+#       group = "mcp-switchboard-secrets";
+#     };
+#     users.groups.mcp-switchboard-secrets = { };
+#
+#     services.mcp-switchboard = {
+#       enable = true;
+#
+#       # The tunnel listener is the one that faces the internet (behind a TLS
+#       # reverse proxy); the private listener stays on loopback.
+#       tunnel.host = "0.0.0.0";
+#       openFirewall = true;
+#
+#       # NOTE: this is a *path*, not the token. The hub substitutes the file's
+#       # contents at startup, so the secret never touches the Nix store.
+#       tunnelToken = config.sops.secrets."mcp-switchboard/tunnel-token".path;
+#
+#       loki = {
+#         enable = true;
+#         url = "http://127.0.0.1:3100";
+#         labels.host = config.networking.hostName;
+#       };
+#
+#       prometheus.register = true;
+#
+#       # Anything the hub reads that has no dedicated option above.
+#       settings = {
+#         CALL_TIMEOUT = 180;
+#         RETENTION_DAYS = 90;
+#       };
+#     };
+#
+#     services.mcp-switchboard.extraGroups = [ "mcp-switchboard-secrets" ];
+#   }
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+
+let
+  cfg = config.services.mcp-switchboard;
+
+  inherit (lib)
+    mkEnableOption
+    mkIf
+    mkOption
+    types
+    ;
+
+  prefix = "MCP_SWITCHBOARD_";
+
+  # ---------------------------------------------------------------------------
+  # Secrets vs. settings
+  # ---------------------------------------------------------------------------
+  # Everything the hub reads comes from MCP_SWITCHBOARD_* environment variables
+  # (see hub/src/mcp_switchboard_hub/envconf.py). Two properties of that loader
+  # shape this module:
+  #
+  #   1. Any value starting with "/" that resolves to an existing *regular file*
+  #      is replaced by that file's contents at startup. Directories are never
+  #      substituted, so MCP_SWITCHBOARD_DATA_DIR=/var/lib/... is safe.
+  #   2. Values marked `secret=True` in the hub (TUNNEL_TOKEN, PRIVATE_TOKEN)
+  #      hard-fail if they look like a path but no readable file is there,
+  #      rather than silently authenticating with the literal string.
+  #
+  # So there is no need for *File option variants or LoadCredential juggling:
+  # point the token options at /run/secrets/... and the value is read at runtime.
+  #
+  # The settings below are rendered into a file with pkgs.writeText and handed to
+  # systemd as EnvironmentFile= rather than Environment=, which keeps them out of
+  # `systemctl show` and the unit file. That file is still in the Nix store and
+  # therefore world-readable, which is exactly why a literal token belongs
+  # nowhere near it - hence the warning further down.
+
+  boolToEnv = b: if b then "true" else "false";
+
+  renderLabels = labels: lib.concatStringsSep "," (lib.mapAttrsToList (k: v: "${k}=${v}") labels);
+
+  # Free-form settings are accepted either bare (CALL_TIMEOUT) or fully spelled
+  # out (MCP_SWITCHBOARD_CALL_TIMEOUT); normalise to the latter.
+  normaliseKey = k: if lib.hasPrefix prefix k then k else prefix + k;
+
+  renderValue =
+    v:
+    if lib.isBool v then
+      boolToEnv v
+    else if lib.isInt v || lib.isFloat v then
+      toString v
+    else
+      toString v;
+
+  # Non-secret, safe to sit in the store.
+  baseSettings = {
+    TUNNEL_HOST = cfg.tunnel.host;
+    TUNNEL_PORT = toString cfg.tunnel.port;
+    PRIVATE_HOST = cfg.private.host;
+    PRIVATE_PORT = toString cfg.private.port;
+    DATA_DIR = cfg.dataDir;
+    LOG_LEVEL = cfg.logLevel;
+    LOKI_ENABLED = boolToEnv cfg.loki.enable;
+  }
+  // lib.optionalAttrs cfg.loki.enable {
+    LOKI_URL = cfg.loki.url;
+    LOKI_LABELS = renderLabels cfg.loki.labels;
+  };
+
+  # Expected to be *paths* to files provisioned outside Nix. A literal here is
+  # accepted (handy for a throwaway test host) but warned about loudly.
+  secretSettings = {
+    TUNNEL_TOKEN = cfg.tunnelToken;
+  }
+  // lib.optionalAttrs (cfg.privateToken != null) {
+    PRIVATE_TOKEN = cfg.privateToken;
+  };
+
+  extraSettings = lib.mapAttrs' (
+    k: v: lib.nameValuePair (lib.removePrefix prefix (normaliseKey k)) (renderValue v)
+  ) cfg.settings;
+
+  allSettings = baseSettings // extraSettings // secretSettings;
+
+  environmentFile = pkgs.writeText "mcp-switchboard.env" (
+    ''
+      # Generated by the mcp-switchboard NixOS module. Do not edit.
+      #
+      # This file lives in the Nix store and is world-readable. Token values are
+      # expected to be paths; the hub reads the file behind the path at startup.
+    ''
+    + lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v: "${prefix}${k}=${v}") allSettings)
+    + "\n"
+  );
+
+  literalSecrets = lib.filterAttrs (_: v: !(lib.hasPrefix "/" v)) secretSettings;
+
+  # 0.0.0.0 is a bind address, not a destination; scrape the loopback alias.
+  scrapeHost =
+    if
+      lib.elem cfg.private.host [
+        "0.0.0.0"
+        "::"
+        ""
+      ]
+    then
+      "127.0.0.1"
+    else
+      cfg.private.host;
+in
+{
+  options.services.mcp-switchboard = {
+    enable = mkEnableOption "the mcp-switchboard hub";
+
+    package = mkOption {
+      type = types.package;
+      default =
+        pkgs.mcp-switchboard-hub or (throw ''
+          services.mcp-switchboard.package is unset and pkgs.mcp-switchboard-hub does not
+          exist. Add the flake's overlay:
+
+            nixpkgs.overlays = [ inputs.mcp-switchboard.overlays.default ];
+
+          or set services.mcp-switchboard.package explicitly.
+        '');
+      defaultText = lib.literalExpression "pkgs.mcp-switchboard-hub";
+      description = "The mcp-switchboard-hub package to run.";
+    };
+
+    tunnel = {
+      host = mkOption {
+        type = types.str;
+        default = "127.0.0.1";
+        description = ''
+          Bind address for the tunnel listener - the one clients dial and the
+          only one intended to be reachable from outside the machine. It always
+          requires {option}`services.mcp-switchboard.tunnelToken`. Put it behind
+          a TLS reverse proxy; the hub speaks plain HTTP/WebSocket.
+        '';
+      };
+      port = mkOption {
+        type = types.port;
+        default = 8097;
+        description = "TCP port for the tunnel listener.";
+      };
+    };
+
+    private = {
+      host = mkOption {
+        type = types.str;
+        default = "127.0.0.1";
+        description = ''
+          Bind address for the private listener, which serves the web console,
+          `/api`, `/mcp` (what n8n connects to) and `/metrics`. Unauthenticated
+          unless {option}`services.mcp-switchboard.privateToken` is set, so
+          leaving this on loopback is strongly recommended.
+        '';
+      };
+      port = mkOption {
+        type = types.port;
+        default = 8099;
+        description = "TCP port for the private listener.";
+      };
+    };
+
+    dataDir = mkOption {
+      type = types.str;
+      default = "/var/lib/mcp-switchboard";
+      description = ''
+        Directory for the call-log SQLite database. Safe to give as a path: the
+        hub's path indirection only substitutes regular files, never directories.
+        Changing this away from the default means `StateDirectory=` no longer
+        creates it, so it has to exist and be writable by the dynamic user.
+      '';
+    };
+
+    tunnelToken = mkOption {
+      type = types.str;
+      example = "/run/secrets/mcp-switchboard/tunnel-token";
+      description = ''
+        Bearer token that authenticates clients on the tunnel listener.
+
+        **Give this as an absolute path to a file.** The hub replaces any value
+        that starts with `/` and resolves to a regular file with that file's
+        contents, so the secret never enters the Nix store. A literal token is
+        accepted but will be world-readable in `/nix/store`, and the module
+        warns about it.
+      '';
+    };
+
+    privateToken = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "/run/secrets/mcp-switchboard/private-token";
+      description = ''
+        Optional bearer token for the private listener. Same path-or-literal
+        rule as {option}`services.mcp-switchboard.tunnelToken`; prefer a path.
+      '';
+    };
+
+    logLevel = mkOption {
+      type = types.enum [
+        "DEBUG"
+        "INFO"
+        "WARNING"
+        "ERROR"
+        "CRITICAL"
+      ];
+      default = "INFO";
+      description = "Python logging level for the hub.";
+    };
+
+    loki = {
+      enable = mkEnableOption "shipping the hub's call log to Loki";
+
+      url = mkOption {
+        type = types.str;
+        default = "http://127.0.0.1:3100";
+        description = "Base URL of the Loki instance to push to.";
+      };
+
+      labels = mkOption {
+        type = types.attrsOf types.str;
+        default = { };
+        example = {
+          host = "hp";
+          env = "prod";
+        };
+        description = ''
+          Extra Loki stream labels, merged with the hub's own
+          `service=mcp-switchboard`. Rendered as `k=v,k2=v2`, so neither keys nor
+          values may contain `,` or `=`.
+        '';
+      };
+    };
+
+    prometheus.register = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Append a scrape job for the private listener's `/metrics` endpoint to
+        {option}`services.prometheus.scrapeConfigs`. Only useful when Prometheus
+        runs on this same machine, since the private listener defaults to
+        loopback.
+      '';
+    };
+
+    openFirewall = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Open {option}`services.mcp-switchboard.tunnel.port` in the firewall. The
+        private port is deliberately never opened - if you need it reachable, do
+        it explicitly and set a `privateToken`.
+      '';
+    };
+
+    extraGroups = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "mcp-switchboard-secrets" ];
+      description = ''
+        Supplementary groups for the service's dynamic user. Usually the group
+        that owns the secret files referenced by the token options.
+      '';
+    };
+
+    settings = mkOption {
+      type = types.attrsOf (
+        types.oneOf [
+          types.str
+          types.int
+          types.bool
+          types.float
+        ]
+      );
+      default = { };
+      example = {
+        CALL_TIMEOUT = 180;
+        RETENTION_DAYS = 90;
+        MAX_ROWS = 250000;
+      };
+      description = ''
+        Extra `MCP_SWITCHBOARD_*` settings, for anything without a dedicated
+        option above. Keys may be written bare (`CALL_TIMEOUT`) or fully
+        (`MCP_SWITCHBOARD_CALL_TIMEOUT`).
+
+        These are rendered into a world-readable store file, so do not put
+        secrets here - use a path, exactly as the token options do.
+      '';
+    };
+  };
+
+  config = mkIf cfg.enable {
+    warnings = lib.mapAttrsToList (
+      k: _:
+      "services.mcp-switchboard: ${prefix}${k} was given as a literal value, which ends up "
+      + "world-readable in /nix/store. Point it at a file instead "
+      + "(e.g. \"/run/secrets/mcp-switchboard/...\"); the hub reads the file at startup."
+    ) literalSecrets;
+
+    assertions = [
+      {
+        assertion = cfg.tunnelToken != "";
+        message = "services.mcp-switchboard.tunnelToken must be set: it authenticates the tunnel listener, which is the one intended to be publicly reachable.";
+      }
+      {
+        assertion = lib.all (v: !(lib.hasInfix "," v || lib.hasInfix "=" v)) (
+          lib.attrValues cfg.loki.labels ++ lib.attrNames cfg.loki.labels
+        );
+        message = "services.mcp-switchboard.loki.labels keys and values must not contain ',' or '=' - they are rendered into a comma-separated k=v list.";
+      }
+      {
+        assertion = !(cfg.prometheus.register && !config.services.prometheus.enable);
+        message = "services.mcp-switchboard.prometheus.register is true but services.prometheus is not enabled on this machine.";
+      }
+    ];
+
+    systemd.services.mcp-switchboard = {
+      description = "mcp-switchboard hub";
+      documentation = [ "https://github.com/AkosPapp/mcp-switchboard" ];
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+
+      serviceConfig = {
+        ExecStart = lib.getExe' cfg.package "mcp-switchboard-hub";
+
+        # Settings live in a file rather than Environment= so they stay out of
+        # the unit and out of `systemctl show`. Secrets are paths, resolved by
+        # the hub at startup.
+        EnvironmentFile = environmentFile;
+
+        DynamicUser = true;
+        StateDirectory = "mcp-switchboard";
+        StateDirectoryMode = "0700";
+        SupplementaryGroups = cfg.extraGroups;
+
+        Restart = "on-failure";
+        RestartSec = "5s";
+
+        # Hardening. The hub only ever writes to its StateDirectory and talks
+        # TCP, so it can be locked down hard.
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        NoNewPrivileges = true;
+        RestrictAddressFamilies = [
+          "AF_INET"
+          "AF_INET6"
+          "AF_UNIX"
+        ];
+
+        PrivateDevices = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        ProtectClock = true;
+        ProtectHostname = true;
+        ProtectProc = "invisible";
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        RestrictNamespaces = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        SystemCallArchitectures = "native";
+        SystemCallFilter = [
+          "@system-service"
+          "~@privileged"
+          "~@resources"
+        ];
+        UMask = "0077";
+
+        # Binding < 1024 would need CAP_NET_BIND_SERVICE, which this
+        # deliberately does not grant - use a reverse proxy.
+        CapabilityBoundingSet = [ "" ];
+        AmbientCapabilities = [ "" ];
+      };
+    };
+
+    networking.firewall.allowedTCPPorts = mkIf cfg.openFirewall [ cfg.tunnel.port ];
+
+    services.prometheus.scrapeConfigs = mkIf cfg.prometheus.register [
+      {
+        job_name = "mcp-switchboard";
+        static_configs = [ { targets = [ "${scrapeHost}:${toString cfg.private.port}" ]; } ];
+      }
+    ];
+  };
+}

@@ -4,38 +4,72 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      package:
+        description: "Which package to publish"
+        required: true
+        default: both
+        type: choice
+        options: [both, client, hub]
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    strategy:
+      # Never publish one package and then fail out of the other half way.
+      fail-fast: false
+      matrix:
+        package: [client, hub]
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Verify tag matches package version
-        if: github.event_name == 'release'
+      - name: Decide whether this package is in scope
+        id: scope
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          if [ "$tag" != "$version" ]; then
-            echo "::error::release tag v$tag does not match pyproject.toml version $version"
-            exit 1
+          want="${{ github.event.inputs.package || 'both' }}"
+          if [ "$want" = "both" ] || [ "$want" = "${{ matrix.package }}" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "skipping ${{ matrix.package }} (asked for $want)"
           fi
 
-      - name: Install build tooling
-        run: pip install build twine
+      - uses: actions/setup-python@v5
+        if: steps.scope.outputs.run == 'true'
+        with:
+          python-version: "3.13"
 
-      - name: Build sdist + wheel
-        run: python -m build
+      - name: Verify the release tag matches this package's version
+        if: steps.scope.outputs.run == 'true' && github.event_name == 'release'
+        working-directory: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(python -c '
+          import sys, tomllib
+          with open("pyproject.toml", "rb") as f:
+              print(tomllib.load(f)["project"]["version"])
+          ')"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::release tag $GITHUB_REF_NAME does not match ${{ matrix.package }} version $version"
+            echo "Both packages are versioned together; bump them in the same commit as the tag."
+            exit 1
+          fi
+          echo "tag $tag matches ${{ matrix.package }} version $version"
 
-      - name: Check package metadata
-        run: twine check dist/*
+      - name: Build
+        if: steps.scope.outputs.run == 'true'
+        working-directory: ${{ matrix.package }}
+        run: |
+          pip install build
+          python -m build
 
-      - name: Publish to PyPI
+      - name: Upload
+        if: steps.scope.outputs.run == 'true'
+        working-directory: ${{ matrix.package }}
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: twine upload dist/*
+        run: |
+          pip install twine
+          twine upload dist/*

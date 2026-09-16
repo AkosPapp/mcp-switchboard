@@ -6,26 +6,71 @@ on:
   pull_request:
 
 jobs:
-  test:
+  client:
+    name: client (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.9", "3.12"]
+        # The client deliberately carries no MCP dependency, so it can keep a
+        # much lower floor than the hub - it has to run wherever the user's MCP
+        # servers already run.
+        python-version: ["3.9", "3.13"]
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - run: pip install -e "./client[test]"
+      - run: pytest client/tests -q
 
-      - name: Install package + test deps
-        run: pip install -e ".[test]"
+  hub:
+    name: hub (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The MCP SDK requires >=3.10.
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e "./hub[test]"
+      - run: pytest hub/tests -q
 
-      - name: Run tests
-        run: pytest -q
+  end-to-end:
+    name: end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e "./hub[test]" -e "./client"
+      # Runs a real client process tunnelling a real MCP server to a real hub,
+      # then calls a tool both through the console API and as an MCP consumer.
+      - run: pytest tests -q
 
-      - name: Shellcheck install.sh
-        uses: ludeeus/action-shellcheck@master
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ludeeus/action-shellcheck@master
         with:
           scandir: "."
           additional_files: "install.sh"
+
+  nix:
+    name: nix flake check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      # The VM test needs KVM and is slow, so it is excluded here and run on a
+      # schedule / manually instead.
+      - run: nix flake check --no-build
+      - run: nix build .#client .#hub -L

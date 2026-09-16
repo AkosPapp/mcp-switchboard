@@ -1,0 +1,107 @@
+name: docker
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "uv.lock"
+      - "pyproject.toml"
+      - "hub/**"
+      - ".github/workflows/docker.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ghcr.io rejects uppercase in a repository path, and GitHub owner names
+      # are not normalised (this repo's is "AkosPapp"), so lowercase it here
+      # rather than relying on metadata-action to do it implicitly.
+      - name: Compute image name
+        id: image
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=${{ env.REGISTRY }}/$owner/mcp-switchboard-hub" >> "$GITHUB_OUTPUT"
+
+      # arm64 is emulated, so it roughly triples the build. The hub is pure
+      # Python on top of a slim base, which keeps that tolerable (a couple of
+      # minutes), and the wheels it installs are all either py3-none-any or have
+      # native aarch64 wheels on PyPI - nothing gets compiled under QEMU.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Pull requests build but never push: forked PRs have no access to
+      # packages: write, and we do not want PR images in the registry anyway.
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            # v1.2.3 -> 1.2.3, 1.2, 1
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            # every build gets an immutable sha tag
+            type=sha,format=long
+            # `latest` only ever tracks the default branch
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=mcp-switchboard-hub
+            org.opencontainers.image.description=Aggregating MCP gateway for outbound tunnels
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GitHub's own cache backend: no extra registry credentials, and it
+          # survives across branches for the same repo.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### Pushed"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,34 +1,20 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+# Workspace root only - deliberately NOT a distributable package.
+#
+# There is no [project] table here, which makes this a "virtual" uv workspace:
+# `uv lock` resolves hub/ and client/ together into a single root uv.lock, and
+# the Nix build (see flake.nix) derives its entire Python package set from that
+# lock file via uv2nix. Add a member here and it shows up in Nix automatically.
+#
+# The two members are intentionally independent: the hub depends on mcp 2.x, the
+# client depends on nothing but websockets. Sharing a lock file does not create
+# a dependency between them - each `packages.<name>` virtualenv only ever
+# contains its own member's closure.
+#
+# Test tooling lives in each member's `test` extra rather than in a root
+# [dependency-groups] table, because uv2nix's workspace.deps does not surface
+# groups declared on a virtual root - a root dev group would silently never
+# reach the Nix dev shell. ruff is not a Python import, so the dev shell takes
+# it from nixpkgs instead of from the lock.
 
-[project]
-name = "mcp-reverse-proxy-client"
-version = "0.1.0"
-description = "Outbound-only reverse proxy that tunnels local MCP stdio servers to an MCP gateway (Context Forge)"
-readme = "README.md"
-requires-python = ">=3.9"
-license = { text = "MIT" }
-authors = [{ name = "Akos Papp" }]
-keywords = ["mcp", "model-context-protocol", "reverse-proxy", "context-forge", "mcp-gateway"]
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-]
-dependencies = [
-    "websockets>=12.0",
-]
-
-[project.optional-dependencies]
-test = ["pytest"]
-
-[project.urls]
-Homepage = "https://github.com/AkosPapp/agent-reverse-proxy"
-Repository = "https://github.com/AkosPapp/agent-reverse-proxy"
-
-[project.scripts]
-mcp-reverse-proxy-client = "mcp_reverse_proxy_client.cli:main"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/mcp_reverse_proxy_client"]
+[tool.uv.workspace]
+members = ["hub", "client"]

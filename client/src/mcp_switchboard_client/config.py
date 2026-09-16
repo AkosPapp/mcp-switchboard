@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-LOGGER = logging.getLogger("mcp_reverse_proxy_client.config")
+LOGGER = logging.getLogger("mcp_switchboard_client.config")
 
 
 class ConfigError(Exception):

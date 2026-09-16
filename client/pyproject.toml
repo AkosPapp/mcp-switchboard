@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-switchboard-client"
+version = "0.2.0"
+description = "Tunnels local stdio MCP servers to an mcp-switchboard hub over one outbound WebSocket"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Akos Papp" }]
+keywords = ["mcp", "model-context-protocol", "tunnel", "reverse-proxy", "switchboard"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+# Deliberately no `mcp` dependency: the client is a dumb pipe and speaks no MCP.
+dependencies = [
+    "websockets>=14",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-asyncio>=0.23"]
+
+[project.urls]
+Homepage = "https://github.com/AkosPapp/mcp-switchboard"
+Repository = "https://github.com/AkosPapp/mcp-switchboard"
+
+[project.scripts]
+mcp-switchboard-client = "mcp_switchboard_client.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_switchboard_client"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from mcp_reverse_proxy_client.config import ConfigError, load_config
+from mcp_switchboard_client.config import ConfigError, load_config
 
 
 def write_json(path: Path, data: dict) -> Path:

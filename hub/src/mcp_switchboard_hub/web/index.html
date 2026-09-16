@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mcp-switchboard</title>
+<link rel="icon" href="static/favicon.svg">
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span class="brand-name">mcp-switchboard</span>
+  </div>
+  <nav class="tabs" id="tabs">
+    <a href="#/connections" data-view="connections">Connections</a>
+    <a href="#/calls" data-view="calls">Calls</a>
+  </nav>
+  <div class="live" id="live" title="event stream">
+    <span class="dot" id="live-dot"></span>
+    <span id="live-text">connecting</span>
+  </div>
+</header>
+
+<main>
+  <!-- ---------------------------------------------------------------- tree -->
+  <section class="view view-split" id="view-connections">
+    <aside class="pane tree-pane">
+      <div class="pane-head">
+        <input type="search" id="tree-filter" placeholder="filter tools, servers, machines" autocomplete="off" spellcheck="false">
+        <button type="button" class="icon-btn" id="refresh-tree" title="Refresh">&#x21bb;</button>
+      </div>
+      <div class="pane-body" id="tree" role="tree" aria-label="Connections"></div>
+      <div class="pane-foot" id="tree-summary"></div>
+    </aside>
+    <section class="pane tool-pane" id="tool-pane">
+      <div class="empty" id="tool-empty">
+        <h2>Pick a tool</h2>
+        <p>Every machine that has dialled in is on the left, with the MCP servers
+           it carries and the tools each one exposes. Select a tool to read its
+           schema and call it by hand.</p>
+      </div>
+    </section>
+  </section>
+
+  <!-- --------------------------------------------------------------- calls -->
+  <section class="view view-calls" id="view-calls" hidden>
+    <form class="filters" id="call-filters" autocomplete="off">
+      <label>Machine<input type="text" name="label" placeholder="any" spellcheck="false"></label>
+      <label>Server<input type="text" name="server" placeholder="any" spellcheck="false"></label>
+      <label>Tool<input type="text" name="tool" placeholder="any" spellcheck="false"></label>
+      <label>Status
+        <select name="status">
+          <option value="">any</option>
+          <option value="ok">ok</option>
+          <option value="error">error</option>
+        </select>
+      </label>
+      <label>Limit
+        <select name="limit">
+          <option>50</option>
+          <option selected>100</option>
+          <option>250</option>
+          <option>1000</option>
+        </select>
+      </label>
+      <button type="submit" class="primary">Apply</button>
+      <button type="button" id="calls-reset">Reset</button>
+      <span class="stats" id="call-stats"></span>
+    </form>
+    <div class="calls-body">
+      <div class="table-wrap">
+        <table class="calls" id="calls-table">
+          <thead>
+            <tr>
+              <th>Time</th><th>Machine</th><th>Server</th><th>Tool</th>
+              <th>Status</th><th class="num">Duration</th><th>Source</th>
+            </tr>
+          </thead>
+          <tbody id="calls-rows"></tbody>
+        </table>
+        <div class="empty" id="calls-empty" hidden><p>No calls recorded yet.</p></div>
+      </div>
+      <aside class="pane call-detail" id="call-detail" hidden></aside>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="static/app.js"></script>
+</body>
+</html>

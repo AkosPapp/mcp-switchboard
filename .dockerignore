@@ -1,0 +1,53 @@
+# Keep the build context to the workspace manifests plus hub/ and client/ source.
+# Everything below either bloats the context or would invalidate the layer cache
+# on every commit for no reason.
+
+.git
+.github
+.gitignore
+.dockerignore
+Dockerfile
+
+# Nix
+flake.nix
+flake.lock
+nix/
+result
+result-*
+
+# Local state and secrets - never let these near an image layer
+.env
+.env.*
+!.env.example
+.venv
+venv
+*.db
+*.sqlite
+*.sqlite3
+
+# Python build/test detritus
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+htmlcov/
+.coverage
+.coverage.*
+
+# Docs and repo furniture the hub does not need at runtime.
+# NOTE: hub/README.md is NOT excluded - hub/pyproject.toml declares
+# `readme = "README.md"`, so hatchling needs it in the context.
+docs/
+servers/
+install.sh
+mcp.json
+tests/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

@@ -1,8 +1,8 @@
 #!/bin/sh
-# install.sh - bootstrap installer for mcp-reverse-proxy-client
+# install.sh - bootstrap installer for mcp-switchboard-client
 #
 # Usage:
-#   curl -fsSL https://<static-url>/install.sh | sh -s -- --gateway-url ... --token ...
+#   curl -fsSL https://<static-url>/install.sh | sh -s -- --hub-url wss://... --token ...
 #
 # Ensures npx and uvx are available (via nix, if present, otherwise via
 # native per-user installs with no sudo and no system package state
@@ -14,8 +14,8 @@
 
 set -eu
 
-PACKAGE_NAME="mcp-reverse-proxy-client"
-CACHE_DIR="${MCP_RPC_INSTALLER_CACHE:-$HOME/.cache/mcp-reverse-proxy-installer}"
+PACKAGE_NAME="mcp-switchboard-client"
+CACHE_DIR="${MCP_SWITCHBOARD_INSTALLER_CACHE:-$HOME/.cache/mcp-switchboard-installer}"
 NODE_VERSION="${NODE_VERSION:-22.11.0}"
 
 log() {
