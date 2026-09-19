@@ -21,6 +21,10 @@ inbound port on those machines.
   FastMCP config launched via `uvx fastmcp run`. A bare FastMCP file (top-level `source`) is a
   single server named after its `name` or file stem.
 - **C2.** `mcpServers` must be a non-empty object; otherwise the client exits 1 with a message.
+  If the *default* `./mcp.json` does not exist and the built-in harness is enabled (C9), the client
+  runs with the harness alone and logs that it did. A config named with `--config` /
+  `MCP_SWITCHBOARD_CONFIG` must exist, and with `--no-harness` a config is always required
+  (otherwise there would be nothing to tunnel).
 - **C3. Projects.** An entry may set `project` (string). A top-level `project` is the default for
   entries without one. Blank strings count as absent. A non-string is an error. `project` is not
   forwarded to FastMCP configs.

@@ -47,6 +47,7 @@ class Settings:
     token: str
     label: str
     config_path: Path
+    config_explicit: bool = False  # --config / MCP_SWITCHBOARD_CONFIG was given
     reconnect_delay: float = DEFAULT_RECONNECT_DELAY
     max_retries: int = DEFAULT_MAX_RETRIES
     log_level: str = DEFAULT_LOG_LEVEL
@@ -179,7 +180,8 @@ def load_settings(args: argparse.Namespace) -> Settings:
 
     # The config path is resolved strictly against the current directory;
     # there is no upward search for an mcp.json.
-    raw_config = args.config or envconf.get("CONFIG") or DEFAULT_CONFIG_NAME
+    explicit_config = args.config or envconf.get("CONFIG")
+    raw_config = explicit_config or DEFAULT_CONFIG_NAME
     config_path = Path(raw_config)
     if not config_path.is_absolute():
         config_path = Path.cwd() / config_path
@@ -209,6 +211,7 @@ def load_settings(args: argparse.Namespace) -> Settings:
         token=token,
         label=label,
         config_path=config_path,
+        config_explicit=bool(explicit_config),
         reconnect_delay=reconnect_delay,
         max_retries=max_retries,
         log_level=log_level,
@@ -220,13 +223,18 @@ def build_settings(argv: Optional[Sequence[str]] = None) -> Settings:
     return load_settings(parse_args(argv))
 
 
-def load_servers(path: Path, harness: bool = False) -> List[ServerSpec]:
+def load_servers(path: Path, harness: bool = False, config_required: bool = True) -> List[ServerSpec]:
     """Load the MCP config, rejecting names the hub could never accept.
 
     With ``harness``, the built-in coding harness is appended, unless the config
-    already defines a server of that name (then the user's entry wins).
+    already defines a server of that name (then the user's entry wins). If the
+    config file is absent and not ``config_required``, the harness alone is used.
     """
-    specs = load_config(path)
+    if harness and not config_required and not path.is_file():
+        LOGGER.info("no config at %s: tunnelling only the built-in harness", path)
+        specs: List[ServerSpec] = []
+    else:
+        specs = load_config(path)
     if harness and all(spec.name != HARNESS_NAME for spec in specs):
         specs.append(harness_spec())
     for spec in specs:
@@ -287,7 +295,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     setup_logging(settings.log_level)
 
     try:
-        specs = load_servers(settings.config_path, settings.harness)
+        specs = load_servers(
+            settings.config_path,
+            settings.harness,
+            # A file the user named must exist; the default ./mcp.json is optional
+            # as long as the harness gives the client something to tunnel.
+            config_required=settings.config_explicit,
+        )
     except McpConfigError as e:
         print(f"{PROG}: error: {e}", file=sys.stderr)
         sys.exit(1)

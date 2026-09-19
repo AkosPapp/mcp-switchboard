@@ -113,3 +113,14 @@ def test_user_defined_harness_wins(tmp_path):
     cfg = write_json(tmp_path / "mcp.json", {"mcpServers": {"harness": {"command": "mine"}}})
     specs = load_servers(cfg, harness=True)
     assert [(s.name, s.argv) for s in specs] == [("harness", ["mine"])]
+
+
+def test_missing_default_config_falls_back_to_the_harness_alone(tmp_path):
+    from mcp_switchboard_client.cli import load_servers
+
+    absent = tmp_path / "mcp.json"
+    assert [s.name for s in load_servers(absent, harness=True, config_required=False)] == ["harness"]
+    with pytest.raises(ConfigError, match="not found"):  # an explicitly named file must exist
+        load_servers(absent, harness=True, config_required=True)
+    with pytest.raises(ConfigError, match="not found"):  # nothing to tunnel without the harness
+        load_servers(absent, harness=False, config_required=False)

@@ -26,7 +26,8 @@ curl -fsSL https://akospapp.github.io/mcp-switchboard/install.sh | sh -s -- \
   --hub-url wss://switchboard.example.com --token "$TOKEN"
 ```
 
-`mcp.json` uses the familiar shape, resolved from the current directory:
+`mcp.json` uses the familiar shape, resolved from the current directory. It is optional:
+without one, the client tunnels just the built-in coding harness (see below):
 
 ```json
 {

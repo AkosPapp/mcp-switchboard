@@ -184,3 +184,10 @@ def test_harness_defaults_on_and_can_be_switched_off(monkeypatch):
     assert build_settings(BASE + ["--no-harness"]).harness is False
     monkeypatch.setenv("MCP_SWITCHBOARD_HARNESS", "false")
     assert build_settings(BASE).harness is False
+
+
+def test_config_explicit_only_when_asked_for(monkeypatch):
+    assert build_settings(BASE).config_explicit is False
+    assert build_settings(BASE + ["--config", "x.json"]).config_explicit is True
+    monkeypatch.setenv("MCP_SWITCHBOARD_CONFIG", "y.json")
+    assert build_settings(BASE).config_explicit is True

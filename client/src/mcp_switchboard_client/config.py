@@ -57,7 +57,7 @@ def load_config(path: Path) -> List[ServerSpec]:
     if not path.is_file():
         raise ConfigError(
             f"config file not found: {path} "
-            "(pass --config, or create ./mcp.json in the current directory)"
+            "(pass --config, create ./mcp.json in the current directory, or leave the built-in harness enabled)"
         )
 
     try:
