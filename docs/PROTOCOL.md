@@ -34,7 +34,7 @@ required: this listener is the one intended to face the public internet.
   "protocol": 1,
   "client": {
     "name": "mcp-switchboard-client",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "instance": "3f8a…",
     "label": "legion5"
   },

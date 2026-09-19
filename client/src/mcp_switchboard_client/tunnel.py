@@ -56,15 +56,19 @@ class FatalTunnelError(TunnelError):
 
 
 def _tls_context() -> ssl.SSLContext:
-    """A TLS context that trusts certifi's CA bundle, not just the interpreter's default.
+    """A TLS context trusting the system store *and* certifi's CA bundle.
 
-    Built once and reused: this client typically runs under `uvx`, whose
-    portable CPython builds frequently can't locate a usable system cert
-    store (NixOS keeps its trust root at a nonstandard path), so relying on
-    `ssl.create_default_context()`'s built-in search fails even when the
-    server's certificate is perfectly valid.
+    Built once and reused. This client typically runs under `uvx`, whose
+    portable CPython builds frequently can't find a system cert store (NixOS
+    keeps its trust root at a nonstandard path), so certifi is the floor that
+    makes public certificates verify on any OS. The system store (and
+    SSL_CERT_FILE / SSL_CERT_DIR) stays in the mix on purpose: a private or
+    corporate CA installed there must keep working, which `cafile=` alone
+    would silently drop.
     """
-    return ssl.create_default_context(cafile=certifi.where())
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return context
 
 
 _TLS_CONTEXT = _tls_context()

@@ -6,4 +6,4 @@ outbound WebSocket, tagged with the server name. Every MCP concern lives in the
 hub. See docs/PROTOCOL.md.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

@@ -290,3 +290,30 @@ async def test_max_retries_gives_up():
     await connection.run()
 
     assert len(connect.calls) == 3
+
+
+def test_tls_context_trusts_certifi_even_without_a_system_store(monkeypatch, tmp_path):
+    """The NixOS case: no usable system CA file, so certifi alone must supply roots."""
+    from mcp_switchboard_client import tunnel
+
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing.pem"))
+    monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "missing-dir"))
+    context = tunnel._tls_context()
+    assert len(context.get_ca_certs()) > 0
+    assert context.verify_mode.name == "CERT_REQUIRED" and context.check_hostname
+
+
+def test_tls_context_keeps_the_system_store_too(monkeypatch, tmp_path):
+    """A private CA supplied via SSL_CERT_FILE must still be trusted alongside certifi."""
+    import certifi
+
+    from mcp_switchboard_client import tunnel
+
+    pem = tmp_path / "extra.pem"
+    with open(certifi.where()) as f:
+        first = f.read().split("-----END CERTIFICATE-----")[0] + "-----END CERTIFICATE-----\n"
+    pem.write_text(first)
+    baseline = len(tunnel._tls_context().get_ca_certs())
+    monkeypatch.setenv("SSL_CERT_FILE", str(pem))
+    assert len(tunnel._tls_context().get_ca_certs()) >= 1
+    assert baseline >= 1

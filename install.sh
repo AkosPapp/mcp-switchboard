@@ -133,7 +133,42 @@ install_node_natively() {
     has_cmd npx || die "Node.js was fetched but 'npx' is still not on PATH"
 }
 
+# ensure_ca_bundle: point TLS clients at a system CA bundle if the environment
+# does not already. Some Pythons (the portable CPython builds uvx downloads,
+# especially on NixOS, whose trust store is not at the usual path) cannot find
+# one and fail every wss:// connection with CERTIFICATE_VERIFY_FAILED. An
+# existing SSL_CERT_FILE / SSL_CERT_DIR is always respected, and if nothing is
+# found the client's bundled certifi certificates are still the fallback.
+ensure_ca_bundle() {
+    if [ -n "${SSL_CERT_FILE:-}" ] && [ -r "$SSL_CERT_FILE" ]; then
+        return 0
+    fi
+    if [ -n "${SSL_CERT_DIR:-}" ] && [ -d "$SSL_CERT_DIR" ]; then
+        return 0
+    fi
+    for _bundle in \
+        "${NIX_SSL_CERT_FILE:-}" \
+        /etc/ssl/certs/ca-certificates.crt \
+        /run/current-system/sw/etc/ssl/certs/ca-bundle.crt \
+        /etc/pki/tls/certs/ca-bundle.crt \
+        /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+        /etc/ssl/ca-bundle.pem \
+        /etc/ssl/cert.pem \
+        /usr/local/etc/openssl/cert.pem \
+        /opt/homebrew/etc/ca-certificates/cert.pem
+    do
+        if [ -n "$_bundle" ] && [ -r "$_bundle" ]; then
+            SSL_CERT_FILE="$_bundle"
+            export SSL_CERT_FILE
+            log "using CA bundle $_bundle"
+            return 0
+        fi
+    done
+}
+
 main() {
+    ensure_ca_bundle
+
     if has_cmd npx && has_cmd uvx; then
         log "npx and uvx already on PATH, nothing to bootstrap"
         exec uvx "$PACKAGE_NAME" "$@"

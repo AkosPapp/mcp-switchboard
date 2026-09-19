@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-switchboard-server-harness"
-version = "0.2.0"
+version = "0.3.0"
 description = "A stdio MCP server exposing filesystem, git and shell tools for coding agents"
 readme = "README.md"
 requires-python = ">=3.10"
