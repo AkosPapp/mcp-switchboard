@@ -116,6 +116,18 @@ The usual shape, as used by Claude Desktop, Cursor and VS Code:
 }
 ```
 
+The client also adds a built-in `harness` server (files, search, git, shell, background
+processes) by default, confined to the directory you start the client in; pass
+`--no-harness` to leave it out. It gives a shell to anyone who can reach `/mcp`, so read
+[the security model](spec.md#5-security-model) first.
+
+An entry may carry a `"project"` to group it (a top-level `"project"` sets the default
+for every entry without one). Servers in a project are exposed under an extra scope, see
+[Connecting n8n](#connecting-n8n).
+
+Server names are unique within one client (a duplicate is rejected), so two
+projects that both want an `lsp` need distinct names such as `lsp-nix` and `lsp-web`.
+
 FastMCP-style entries are also recognised — any entry containing a top-level
 `source` key is launched with `fastmcp run` instead. Only stdio transport is
 tunnelled, since the wire protocol bridges stdin/stdout.
@@ -130,7 +142,14 @@ scrolling one enormous flat one:
 |---|---|---|
 | `/mcp` | everything, every machine | `legion5__git__git_status` |
 | `/mcp/host/legion5` | one machine | `git__git_status` |
+| `/mcp/host/legion5/project/nix` | one project on a machine | `lsp__hover` |
 | `/mcp/host/legion5/server/git` | one server | `git_status` |
+| `/mcp/host/legion5/project/nix/server/lsp` | one server within a project | `hover` |
+
+A server's project, when it has one, also appears in the broader scopes' names
+(`legion5__nix__lsp__hover` at `/mcp`). The console's **Endpoints** panel lists the URLs
+for whatever is currently connected, with example tool names, and — when
+`MCP_SWITCHBOARD_PUBLIC_URL` is set — a copyable client-install command.
 
 Every tool is tagged with its origin three ways, because different clients
 surface different fields: in the **name** (above), in the **title**
@@ -191,7 +210,7 @@ subject to `RETENTION_DAYS` / `MAX_ROWS`.
 ```
 hub/          the service: tunnel, MCP endpoint, console, API, exporters
 client/       the tunnel client, deliberately dependency-light (no MCP dep)
-servers/      first-party MCP servers (see its README)
+servers/      first-party MCP servers (harness: filesystem, git and shell tools, on by default in the client)
 nix/          NixOS module, uv2nix package set, VM test
 tests/        end-to-end test: real client, real MCP server, real consumer
 docs/         PROTOCOL.md, the tunnel wire format
@@ -201,7 +220,7 @@ docs/         PROTOCOL.md, the tunnel wire format
 
 ```sh
 nix develop                      # or: uv sync
-pytest hub/tests client/tests -q # unit
+pytest hub/tests client/tests servers/harness/tests -q # unit
 pytest tests -q                  # end to end (spawns a real client process)
 nix build .#checks.x86_64-linux.vm -L   # NixOS VM test, needs KVM
 ```
@@ -209,6 +228,8 @@ nix build .#checks.x86_64-linux.vm -L   # NixOS VM test, needs KVM
 The client and hub each carry byte-identical copies of `protocol.py` and
 `envconf.py` so the client needs no dependency on the hub; a test fails if they
 drift.
+
+See [spec.md](spec.md) for the behavioural specification.
 
 ## Licence
 

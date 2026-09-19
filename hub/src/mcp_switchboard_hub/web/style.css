@@ -432,6 +432,36 @@ table.calls tr.fresh td { animation: flash 1.2s ease-out; }
 .call-detail { width: 420px; flex: none; }
 .call-detail .tool-body { padding: 12px 14px 20px; }
 
+/* -------------------------------------------------------------- endpoints */
+
+.view-endpoints { flex-direction: column; padding: 10px; gap: 10px; overflow: auto; }
+.endpoints-body { display: flex; flex-direction: column; gap: 14px; max-width: 100%; }
+
+.connect-pane .pane-body { padding: 12px 14px; }
+.connect-row { display: flex; align-items: flex-start; gap: 8px; }
+.connect-row pre.json.cmd { flex: 1; margin: 0; max-height: none; }
+.hint { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; }
+.hint code { font-family: var(--mono); background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+
+table.endpoints { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.endpoints th {
+  text-align: left;
+  padding: 6px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border-strong);
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+table.endpoints td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+table.endpoints td code { font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+table.endpoints td.grow { max-width: 1px; width: 100%; }
+
+.copy-btn { font-size: 13px; }
+
 /* ------------------------------------------------------------------- toast */
 
 .toast {

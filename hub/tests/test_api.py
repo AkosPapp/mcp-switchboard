@@ -171,6 +171,16 @@ class FakeService:
         self.snapshot_calls += 1
         return SNAPSHOT
 
+    def endpoints_info(self) -> Dict[str, Any]:
+        return {
+            "localBaseUrl": "http://127.0.0.1:8099",
+            "publicUrl": "https://hp.example.ts.net:8443",
+            "installCommand": "curl -fsSL https://example/install.sh | sh -s -- --hub-url https://hp.example.ts.net:8443 --token secret",
+            "rows": [
+                {"path": "/mcp", "scope": "all", "description": "everything", "example": "legion5__git__git_status"},
+            ],
+        }
+
     async def execute_tool_call(
         self, *, connection_id: str, server: str, tool: str, arguments: dict, source: str
     ) -> FakeRecord:
@@ -234,6 +244,16 @@ def test_connections_passes_the_snapshot_through(client, service):
     assert response.status_code == 200
     assert response.json() == SNAPSHOT
     assert service.snapshot_calls == 1
+
+
+def test_endpoints_passes_the_service_info_through(client, service):
+    response = client.get("/api/endpoints")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["localBaseUrl"] == "http://127.0.0.1:8099"
+    assert body["publicUrl"] == "https://hp.example.ts.net:8443"
+    assert "--token secret" in body["installCommand"]
+    assert body["rows"][0]["path"] == "/mcp"
 
 
 def test_missing_service_is_503():

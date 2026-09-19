@@ -75,3 +75,41 @@ def test_neither_shape_is_an_error(tmp_path):
     cfg = write_json(tmp_path / "mcp.json", {"unrelated": True})
     with pytest.raises(ConfigError):
         load_config(cfg)
+
+
+def test_empty_mcp_servers_is_rejected(tmp_path):
+    cfg = write_json(tmp_path / "mcp.json", {"mcpServers": {}})
+    with pytest.raises(ConfigError, match="non-empty"):
+        load_config(cfg)
+
+
+def test_project_is_read_per_entry_and_from_top_level_default(tmp_path):
+    cfg = write_json(
+        tmp_path / "mcp.json",
+        {
+            "project": "nix",
+            "mcpServers": {
+                "a": {"command": "x"},
+                "b": {"command": "y", "project": "other"},
+                "c": {"command": "z", "project": "  "},
+            },
+        },
+    )
+    projects = {s.name: s.project for s in load_config(cfg)}
+    assert projects == {"a": "nix", "b": "other", "c": "nix"}
+
+
+def test_harness_is_added_by_default_and_can_be_disabled(tmp_path):
+    from mcp_switchboard_client.cli import load_servers
+
+    cfg = write_json(tmp_path / "mcp.json", {"mcpServers": {"git": {"command": "x"}}})
+    assert [s.name for s in load_servers(cfg, harness=True)] == ["git", "harness"]
+    assert [s.name for s in load_servers(cfg, harness=False)] == ["git"]
+
+
+def test_user_defined_harness_wins(tmp_path):
+    from mcp_switchboard_client.cli import load_servers
+
+    cfg = write_json(tmp_path / "mcp.json", {"mcpServers": {"harness": {"command": "mine"}}})
+    specs = load_servers(cfg, harness=True)
+    assert [(s.name, s.argv) for s in specs] == [("harness", ["mine"])]

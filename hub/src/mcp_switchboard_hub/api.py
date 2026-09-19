@@ -201,6 +201,10 @@ def create_api_router() -> APIRouter:
     async def connections(service: Any = ServiceDep) -> Any:
         return service.snapshot()
 
+    @router.get("/api/endpoints")
+    async def endpoints(service: Any = ServiceDep) -> Any:
+        return service.endpoints_info()
+
     @router.post("/api/connections/{connection_id}/servers/{server}/tools/{tool}/call")
     async def call_tool(
         connection_id: str,

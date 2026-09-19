@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-switchboard-server-harness"
+version = "0.1.0"
+description = "A stdio MCP server exposing filesystem, git and shell tools for coding agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Akos Papp" }]
+keywords = ["mcp", "model-context-protocol", "coding-agent", "switchboard"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = ["mcp>=2.2,<3"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+mcp-switchboard-server-harness = "mcp_switchboard_server_harness.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_switchboard_server_harness"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

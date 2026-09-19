@@ -20,7 +20,7 @@ from typing import List, Optional, Sequence
 
 from . import envconf, protocol
 from .config import ConfigError as McpConfigError
-from .config import ServerSpec, load_config
+from .config import HARNESS_NAME, ServerSpec, harness_spec, load_config
 from .envconf import ConfigError
 from .tunnel import (
     DEFAULT_MAX_RETRIES,
@@ -50,6 +50,7 @@ class Settings:
     reconnect_delay: float = DEFAULT_RECONNECT_DELAY
     max_retries: int = DEFAULT_MAX_RETRIES
     log_level: str = DEFAULT_LOG_LEVEL
+    harness: bool = True
 
     def tunnel_settings(self) -> TunnelSettings:
         return TunnelSettings(
@@ -121,6 +122,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Maximum reconnect attempts, 0 = infinite "
             f"(default {DEFAULT_MAX_RETRIES}, or {envconf.PREFIX}MAX_RETRIES)"
+        ),
+    )
+    parser.add_argument(
+        "--no-harness",
+        action="store_true",
+        help=(
+            "Do not add the built-in coding harness server (file, search, git and shell "
+            f"tools), which is on by default (or set {envconf.PREFIX}HARNESS=false)"
         ),
     )
     parser.add_argument(
@@ -203,6 +212,7 @@ def load_settings(args: argparse.Namespace) -> Settings:
         reconnect_delay=reconnect_delay,
         max_retries=max_retries,
         log_level=log_level,
+        harness=not args.no_harness and envconf.get_bool("HARNESS", True),
     )
 
 
@@ -210,12 +220,20 @@ def build_settings(argv: Optional[Sequence[str]] = None) -> Settings:
     return load_settings(parse_args(argv))
 
 
-def load_servers(path: Path) -> List[ServerSpec]:
-    """Load the MCP config, rejecting names the hub could never accept."""
+def load_servers(path: Path, harness: bool = False) -> List[ServerSpec]:
+    """Load the MCP config, rejecting names the hub could never accept.
+
+    With ``harness``, the built-in coding harness is appended, unless the config
+    already defines a server of that name (then the user's entry wins).
+    """
     specs = load_config(path)
+    if harness and all(spec.name != HARNESS_NAME for spec in specs):
+        specs.append(harness_spec())
     for spec in specs:
         try:
             protocol.validate_name(spec.name, "server name")
+            if spec.project is not None:
+                protocol.validate_name(spec.project, "project name")
         except protocol.ProtocolError as e:
             raise McpConfigError(f"{e} (in {path})") from e
     return specs
@@ -269,7 +287,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     setup_logging(settings.log_level)
 
     try:
-        specs = load_servers(settings.config_path)
+        specs = load_servers(settings.config_path, settings.harness)
     except McpConfigError as e:
         print(f"{PROG}: error: {e}", file=sys.stderr)
         sys.exit(1)

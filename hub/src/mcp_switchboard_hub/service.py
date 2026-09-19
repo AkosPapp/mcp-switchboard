@@ -18,6 +18,7 @@ import mcp_types as types
 from . import protocol
 from .calls import CallRecord, CallStore
 from .config import Settings
+from .endpoints import build_endpoints_info
 from .loki import LokiExporter
 from .metrics import Metrics
 from .registry import Connection, Registry, ServerChannel, utcnow
@@ -63,6 +64,9 @@ class Service:
 
     def subscribe(self) -> AsyncIterator[Dict[str, Any]]:
         return self.registry.subscribe()
+
+    def endpoints_info(self) -> Dict[str, Any]:
+        return build_endpoints_info(self.settings, self.registry.snapshot())
 
     def sync_gauges(self) -> None:
         connections, by_state = self.registry.counts()

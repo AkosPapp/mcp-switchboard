@@ -47,9 +47,27 @@ class Settings:
     loki_url: str = "http://127.0.0.1:3100"
     loki_labels: Dict[str, str] = field(default_factory=lambda: {"service": "mcp-switchboard"})
 
+    # Base URL the console uses when it prints the /mcp endpoint list, so you
+    # can copy a URL that actually resolves. Defaults to loopback + the
+    # private port; override if the console is reached through something else
+    # (an SSH tunnel to a different local port, for example).
+    local_base_url: Optional[str] = None
+
+    # The tunnel listener's externally-reachable address (e.g. what a
+    # Tailscale Funnel or reverse proxy in front of it answers on). There is
+    # no way to derive this from how the hub binds locally, so it is only
+    # ever what you configure. Used solely to build the copyable "connect a
+    # client" command in the console; unset, that section just explains what
+    # to set.
+    public_url: Optional[str] = None
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "calls.db"
+
+    @property
+    def effective_local_base_url(self) -> str:
+        return self.local_base_url or f"http://127.0.0.1:{self.private_port}"
 
 
 def _parse_labels(raw: Optional[str]) -> Dict[str, str]:
@@ -98,4 +116,13 @@ def load_settings(env_file: Optional[Path] = None) -> Settings:
         loki_enabled=envconf.get_bool("LOKI_ENABLED", False),
         loki_url=envconf.get("LOKI_URL", "http://127.0.0.1:3100").rstrip("/"),
         loki_labels=labels,
+        local_base_url=_strip_or_none(envconf.get("LOCAL_BASE_URL")),
+        public_url=_strip_or_none(envconf.get("PUBLIC_URL")),
     )
+
+
+def _strip_or_none(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    value = value.rstrip("/")
+    return value or None

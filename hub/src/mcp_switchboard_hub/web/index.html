@@ -17,6 +17,7 @@
   <nav class="tabs" id="tabs">
     <a href="#/connections" data-view="connections">Connections</a>
     <a href="#/calls" data-view="calls">Calls</a>
+    <a href="#/endpoints" data-view="endpoints">Endpoints</a>
   </nav>
   <div class="live" id="live" title="event stream">
     <span class="dot" id="live-dot"></span>
@@ -84,6 +85,31 @@
         <div class="empty" id="calls-empty" hidden><p>No calls recorded yet.</p></div>
       </div>
       <aside class="pane call-detail" id="call-detail" hidden></aside>
+    </div>
+  </section>
+
+  <!-- ----------------------------------------------------------- endpoints -->
+  <section class="view view-endpoints" id="view-endpoints" hidden>
+    <div class="endpoints-body">
+      <section class="pane connect-pane" id="connect-pane">
+        <div class="pane-head"><h2>Connect a client</h2></div>
+        <div class="pane-body" id="connect-body"></div>
+      </section>
+
+      <section class="pane">
+        <div class="pane-head">
+          <h2>MCP endpoints</h2>
+          <button type="button" class="icon-btn" id="refresh-endpoints" title="Refresh">&#x21bb;</button>
+        </div>
+        <div class="table-wrap">
+          <table class="endpoints" id="endpoints-table">
+            <thead>
+              <tr><th>Scope</th><th>URL</th><th>Example tool name</th><th></th></tr>
+            </thead>
+            <tbody id="endpoints-rows"></tbody>
+          </table>
+        </div>
+      </section>
     </div>
   </section>
 </main>

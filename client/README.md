@@ -9,7 +9,9 @@ works from behind NAT with nothing forwarded.
 
 The client speaks no MCP itself — it is a pipe, shuttling each server's
 stdin/stdout across the tunnel. All MCP logic lives in the hub. That is why its
-only dependency is `websockets`.
+only own dependencies are `websockets` and `certifi` (plus the harness package,
+which brings the `mcp` SDK) (a bundled CA bundle, because
+`uvx`'s portable Pythons often cannot find a system certificate store).
 
 ## Running
 
@@ -33,6 +35,16 @@ curl -fsSL https://akospapp.github.io/mcp-switchboard/install.sh | sh -s -- \
   }
 }
 ```
+
+An entry may set `"project"` to group it under a project name (a top-level
+`"project"` is the default for all entries). The client sends it to the hub, which
+uses it in tool names and project-scoped endpoints. Names must not contain `__`.
+
+A first-party [coding harness](../servers/harness) (file, search, git and shell
+tools) is added as a server named `harness` by default, confined to the directory you start
+the client in. Turn it off with
+`--no-harness` or `MCP_SWITCHBOARD_HARNESS=false`; an `mcp.json` entry named
+`harness` replaces it.
 
 Settings can also come from `MCP_SWITCHBOARD_*` environment variables or a
 `.env` file (`HUB_URL`, `TUNNEL_TOKEN`, `LABEL`, `CONFIG`, …). Any value that

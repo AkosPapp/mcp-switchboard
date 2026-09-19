@@ -1,0 +1,29 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Switchboard: hub",
+      "type": "shell",
+      "command": "uv run mcp-switchboard-hub",
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "panel": "dedicated", "group": "switchboard" },
+      "detail": "Hub: tunnel on 127.0.0.1:8097, console + /mcp on http://127.0.0.1:8099 (settings from .env)"
+    },
+    {
+      "label": "Switchboard: client",
+      "type": "shell",
+      "command": "uv run mcp-switchboard-client --hub-url ws://127.0.0.1:8097",
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "panel": "dedicated", "group": "switchboard" },
+      "detail": "Client: tunnels servers from ./mcp.json to the local hub (token from .env)"
+    },
+    {
+      "label": "Switchboard: hub + client",
+      "dependsOn": ["Switchboard: hub", "Switchboard: client"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    }
+  ]
+}

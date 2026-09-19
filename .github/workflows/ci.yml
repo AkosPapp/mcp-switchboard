@@ -37,6 +37,21 @@ jobs:
       - run: pip install -e "./hub[test]"
       - run: pytest hub/tests -q
 
+  harness:
+    name: harness (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e "./servers/harness[test]"
+      - run: pytest servers/harness/tests -q
+
   end-to-end:
     name: end-to-end
     runs-on: ubuntu-latest

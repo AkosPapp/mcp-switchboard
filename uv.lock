@@ -12,6 +12,7 @@ resolution-markers = [
 members = [
     "mcp-switchboard-client",
     "mcp-switchboard-hub",
+    "mcp-switchboard-server-harness",
 ]
 
 [[package]]
@@ -447,6 +448,8 @@ name = "mcp-switchboard-client"
 version = "0.2.0"
 source = { editable = "client" }
 dependencies = [
+    { name = "certifi" },
+    { name = "mcp-switchboard-server-harness" },
     { name = "websockets", version = "16.1.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "websockets", version = "17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
@@ -459,6 +462,8 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi", specifier = ">=2024.2.2" },
+    { name = "mcp-switchboard-server-harness", editable = "servers/harness" },
     { name = "pytest", marker = "extra == 'test'" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
     { name = "websockets", specifier = ">=14" },
@@ -497,6 +502,26 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23" },
     { name = "uvicorn", specifier = ">=0.30" },
     { name = "websockets", specifier = ">=12" },
+]
+provides-extras = ["test"]
+
+[[package]]
+name = "mcp-switchboard-server-harness"
+version = "0.1.0"
+source = { editable = "servers/harness" }
+dependencies = [
+    { name = "mcp" },
+]
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mcp", specifier = ">=2.2,<3" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
 ]
 provides-extras = ["test"]
 

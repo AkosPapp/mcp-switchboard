@@ -18,12 +18,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ssl
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
+import certifi
 import websockets
 from websockets.exceptions import ConnectionClosed
 
@@ -51,6 +53,21 @@ class TunnelError(Exception):
 
 class FatalTunnelError(TunnelError):
     """The hub refused this client; retrying cannot help."""
+
+
+def _tls_context() -> ssl.SSLContext:
+    """A TLS context that trusts certifi's CA bundle, not just the interpreter's default.
+
+    Built once and reused: this client typically runs under `uvx`, whose
+    portable CPython builds frequently can't locate a usable system cert
+    store (NixOS keeps its trust root at a nonstandard path), so relying on
+    `ssl.create_default_context()`'s built-in search fails even when the
+    server's certificate is perfectly valid.
+    """
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+_TLS_CONTEXT = _tls_context()
 
 
 def _header_kwarg() -> str:
@@ -226,6 +243,8 @@ class HubConnection:
             "ping_interval": PING_INTERVAL,
             "ping_timeout": PING_TIMEOUT,
         }
+        if urlsplit(self.url).scheme == "wss":
+            kwargs["ssl"] = _TLS_CONTEXT
 
         LOGGER.info("connecting to %s", self.url)
         async with self._connect(self.url, **kwargs) as ws:

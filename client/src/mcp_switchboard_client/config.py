@@ -9,11 +9,17 @@ Two config shapes are supported (see README.md for the full discriminator rule):
    as a FastMCP config (https://gofastmcp.com/public/schemas/fastmcp.json/v1.json)
    and launched via ``fastmcp run <generated-config>`` instead of being spawned
    directly. The discriminator is exactly: presence of a ``source`` key.
+
+A server entry may also carry a ``"project"``, grouping it under that name in
+the hub's tool naming and scoped endpoints (e.g. ``host/legion5/project/nix/
+server/lsp``). A top-level ``"project"`` in the config file sets the default
+for every entry that does not specify its own.
 """
 
 from __future__ import annotations
 
 import json
+import sys
 import logging
 import tempfile
 from dataclasses import dataclass, field
@@ -35,6 +41,7 @@ class ServerSpec:
     argv: List[str]
     env: Dict[str, str] = field(default_factory=dict)
     cwd: Optional[str] = None
+    project: Optional[str] = None
     # Set when this spec was materialized from a FastMCP-style entry, so the
     # generated temp config file can be cleaned up on shutdown.
     fastmcp_tempfile: Optional[Path] = None
@@ -61,16 +68,18 @@ def load_config(path: Path) -> List[ServerSpec]:
     if not isinstance(raw, dict):
         raise ConfigError(f"config file {path} must contain a JSON object at the top level")
 
+    default_project = _read_project(raw, path, "top-level 'project'")
+
     if "mcpServers" in raw:
         servers = raw["mcpServers"]
         if not isinstance(servers, dict) or not servers:
             raise ConfigError(f"'mcpServers' in {path} must be a non-empty object")
-        return [_build_spec(name, entry, path) for name, entry in servers.items()]
+        return [_build_spec(name, entry, path, default_project) for name, entry in servers.items()]
 
     if "source" in raw:
         # Whole file is a single bare FastMCP config.
         name = raw.get("name") or path.stem or "fastmcp-server"
-        return [_build_fastmcp_spec(name, raw)]
+        return [_build_fastmcp_spec(name, raw, default_project)]
 
     raise ConfigError(
         f"config file {path} matches neither the 'mcpServers' shape nor the "
@@ -78,12 +87,24 @@ def load_config(path: Path) -> List[ServerSpec]:
     )
 
 
-def _build_spec(name: str, entry: Any, config_path: Path) -> ServerSpec:
+def _read_project(entry: Dict[str, Any], config_path: Path, where: str) -> Optional[str]:
+    """Read and normalize an optional ``"project"`` key. Blank counts as absent."""
+    project = entry.get("project")
+    if project is None:
+        return None
+    if not isinstance(project, str):
+        raise ConfigError(f"{where} in {config_path} must be a string")
+    return project.strip() or None
+
+
+def _build_spec(name: str, entry: Any, config_path: Path, default_project: Optional[str] = None) -> ServerSpec:
     if not isinstance(entry, dict):
         raise ConfigError(f"mcpServers.{name} in {config_path} must be an object")
 
     if "source" in entry:
-        return _build_fastmcp_spec(name, entry)
+        return _build_fastmcp_spec(name, entry, default_project)
+
+    project = _read_project(entry, config_path, f"mcpServers.{name}.project") or default_project
 
     command = entry.get("command")
     if not command or not isinstance(command, str):
@@ -104,10 +125,12 @@ def _build_spec(name: str, entry: Any, config_path: Path) -> ServerSpec:
     if cwd is not None and not isinstance(cwd, str):
         raise ConfigError(f"mcpServers.{name}.cwd in {config_path} must be a string")
 
-    return ServerSpec(name=name, argv=[command, *args], env={k: str(v) for k, v in env.items()}, cwd=cwd)
+    return ServerSpec(
+        name=name, argv=[command, *args], env={k: str(v) for k, v in env.items()}, cwd=cwd, project=project
+    )
 
 
-def _build_fastmcp_spec(name: str, entry: Dict[str, Any]) -> ServerSpec:
+def _build_fastmcp_spec(name: str, entry: Dict[str, Any], default_project: Optional[str] = None) -> ServerSpec:
     """Materialize a FastMCP-style entry into a runnable ServerSpec.
 
     We write the entry out verbatim (minus a forced transport override) as its
@@ -119,7 +142,13 @@ def _build_fastmcp_spec(name: str, entry: Dict[str, Any]) -> ServerSpec:
     regardless of what the entry declares, with a warning if it was set to
     something else.
     """
+    raw_project = entry.get("project")
+    if raw_project is not None and not isinstance(raw_project, str):
+        raise ConfigError(f"mcpServers.{name}.project must be a string")
+    project = (raw_project.strip() if isinstance(raw_project, str) else None) or default_project
+
     fastmcp_config = dict(entry)
+    fastmcp_config.pop("project", None)  # not a FastMCP config key
     deployment = dict(fastmcp_config.get("deployment") or {})
     original_transport = deployment.get("transport")
     if original_transport and original_transport != "stdio":
@@ -141,5 +170,18 @@ def _build_fastmcp_spec(name: str, entry: Dict[str, Any]) -> ServerSpec:
         name=name,
         argv=["uvx", "fastmcp", "run", str(tmp_path)],
         env={},
+        project=project,
         fastmcp_tempfile=tmp_path,
     )
+
+
+HARNESS_NAME = "harness"
+
+
+def harness_spec() -> ServerSpec:
+    """The built-in coding harness, run with this interpreter.
+
+    It is a dependency of this package, so it is always importable here and
+    needs no separate install or network fetch at startup.
+    """
+    return ServerSpec(name=HARNESS_NAME, argv=[sys.executable, "-m", "mcp_switchboard_server_harness"])

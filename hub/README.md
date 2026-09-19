@@ -7,10 +7,12 @@ servers, speaks MCP to each tunnelled server, and re-serves every tool from one
 place:
 
 - **`/mcp`** — Streamable HTTP MCP endpoint for consumers (n8n, agents), also
-  available scoped per machine (`/mcp/host/{label}`) or per server
-  (`/mcp/host/{label}/server/{server}`).
+  available scoped per machine (`/mcp/host/{label}`), per project
+  (`/mcp/host/{label}/project/{project}`) or per server
+  (`/mcp/host/{label}/server/{server}`, optionally within a project).
 - **`/`** — a web console to browse connections, servers and tools, call any tool
-  by hand, and read back every call.
+  by hand, read back every call, and copy the URLs and client-install command
+  from the Endpoints panel.
 - **`/api/*`** — the JSON API behind the console.
 - **`/metrics`** — Prometheus.
 - Loki export and a SQLite call log.

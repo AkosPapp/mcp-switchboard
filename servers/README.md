@@ -1,8 +1,12 @@
 # First-party MCP servers
 
-Empty for now. This is where MCP servers written for this project live, as
-opposed to third-party ones (`uvx mcp-server-git`, `npx @modelcontextprotocol/server-filesystem`)
-which you just reference from an `mcp.json`.
+MCP servers written for this project, as opposed to third-party ones
+(`uvx mcp-server-git`, `npx @modelcontextprotocol/server-filesystem`) which you just
+reference from an `mcp.json`.
+
+| Directory | Package | What it is |
+|---|---|---|
+| [`harness/`](harness) | `mcp-switchboard-server-harness` | filesystem, search, git and shell tools for coding agents |
 
 ## The convention
 
@@ -33,4 +37,3 @@ tested and released along with everything else.
 
 For reference, `tests/fake_mcp_server.py` is a minimal, complete stdio MCP
 server (two tools, one of which deliberately fails) used by the end-to-end test.
-It is a reasonable starting point to copy.

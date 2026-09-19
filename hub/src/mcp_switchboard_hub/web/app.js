@@ -10,8 +10,9 @@
  *   4. tree view      connections -> servers -> tools
  *   5. tool pane      schema form, raw JSON, call + result
  *   6. calls view     filter table + detail
- *   7. events         SSE wiring
- *   8. boot           routing and first load
+ *   7. endpoints view /mcp URL reference + client install command
+ *   8. events         SSE wiring
+ *   9. boot           routing and first load
  */
 (function () {
   "use strict";
@@ -87,6 +88,22 @@
     return Math.round(secs / 86400) + "d";
   }
 
+  function copyToClipboard(text) {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(function () { toast("copied " + text); },
+        function () { toast(text); });
+    } else {
+      toast(text);
+    }
+  }
+
+  function copyButton(label, getText) {
+    return el("button", {
+      type: "button", class: "icon-btn copy-btn", text: label || "⧉", title: "copy",
+      onclick: function () { copyToClipboard(getText()); }
+    });
+  }
+
   var toastTimer = null;
   function toast(message) {
     var node = $("#toast");
@@ -124,6 +141,7 @@
 
   var api = {
     snapshot: function () { return request("GET", "api/connections"); },
+    endpoints: function () { return request("GET", "api/endpoints"); },
     calls: function (query) { return request("GET", "api/calls?" + query); },
     call: function (conn, server, tool, args) {
       return request("POST", "api/connections/" + encodeURIComponent(conn) +
@@ -149,7 +167,9 @@
     calls: [],
     callsLoaded: false,
     callFilters: { label: "", server: "", tool: "", status: "", limit: 100 },
-    selectedCallId: null
+    selectedCallId: null,
+    endpoints: null,        // {localBaseUrl, publicUrl, installCommand, rows} once loaded
+    endpointsLoaded: false
   };
 
   function selKey(sel) {
@@ -194,7 +214,7 @@
       var connHit = matches(conn.label, needle) || matches(conn.id, needle);
       var servers = [];
       (conn.servers || []).forEach(function (server) {
-        var serverHit = connHit || matches(server.name, needle);
+        var serverHit = connHit || matches(server.name, needle) || matches(server.project, needle);
         var tools = (server.tools || []).filter(function (tool) {
           return serverHit || matches(tool.name, needle) || matches(tool.exposedName, needle) ||
             matches(tool.description, needle);
@@ -324,7 +344,7 @@
       onclick: function () { toggle(key); }
     }, [
       el("span", { class: "twist", text: open ? "\u25bc" : "\u25b6" }),
-      el("span", { class: "grow", text: server.name }),
+      el("span", { class: "grow", text: server.project ? server.project + "/" + server.name : server.name }),
       pill(server.state || "", server.state || "unknown"),
       pill("count", count + ""),
       restart
@@ -431,7 +451,8 @@
     /* header */
     var head = el("div", { class: "tool-head" }, [
       el("h2", { text: sel.tool }),
-      el("div", { class: "path", text: (sel.label || sel.connectionId) + "  \u203a  " + sel.server }),
+      el("div", { class: "path", text: (sel.label || sel.connectionId) + "  \u203a  " +
+        (server && server.project ? server.project + "  \u203a  " : "") + sel.server }),
       el("div", {}, el("code", { class: "exposed", text: (tool && tool.exposedName) || "" })),
       tool && tool.description ? el("p", { class: "desc", text: tool.description }) : null,
       !tool ? el("p", { class: "server-error missing", text: "This tool is no longer exposed by the hub — the machine may have disconnected or the server restarted with a different tool list." }) : null,
@@ -566,10 +587,7 @@
       el("span", { class: "spacer" }),
       el("button", {
         type: "button", text: "Copy exposed name", onclick: function () {
-          var name = (tool && tool.exposedName) || "";
-          if (navigator.clipboard) navigator.clipboard.writeText(name).then(function () { toast("copied " + name); },
-            function () { toast(name); });
-          else toast(name);
+          copyToClipboard((tool && tool.exposedName) || "");
         }
       })
     ]));
@@ -865,7 +883,68 @@
     $("#calls-empty").hidden = true;
   }
 
-  /* ------------------------------------------------------------ 7. events */
+  /* --------------------------------------------------- 7. endpoints view */
+
+  function loadEndpoints() {
+    return api.endpoints().then(function (data) {
+      state.endpoints = data;
+      state.endpointsLoaded = true;
+      renderEndpoints();
+    }).catch(function (err) {
+      toast("could not load endpoints: " + err.message);
+    });
+  }
+
+  function renderConnectPane() {
+    var box = $("#connect-body");
+    clear(box);
+    var data = state.endpoints;
+    if (!data) return;
+
+    if (data.installCommand) {
+      var cmd = data.installCommand;
+      box.appendChild(el("div", { class: "connect-row" }, [
+        el("pre", { class: "json cmd", text: cmd }),
+        copyButton("Copy", function () { return cmd; })
+      ]));
+      box.appendChild(el("p", { class: "hint",
+        text: "Runs the client with the token baked in — treat it like the token itself." }));
+    } else {
+      box.appendChild(el("p", { class: "hint" }, [
+        "Set ",
+        el("code", { text: "MCP_SWITCHBOARD_PUBLIC_URL" }),
+        " to the tunnel listener's externally-reachable address (e.g. what a " +
+        "Tailscale Funnel answers on) to get a ready-to-run install command here."
+      ]));
+    }
+  }
+
+  function endpointRow(row, localBaseUrl) {
+    var url = localBaseUrl + row.path;
+    return el("tr", {}, [
+      el("td", {}, pill(row.scope, row.scope.replace("_", " "))),
+      el("td", { class: "grow" }, el("code", { text: url })),
+      el("td", { class: "grow" }, el("code", { text: row.example || "" })),
+      el("td", {}, copyButton(null, function () { return url; }))
+    ]);
+  }
+
+  function renderEndpointsTable() {
+    var body = $("#endpoints-rows");
+    clear(body);
+    var data = state.endpoints;
+    if (!data) return;
+    (data.rows || []).forEach(function (row) {
+      body.appendChild(endpointRow(row, data.localBaseUrl));
+    });
+  }
+
+  function renderEndpoints() {
+    renderConnectPane();
+    renderEndpointsTable();
+  }
+
+  /* ------------------------------------------------------------ 8. events */
 
   var refreshTimer = null;
   function refreshSnapshot() {
@@ -879,7 +958,10 @@
   // Debounced: a client reconnecting can fire several tree events in a row.
   function scheduleRefresh() {
     clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(refreshSnapshot, 150);
+    refreshTimer = setTimeout(function () {
+      refreshSnapshot();
+      if (state.endpointsLoaded) loadEndpoints();
+    }, 150);
   }
 
   // Redrawing the whole tool pane on every tree change would wipe out whatever
@@ -914,17 +996,19 @@
     };
   }
 
-  /* -------------------------------------------------------------- 8. boot */
+  /* -------------------------------------------------------------- 9. boot */
+
+  var VIEWS = ["connections", "calls", "endpoints"];
 
   function navigate(view) {
-    state.view = view === "calls" ? "calls" : "connections";
-    $("#view-connections").hidden = state.view !== "connections";
-    $("#view-calls").hidden = state.view !== "calls";
+    state.view = VIEWS.indexOf(view) !== -1 ? view : "connections";
+    VIEWS.forEach(function (v) { $("#view-" + v).hidden = state.view !== v; });
     Array.prototype.forEach.call(document.querySelectorAll("#tabs a"), function (link) {
       link.classList.toggle("active", link.dataset.view === state.view);
     });
     if (window.location.hash !== "#/" + state.view) window.location.hash = "#/" + state.view;
     if (state.view === "calls" && !state.callsLoaded) loadCalls();
+    if (state.view === "endpoints" && !state.endpointsLoaded) loadEndpoints();
   }
 
   function fromHash() {
@@ -948,6 +1032,8 @@
       readCallFilters();
       loadCalls();
     });
+
+    $("#refresh-endpoints").addEventListener("click", loadEndpoints);
 
     readCallFilters();
     window.addEventListener("hashchange", fromHash);

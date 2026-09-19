@@ -71,7 +71,10 @@ class LocalServer:
     @property
     def descriptor(self) -> dict:
         """The entry this server contributes to the ``hello`` frame."""
-        return {"name": self.name, "command": " ".join(self.spec.argv)}
+        entry = {"name": self.name, "command": " ".join(self.spec.argv)}
+        if self.spec.project:
+            entry["project"] = self.spec.project
+        return entry
 
     async def start(self) -> None:
         """Spawn the process. A no-op if one is already claimed."""

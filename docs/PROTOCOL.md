@@ -39,7 +39,8 @@ required: this listener is the one intended to face the public internet.
     "label": "legion5"
   },
   "servers": [
-    {"name": "git", "command": "uvx mcp-server-git --repository ."}
+    {"name": "git", "command": "uvx mcp-server-git --repository ."},
+    {"name": "lsp", "command": "nixd", "project": "nix"}
   ]
 }
 ```
@@ -47,8 +48,12 @@ required: this listener is the one intended to face the public internet.
 `instance` is a per-process UUID. `label` identifies the machine, defaults to its hostname, and is what
 the hub uses to tag tools by host. `command` is descriptive only — the hub never executes it.
 
-Server names must not contain `__`, since the hub joins names as `{label}__{server}__{tool}` and splits
-on that separator. The hub rejects the connection with an `error` frame if they do.
+`project` is optional. It groups a server under a named project on that machine, which the hub uses in
+tool names (`{label}__{project}__{server}__{tool}`) and in the project-scoped `/mcp` endpoints. Omit it
+for a server that belongs to no project.
+
+Server names and project names must not contain `__`, since the hub joins names with that separator and
+splits on it. The hub rejects the connection with an `error` frame if they do.
 
 ### `hello_ack` — hub → client
 

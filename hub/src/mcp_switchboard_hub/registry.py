@@ -26,34 +26,46 @@ EVENT_QUEUE_SIZE = 256
 
 
 class Scope(str, Enum):
-    """How much of the hub a given MCP endpoint exposes, and how it names tools."""
+    """How much of the hub a given MCP endpoint exposes, and how it names tools.
 
-    ALL = "all"          # {label}__{server}__{tool}
-    HOST = "host"        # {server}__{tool}
-    SERVER = "server"    # {tool}
+    A server's project is optional, so ALL and HOST omit that component
+    entirely for a project-less server rather than leaving a stray separator.
+    """
+
+    ALL = "all"                    # {label}__[{project}__]{server}__{tool}
+    HOST = "host"                  # [{project}__]{server}__{tool}
+    PROJECT = "project"            # {server}__{tool}
+    SERVER = "server"              # {tool}  (label+server fixed, any/no project)
+    PROJECT_SERVER = "project_server"  # {tool}  (label+project+server fixed)
 
 
-def compose_tool_name(scope: Scope, label: str, server: str, tool: str) -> Optional[str]:
+def compose_tool_name(
+    scope: Scope, label: str, project: Optional[str], server: str, tool: str
+) -> Optional[str]:
     """Build the name a consumer sees, or None if it cannot be made valid.
 
     Returning None rather than raising keeps one malformed upstream tool from
     taking out the whole tools/list response.
     """
+    origin = f"{label}/{project + '/' if project else ''}{server}"
     if not TOOL_NAME_RE.match(tool):
-        LOGGER.warning("dropping tool %r from %s/%s: name has characters MCP does not allow", tool, label, server)
+        LOGGER.warning("dropping tool %r from %s: name has characters MCP does not allow", tool, origin)
         return None
 
-    if scope is Scope.SERVER:
-        name = tool
+    if scope in (Scope.SERVER, Scope.PROJECT_SERVER):
+        parts = [tool]
+    elif scope is Scope.PROJECT:
+        parts = [server, tool]
     elif scope is Scope.HOST:
-        name = f"{server}{NAME_SEPARATOR}{tool}"
+        parts = ([project] if project else []) + [server, tool]
     else:
-        name = f"{label}{NAME_SEPARATOR}{server}{NAME_SEPARATOR}{tool}"
+        parts = [label] + ([project] if project else []) + [server, tool]
+    name = NAME_SEPARATOR.join(parts)
 
     if len(name) > MAX_TOOL_NAME:
         LOGGER.warning(
-            "dropping tool %r from %s/%s: composed name is %d chars, over the %d limit",
-            tool, label, server, len(name), MAX_TOOL_NAME,
+            "dropping tool %r from %s: composed name is %d chars, over the %d limit",
+            tool, origin, len(name), MAX_TOOL_NAME,
         )
         return None
     return name
@@ -74,6 +86,7 @@ class ServerChannel:
     name: str
     connection_id: str
     label: str
+    project: Optional[str] = None
     command: str = ""
     state: str = STATE_STARTING
     error: Optional[str] = None
@@ -88,7 +101,7 @@ class ServerChannel:
     def to_json(self, scope: Scope = Scope.ALL) -> Dict[str, Any]:
         tools = []
         for tool in self.tools:
-            exposed = compose_tool_name(scope, self.label, self.name, tool.name)
+            exposed = compose_tool_name(scope, self.label, self.project, self.name, tool.name)
             tools.append(
                 {
                     "name": tool.name,
@@ -100,6 +113,7 @@ class ServerChannel:
             )
         return {
             "name": self.name,
+            "project": self.project,
             "command": self.command,
             "state": self.state,
             "error": self.error,
@@ -179,7 +193,12 @@ class Registry:
         return None
 
     def resolve_tool(
-        self, scope: Scope, exposed_name: str, label: Optional[str] = None, server: Optional[str] = None
+        self,
+        scope: Scope,
+        exposed_name: str,
+        label: Optional[str] = None,
+        project: Optional[str] = None,
+        server: Optional[str] = None,
     ) -> Optional[Tuple[Connection, ServerChannel, str]]:
         """Map a name a consumer used back to a concrete (connection, server, tool).
 
@@ -190,10 +209,13 @@ class Registry:
         for connection, channel in self.iter_servers():
             if label is not None and connection.label != label:
                 continue
+            if project is not None and channel.project != project:
+                continue
             if server is not None and channel.name != server:
                 continue
             for tool in channel.tools:
-                if compose_tool_name(scope, connection.label, channel.name, tool.name) == exposed_name:
+                composed = compose_tool_name(scope, connection.label, channel.project, channel.name, tool.name)
+                if composed == exposed_name:
                     return connection, channel, tool.name
         return None
 

@@ -82,6 +82,11 @@ class TunnelHandler:
 class _ClientConnection:
     """One connected client process and all of its server channels."""
 
+    # How long _stop_channel waits for a retiring owner task to finish before
+    # giving up and returning anyway (a class attribute, not a module
+    # constant, so a test can shrink it without patching anyio itself).
+    STOP_WAIT_TIMEOUT = 5.0
+
     def __init__(
         self,
         websocket: WebSocket,
@@ -104,6 +109,11 @@ class _ClientConnection:
         self._inbound: Dict[str, Any] = {}
         # server name -> event that retires that server's owner task
         self._stoppers: Dict[str, anyio.Event] = {}
+        # server name -> event set once a retired owner task has fully torn
+        # down. _stop_channel waits on this before returning, so a fast
+        # restart's _start_channel can never race a still-unwinding old task
+        # for the same channel name (see _own_channel's finally).
+        self._done: Dict[str, anyio.Event] = {}
 
     # -- frame I/O -----------------------------------------------------
 
@@ -176,10 +186,24 @@ class _ClientConnection:
         for spec in frame.get("servers") or []:
             name = str(spec.get("name") or "").strip()
             protocol.validate_name(name, "server name")
+            if name in connection.servers:
+                # Servers are keyed by name within a connection regardless of
+                # project, so a silent dict overwrite here would drop one
+                # entirely rather than exposing it under a different name.
+                # Two projects that both want an "lsp" need distinct server
+                # names (e.g. "lsp-nix" / "lsp-web") or separate connections.
+                raise ProtocolError(f"duplicate server name {name!r} in hello")
+
+            project = spec.get("project")
+            project = str(project).strip() or None if project else None
+            if project is not None:
+                protocol.validate_name(project, "project name")
+
             connection.servers[name] = ServerChannel(
                 name=name,
                 connection_id=connection.id,
                 label=label,
+                project=project,
                 command=str(spec.get("command") or ""),
             )
 
@@ -265,37 +289,76 @@ class _ClientConnection:
         if channel.name in self._stoppers:
             return  # already owned
         stopper = anyio.Event()
+        done = anyio.Event()
         self._stoppers[channel.name] = stopper
-        self._tg.start_soon(self._own_channel, channel, stopper)
+        self._done[channel.name] = done
+        self._tg.start_soon(self._own_channel, channel, stopper, done)
 
     async def _stop_channel(self, channel: ServerChannel) -> None:
         stopper = self._stoppers.pop(channel.name, None)
         if stopper is not None:
             stopper.set()
 
-    async def _own_channel(self, channel: ServerChannel, stopper: anyio.Event) -> None:
+        done = self._done.pop(channel.name, None)
+        if done is not None:
+            # Wait for the retiring owner task to actually finish tearing
+            # down before returning. Without this, a fast restart (state
+            # frames arriving as "starting" then "running" in quick
+            # succession) lets _start_channel install a NEW owner task while
+            # this OLD one is still unwinding in the background, and the two
+            # race over self._inbound[name]/channel.session - the classic
+            # symptom being a restart that silently loses its tools, or logs
+            # "unhandled errors in a TaskGroup" from the stale session's own
+            # cleanup. Bounded so a genuinely stuck server can't wedge the
+            # receive loop forever.
+            with anyio.move_on_after(self.STOP_WAIT_TIMEOUT):
+                await done.wait()
+
+    async def _own_channel(self, channel: ServerChannel, stopper: anyio.Event, done: anyio.Event) -> None:
         """Own one ClientSession for its whole life. Enter and exit in THIS task."""
         read_w, read_stream = anyio.create_memory_object_stream[SessionMessage | Exception](0)
         write_stream, write_r = anyio.create_memory_object_stream[SessionMessage](0)
         self._inbound[channel.name] = read_w
+        session: Any = None
 
         async def pump_to_client() -> None:
             async for outgoing in write_r:
                 payload = json.loads(outgoing.message.model_dump_json(by_alias=True, exclude_unset=True))
                 await self.send(protocol.mcp(channel.name, payload))
 
+        async def run_until_stopped(sess: ClientSession) -> None:
+            with anyio.fail_after(self.tools_timeout):
+                await sess.initialize()
+            channel.session = sess
+            await self._refresh_tools(channel)
+            self.log.info("session up for %s (%d tools)", channel.name, len(channel.tools))
+            self.registry.publish_change()
+            await self._changed()
+            await anyio.sleep_forever()  # parked; `watch_stopper` ends this
+
+        async def watch_stopper(scope: anyio.CancelScope) -> None:
+            await stopper.wait()
+            scope.cancel()
+
         try:
             async with anyio.create_task_group() as tg:
                 tg.start_soon(pump_to_client)
                 async with ClientSession(read_stream, write_stream) as session:
-                    with anyio.fail_after(self.tools_timeout):
-                        await session.initialize()
-                    channel.session = session
-                    await self._refresh_tools(channel)
-                    self.log.info("session up for %s (%d tools)", channel.name, len(channel.tools))
-                    self.registry.publish_change()
-                    await self._changed()
-                    await stopper.wait()
+                    # `stopper` must be able to abort `run_until_stopped` at ANY
+                    # point, not just once it reaches its own wait - otherwise a
+                    # server that gets stopped while initialize() is still in
+                    # flight (e.g. several restarts fired in quick succession,
+                    # each superseding the last before it ever finishes talking
+                    # to the previous subprocess incarnation) sits there until
+                    # the full tools_timeout elapses instead of retiring at
+                    # once. A cancel scope's own task cancelling itself this way
+                    # is a clean stop, not an unhandled error - unlike letting
+                    # initialize() run into fail_after's TimeoutError, which
+                    # bubbles up through the SDK's internal task group and ours
+                    # as a doubly-nested "unhandled errors in a TaskGroup".
+                    async with anyio.create_task_group() as inner:
+                        inner.start_soon(watch_stopper, inner.cancel_scope)
+                        inner.start_soon(run_until_stopped, session)
                 tg.cancel_scope.cancel()
         except TimeoutError:
             channel.error = "timed out waiting for the server to answer initialize"
@@ -306,13 +369,20 @@ class _ClientConnection:
             channel.state = protocol.STATE_FAILED
             self.log.warning("session for %s ended: %s", channel.name, e)
         finally:
-            self._inbound.pop(channel.name, None)
-            channel.session = None
-            channel.tools = []
+            # Identity-guarded: `_stop_channel` now waits for `done` before a
+            # new owner task can start, so this should never actually race a
+            # newer registration - but the guard is cheap insurance against a
+            # future refactor reintroducing the overlap.
+            if self._inbound.get(channel.name) is read_w:
+                self._inbound.pop(channel.name, None)
+            if channel.session is session:
+                channel.session = None
+                channel.tools = []
             with anyio.CancelScope(shield=True):
                 await read_w.aclose()
                 self.registry.publish_change()
                 await self._changed()
+            done.set()
 
     async def _refresh_tools(self, channel: ServerChannel) -> None:
         try:
@@ -339,6 +409,10 @@ class _ClientConnection:
         for stopper in list(self._stoppers.values()):
             stopper.set()
         self._stoppers.clear()
+        # The enclosing task group in run() has already awaited every owner
+        # task to completion by the time this runs, so their `done` events
+        # are already set; this is just tidying the now-stale dict.
+        self._done.clear()
         if self.connection is not None:
             self.registry.remove_connection(self.connection.id)
             if self.metrics is not None:

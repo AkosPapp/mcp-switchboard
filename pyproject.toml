@@ -17,4 +17,4 @@
 # it from nixpkgs instead of from the lock.
 
 [tool.uv.workspace]
-members = ["hub", "client"]
+members = ["hub", "client", "servers/harness"]

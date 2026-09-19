@@ -177,3 +177,10 @@ def test_settings_normalizes_the_hub_url(tmp_path, monkeypatch):
     settings = build_settings(["--hub-url", "https://hub.example.com", "--token", "t"])
     assert settings.hub_url == "wss://hub.example.com/tunnel/v1"
     assert settings.tunnel_settings().hub_url == settings.hub_url
+
+
+def test_harness_defaults_on_and_can_be_switched_off(monkeypatch):
+    assert build_settings(BASE).harness is True
+    assert build_settings(BASE + ["--no-harness"]).harness is False
+    monkeypatch.setenv("MCP_SWITCHBOARD_HARNESS", "false")
+    assert build_settings(BASE).harness is False
