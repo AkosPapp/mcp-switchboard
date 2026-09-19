@@ -8,26 +8,35 @@ on:
       package:
         description: "Which package to publish"
         required: true
-        default: both
+        default: all
         type: choice
-        options: [both, client, hub]
+        options: [all, harness, client, hub]
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     strategy:
-      # Never publish one package and then fail out of the other half way.
-      fail-fast: false
+      # One at a time, in this order: the client depends on the harness, so the
+      # harness must be on PyPI first. If a publish fails, stop rather than
+      # release a package whose dependency is missing.
+      max-parallel: 1
+      fail-fast: true
       matrix:
-        package: [client, hub]
+        include:
+          - package: harness
+            dir: servers/harness
+          - package: client
+            dir: client
+          - package: hub
+            dir: hub
     steps:
       - uses: actions/checkout@v4
 
       - name: Decide whether this package is in scope
         id: scope
         run: |
-          want="${{ github.event.inputs.package || 'both' }}"
-          if [ "$want" = "both" ] || [ "$want" = "${{ matrix.package }}" ]; then
+          want="${{ github.event.inputs.package || 'all' }}"
+          if [ "$want" = "all" ] || [ "$want" = "${{ matrix.package }}" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -41,7 +50,7 @@ jobs:
 
       - name: Verify the release tag matches this package's version
         if: steps.scope.outputs.run == 'true' && github.event_name == 'release'
-        working-directory: ${{ matrix.package }}
+        working-directory: ${{ matrix.dir }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
@@ -52,21 +61,21 @@ jobs:
           ')"
           if [ "$tag" != "$version" ]; then
             echo "::error::release tag $GITHUB_REF_NAME does not match ${{ matrix.package }} version $version"
-            echo "Both packages are versioned together; bump them in the same commit as the tag."
+            echo "All packages are versioned together; bump them in the same commit as the tag."
             exit 1
           fi
           echo "tag $tag matches ${{ matrix.package }} version $version"
 
       - name: Build
         if: steps.scope.outputs.run == 'true'
-        working-directory: ${{ matrix.package }}
+        working-directory: ${{ matrix.dir }}
         run: |
           pip install build
           python -m build
 
       - name: Upload
         if: steps.scope.outputs.run == 'true'
-        working-directory: ${{ matrix.package }}
+        working-directory: ${{ matrix.dir }}
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}

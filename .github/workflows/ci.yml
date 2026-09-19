@@ -18,7 +18,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e "./client[test]"
+      # The client depends on the harness, which is not on PyPI (pip ignores the
+      # uv workspace source), so install it from its local path in the same command.
+      - run: pip install -e ./servers/harness -e "./client[test]"
       - run: pytest client/tests -q
 
   hub:
@@ -60,7 +62,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install -e "./hub[test]" -e "./client"
+      - run: pip install -e "./hub[test]" -e ./servers/harness -e "./client"
       # Runs a real client process tunnelling a real MCP server to a real hub,
       # then calls a tool both through the console API and as an MCP consumer.
       - run: pytest tests -q
