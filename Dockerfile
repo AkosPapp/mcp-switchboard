@@ -41,11 +41,14 @@ ENV UV_LINK_MODE=copy \
 WORKDIR /src
 
 # The repo is a uv workspace: the root pyproject.toml is a bare marker and the
-# single uv.lock covers both members. Copy the manifests first so dependency
-# resolution caches independently of the source.
+# single uv.lock covers every member (hub, client and servers/harness), so all
+# their manifests must be present even though only the hub is installed. Copy
+# the manifests first so dependency resolution caches independently of the
+# source.
 COPY pyproject.toml uv.lock ./
 COPY hub/pyproject.toml ./hub/
 COPY client/pyproject.toml ./client/
+COPY servers/harness/pyproject.toml ./servers/harness/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-workspace --package mcp-switchboard-hub

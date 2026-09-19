@@ -1,4 +1,4 @@
-# Keep the build context to the workspace manifests plus hub/ and client/ source.
+# Keep the build context to the workspace manifests plus hub/ source.
 # Everything below either bloats the context or would invalidate the layer cache
 # on every commit for no reason.
 
@@ -42,7 +42,11 @@ htmlcov/
 # NOTE: hub/README.md is NOT excluded - hub/pyproject.toml declares
 # `readme = "README.md"`, so hatchling needs it in the context.
 docs/
-servers/
+# servers/ is excluded except the harness manifest: it is a uv workspace member,
+# and `uv sync --locked` refuses to run unless every member's pyproject.toml is
+# present, even though only the hub gets installed.
+servers/**
+!servers/harness/pyproject.toml
 install.sh
 mcp.json
 tests/
