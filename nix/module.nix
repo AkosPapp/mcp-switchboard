@@ -71,15 +71,15 @@ let
   # Secrets vs. settings
   # ---------------------------------------------------------------------------
   # Everything the hub reads comes from MCP_SWITCHBOARD_* environment variables
-  # (see hub/src/mcp_switchboard_hub/envconf.py). Two properties of that loader
-  # shape this module:
+  # (see hub/internal/config/envconf.go). Two properties of that loader shape
+  # this module:
   #
   #   1. Any value starting with "/" that resolves to an existing *regular file*
   #      is replaced by that file's contents at startup. Directories are never
   #      substituted, so MCP_SWITCHBOARD_DATA_DIR=/var/lib/... is safe.
-  #   2. Values marked `secret=True` in the hub (TUNNEL_TOKEN, PRIVATE_TOKEN)
-  #      hard-fail if they look like a path but no readable file is there,
-  #      rather than silently authenticating with the literal string.
+  #   2. Values the hub reads as secrets (TUNNEL_TOKEN, PRIVATE_TOKEN) hard-fail
+  #      if they look like a path but no readable file is there, rather than
+  #      silently authenticating with the literal string.
   #
   # So there is no need for *File option variants or LoadCredential juggling:
   # point the token options at /run/secrets/... and the value is read at runtime.
@@ -257,12 +257,18 @@ in
       type = types.enum [
         "DEBUG"
         "INFO"
-        "WARNING"
+        "WARN"
         "ERROR"
+        # Accepted for configurations written against the Python hub, which used
+        # Python's level names. The hub maps them onto WARN and ERROR.
+        "WARNING"
         "CRITICAL"
       ];
       default = "INFO";
-      description = "Python logging level for the hub.";
+      description = ''
+        Log level for the hub. Logs are structured JSON on stderr, so the
+        journal shows them as-is and `journalctl -o json` can filter on fields.
+      '';
     };
 
     loki = {

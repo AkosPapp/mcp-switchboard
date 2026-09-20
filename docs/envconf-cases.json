@@ -1,0 +1,116 @@
+{
+  "$comment": "Table-driven fixture for the MCP_SWITCHBOARD_* settings rules (spec.md P3/V4). The Python client and the Go hub each run every case, so the substitution semantics cannot diverge. '{{dir}}' is replaced by the runner's temp directory, which is populated from 'files' and 'dirs' before the cases run.",
+  "prefix": "MCP_SWITCHBOARD_",
+  "files": {
+    "token": "s3cr3t\n",
+    "padded": "  spaced  \n\n",
+    "empty": "",
+    "number": "8123\n",
+    "flag": "true\n"
+  },
+  "dirs": ["datadir"],
+  "cases": [
+    {
+      "name": "literal value passes through",
+      "env": {"MCP_SWITCHBOARD_LABEL": "legion5"},
+      "get": {"name": "LABEL", "kind": "str"},
+      "expect": "legion5"
+    },
+    {
+      "name": "unset falls back to the default",
+      "env": {},
+      "get": {"name": "LABEL", "kind": "str", "default": "fallback"},
+      "expect": "fallback"
+    },
+    {
+      "name": "empty string is treated as unset",
+      "env": {"MCP_SWITCHBOARD_LABEL": ""},
+      "get": {"name": "LABEL", "kind": "str", "default": "fallback"},
+      "expect": "fallback"
+    },
+    {
+      "name": "a path to a regular file is replaced by its contents",
+      "env": {"MCP_SWITCHBOARD_TUNNEL_TOKEN": "{{dir}}/token"},
+      "get": {"name": "TUNNEL_TOKEN", "kind": "str"},
+      "expect": "s3cr3t"
+    },
+    {
+      "name": "file contents are stripped of surrounding whitespace",
+      "env": {"MCP_SWITCHBOARD_TUNNEL_TOKEN": "{{dir}}/padded"},
+      "get": {"name": "TUNNEL_TOKEN", "kind": "str"},
+      "expect": "spaced"
+    },
+    {
+      "name": "an empty file substitutes to an empty string",
+      "env": {"MCP_SWITCHBOARD_TUNNEL_TOKEN": "{{dir}}/empty"},
+      "get": {"name": "TUNNEL_TOKEN", "kind": "str"},
+      "expect": ""
+    },
+    {
+      "name": "a directory is never substituted",
+      "env": {"MCP_SWITCHBOARD_DATA_DIR": "{{dir}}/datadir"},
+      "get": {"name": "DATA_DIR", "kind": "str"},
+      "expect": "{{dir}}/datadir"
+    },
+    {
+      "name": "a non-existent path survives untouched when not secret",
+      "env": {"MCP_SWITCHBOARD_DATA_DIR": "{{dir}}/nope"},
+      "get": {"name": "DATA_DIR", "kind": "str"},
+      "expect": "{{dir}}/nope"
+    },
+    {
+      "name": "a non-existent path is an error for a secret",
+      "env": {"MCP_SWITCHBOARD_TUNNEL_TOKEN": "{{dir}}/nope"},
+      "get": {"name": "TUNNEL_TOKEN", "kind": "str", "secret": true},
+      "expect": {"error": true}
+    },
+    {
+      "name": "a relative path is never substituted",
+      "env": {"MCP_SWITCHBOARD_TUNNEL_TOKEN": "token"},
+      "get": {"name": "TUNNEL_TOKEN", "kind": "str", "secret": true},
+      "expect": "token"
+    },
+    {
+      "name": "integers parse",
+      "env": {"MCP_SWITCHBOARD_TUNNEL_PORT": "8097"},
+      "get": {"name": "TUNNEL_PORT", "kind": "int", "default": 1},
+      "expect": 8097
+    },
+    {
+      "name": "integers read from a file",
+      "env": {"MCP_SWITCHBOARD_TUNNEL_PORT": "{{dir}}/number"},
+      "get": {"name": "TUNNEL_PORT", "kind": "int", "default": 1},
+      "expect": 8123
+    },
+    {
+      "name": "a malformed integer is an error",
+      "env": {"MCP_SWITCHBOARD_TUNNEL_PORT": "eight"},
+      "get": {"name": "TUNNEL_PORT", "kind": "int", "default": 1},
+      "expect": {"error": true}
+    },
+    {
+      "name": "booleans accept the usual spellings",
+      "env": {"MCP_SWITCHBOARD_HARNESS": "ON"},
+      "get": {"name": "HARNESS", "kind": "bool", "default": false},
+      "expect": true
+    },
+    {
+      "name": "booleans read from a file",
+      "env": {"MCP_SWITCHBOARD_HARNESS": "{{dir}}/flag"},
+      "get": {"name": "HARNESS", "kind": "bool", "default": false},
+      "expect": true
+    },
+    {
+      "name": "a malformed boolean is an error",
+      "env": {"MCP_SWITCHBOARD_HARNESS": "maybe"},
+      "get": {"name": "HARNESS", "kind": "bool", "default": false},
+      "expect": {"error": true}
+    },
+    {
+      "name": "floats parse",
+      "env": {"MCP_SWITCHBOARD_STOP_WAIT_TIMEOUT": "2.5"},
+      "get": {"name": "STOP_WAIT_TIMEOUT", "kind": "float", "default": 5.0},
+      "expect": 2.5
+    }
+  ]
+}

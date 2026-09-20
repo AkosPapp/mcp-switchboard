@@ -46,11 +46,16 @@ in
 {
   inherit workspace pythonSet python;
 
-  hub = pythonSet.mkVirtualEnv "mcp-switchboard-hub-env" {
-    mcp-switchboard-hub = [ ];
-  };
-
+  # No hub here: it is Go now and is built by ../nix/hub.nix. The Python hub
+  # under legacy/ stays a workspace member so its tests still run, but nothing
+  # packages or ships it.
   client = pythonSet.mkVirtualEnv "mcp-switchboard-client-env" {
     mcp-switchboard-client = [ ];
+  };
+
+  # The first-party MCP server the client runs by default. Packaged separately
+  # because the client depends on it, and because it is useful on its own.
+  harness = pythonSet.mkVirtualEnv "mcp-switchboard-server-harness-env" {
+    mcp-switchboard-server-harness = [ ];
   };
 }

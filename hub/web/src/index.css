@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * The palette carries over from the console this replaces. Values are raw RGB
+ * channels so Tailwind's <alpha-value> works, and they live on :root rather
+ * than in the Tailwind config so dark mode is one redefinition instead of a
+ * dark: variant on every utility (spec.md U4).
+ */
+:root {
+  --bg: 250 250 249;
+  --surface: 255 255 255;
+  --raised: 244 244 245;
+  --border: 214 211 209;
+  --text: 28 25 23;
+  --muted: 120 113 108;
+  --accent: 37 99 235;
+  --ok: 22 163 74;
+  --warn: 202 138 4;
+  --danger: 220 38 38;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: 24 24 27;
+    --surface: 32 32 36;
+    --raised: 44 44 49;
+    --border: 63 63 70;
+    --text: 244 244 245;
+    --muted: 161 161 170;
+    --accent: 96 165 250;
+    --ok: 74 222 128;
+    --warn: 250 204 21;
+    --danger: 248 113 113;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: 24 24 27;
+  --surface: 32 32 36;
+  --raised: 44 44 49;
+  --border: 63 63 70;
+  --text: 244 244 245;
+  --muted: 161 161 170;
+  --accent: 96 165 250;
+  --ok: 74 222 128;
+  --warn: 250 204 21;
+  --danger: 248 113 113;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-bg text-text antialiased;
+  /* dvh so the composer and drawers sit above a phone's browser chrome. */
+  min-height: 100dvh;
+}
+
+/* Tap targets stay at 44px on touch devices (spec.md U2). */
+@media (pointer: coarse) {
+  button,
+  a[role="button"],
+  [role="treeitem"],
+  select,
+  input[type="search"] {
+    min-height: 44px;
+  }
+}
+
+/* A focus ring that is visible in both themes and never on a mouse click. */
+:focus-visible {
+  @apply outline-none ring-2 ring-accent ring-offset-2;
+  --tw-ring-offset-color: rgb(var(--bg));
+}

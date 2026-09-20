@@ -26,59 +26,72 @@
 #     ghcr.io/akospapp/mcp-switchboard-hub:latest
 
 # ---------------------------------------------------------------------------
-# build stage: resolve the locked workspace into a self-contained venv
+# build stage: one static binary, console included
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim AS build
+# --platform=$BUILDPLATFORM pins this stage to the machine doing the building,
+# and the go build below targets $TARGETARCH. Go cross-compiles, so an arm64
+# image needs no QEMU: emulating a compiler was the expensive half of the image
+# this replaces.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 
-# Pinned so an image rebuild cannot silently change the resolver.
-COPY --from=ghcr.io/astral-sh/uv:0.11.21 /uv /usr/local/bin/uv
+WORKDIR /src/hub
 
-ENV UV_LINK_MODE=copy \
-    UV_COMPILE_BYTECODE=1 \
-    UV_PYTHON_DOWNLOADS=never \
-    UV_PROJECT_ENVIRONMENT=/opt/venv
+# Dependencies first, so editing the hub's own source does not re-download the
+# module cache on every build.
+COPY hub/go.mod hub/go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
-WORKDIR /src
+# The console is committed at hub/web/dist and embedded by hub/web/embed.go, so
+# there is no node stage here: one toolchain, and an offline build works. CI
+# rebuilds the console and fails if that committed copy is stale (spec.md U1).
+COPY hub/ ./
 
-# The repo is a uv workspace: the root pyproject.toml is a bare marker and the
-# single uv.lock covers every member (hub, client and servers/harness), so all
-# their manifests must be present even though only the hub is installed. Copy
-# the manifests first so dependency resolution caches independently of the
-# source.
-COPY pyproject.toml uv.lock ./
-COPY hub/pyproject.toml ./hub/
-COPY client/pyproject.toml ./client/
-COPY servers/harness/pyproject.toml ./servers/harness/
+# Supplied by buildx per target platform; VERSION comes from the workflow's
+# image tag, and defaults so a plain `docker build` still works.
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=0.0.0+docker
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-install-workspace --package mcp-switchboard-hub
-
-# Now the code. --no-editable makes the venv hold a real installed copy, so the
-# runtime stage does not need /src at all.
-COPY hub ./hub
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable --package mcp-switchboard-hub
+# CGO_ENABLED=0 with a pure-Go SQLite driver is what makes the runtime stage
+# able to be this small - no libc to match, nothing to link against - and it is
+# also what makes the cross-build above a plain environment variable rather than
+# a cross toolchain.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
+      -ldflags "-s -w -X main.version=${VERSION}" \
+      -o /out/mcp-switchboard-hub ./cmd/mcp-switchboard-hub
 
 # ---------------------------------------------------------------------------
-# runtime stage: interpreter + venv, no uv, no build tooling, no source tree
+# runtime stage: the binary, a user to run it as, and nothing else
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim AS runtime
+#
+# alpine rather than scratch: a non-root user needs /etc/passwd, the volume
+# needs an owner, and TLS to an LLM provider or a Loki endpoint needs a CA
+# bundle. That is three reasons for ~8MB.
+FROM alpine:3.21 AS runtime
 
-RUN groupadd --system --gid 10001 switchboard \
- && useradd --system --uid 10001 --gid switchboard --home /var/lib/mcp-switchboard switchboard \
+RUN apk add --no-cache ca-certificates tzdata \
+ && addgroup -S -g 10001 switchboard \
+ && adduser -S -u 10001 -G switchboard -h /var/lib/mcp-switchboard switchboard \
  && install -d -o switchboard -g switchboard -m 0750 /var/lib/mcp-switchboard
 
-COPY --from=build /opt/venv /opt/venv
-
-ENV PATH="/opt/venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+COPY --from=build /out/mcp-switchboard-hub /usr/local/bin/mcp-switchboard-hub
 
 WORKDIR /var/lib/mcp-switchboard
 USER switchboard
 
 VOLUME ["/var/lib/mcp-switchboard"]
+
+# Both listeners. The tunnel one is the only that is meant to face a network.
+EXPOSE 8097 8099
+
+# The hub answers /health on both listeners, without a token, precisely so this
+# works. curl is not installed, so the check uses the binary's own listener via
+# wget from busybox.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -q -O /dev/null "http://127.0.0.1:${MCP_SWITCHBOARD_PRIVATE_PORT:-8099}/health" || exit 1
 
 LABEL org.opencontainers.image.title="mcp-switchboard-hub" \
       org.opencontainers.image.description="Aggregating MCP gateway for outbound tunnels" \

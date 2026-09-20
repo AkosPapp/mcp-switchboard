@@ -59,8 +59,11 @@
           switchboard = mkSwitchboard final;
         in
         {
-          mcp-switchboard-hub = switchboard.hub;
+          # The hub is Go and owes nothing to the Python set; the client and the
+          # harness still come out of uv.lock.
+          mcp-switchboard-hub = final.callPackage ./nix/hub.nix { };
           mcp-switchboard-client = switchboard.client;
+          mcp-switchboard-server-harness = switchboard.harness;
         };
 
       nixosModules.default = import ./nix/module.nix;
@@ -74,6 +77,8 @@
 
         switchboard = mkSwitchboard pkgs;
         inherit (switchboard) workspace pythonSet python;
+
+        hub = pkgs.callPackage ./nix/hub.nix { };
 
         # Dev shell: the full workspace closure - both members plus every extra,
         # which is where pytest and pytest-asyncio come from - with hub/ and
@@ -92,6 +97,14 @@
                 # An editable install only needs the metadata and the package
                 # dir; narrowing the source keeps the shell from rebuilding
                 # every time an unrelated file in the repo changes.
+                #
+                # EVERY editable workspace member has to go through this, not
+                # just the ones whose source is worth narrowing: hatchling's
+                # build_editable imports `editables`, which uv does not lock
+                # because it is a build-time dependency. A member left out of
+                # the list below fails with "No module named 'editables'" the
+                # next time someone runs `nix develop` - which is exactly what
+                # happened when the harness became a member.
                 trim =
                   name: module:
                   prev.${name}.overrideAttrs (old: {
@@ -112,6 +125,7 @@
               {
                 mcp-switchboard-hub = trim "mcp-switchboard-hub" "mcp_switchboard_hub";
                 mcp-switchboard-client = trim "mcp-switchboard-client" "mcp_switchboard_client";
+                mcp-switchboard-server-harness = trim "mcp-switchboard-server-harness" "mcp_switchboard_server_harness";
               }
             )
           ]
@@ -125,14 +139,15 @@
       in
       {
         packages = {
-          inherit (switchboard) hub client;
-          default = switchboard.hub;
+          inherit hub;
+          inherit (switchboard) client harness;
+          default = hub;
         };
 
         apps = {
           hub = {
             type = "app";
-            program = "${switchboard.hub}/bin/mcp-switchboard-hub";
+            program = "${hub}/bin/mcp-switchboard-hub";
             meta.description = "Run the mcp-switchboard hub";
           };
           client = {
@@ -144,21 +159,39 @@
         };
 
         checks = {
-          inherit (switchboard) hub client;
+          inherit hub;
+          inherit (switchboard) client harness;
 
-          # Cheap guard against the two packages silently swapping identities,
-          # and against the client growing an `mcp` dependency (it is meant to
-          # speak no MCP at all - see docs/PROTOCOL.md).
+          # Cheap guard against the packages silently swapping identities, and
+          # against the client growing an `mcp` dependency (it is meant to speak
+          # no MCP at all - see docs/PROTOCOL.md).
           package-shape = pkgs.runCommand "mcp-switchboard-package-shape" { } ''
-            test -x ${switchboard.hub}/bin/mcp-switchboard-hub
+            test -x ${hub}/bin/mcp-switchboard-hub
             test -x ${switchboard.client}/bin/mcp-switchboard-client
 
-            # NB: stdenv sets `shopt -s nullglob`, so a non-matching glob
-            # vanishes rather than being passed through literally - hence the
-            # explicit loop instead of testing a glob directly.
+            # The console has to be inside the binary, not fetched at runtime
+            # (spec.md U1). Nothing else in the hub mentions a script tag.
+            ${hub}/bin/mcp-switchboard-hub --version > /dev/null
+            if ! grep -qa "<!doctype html>" ${hub}/bin/mcp-switchboard-hub; then
+              echo "the hub binary does not carry the console" >&2
+              exit 1
+            fi
+
+            # The client is a dumb pipe: it shuttles bytes for MCP servers and
+            # speaks none of the protocol itself (docs/PROTOCOL.md). What it may
+            # NOT do is import the SDK.
+            #
+            # This used to assert that `mcp` was absent from the client's
+            # closure, which stopped being true when the client started shipping
+            # the harness - a real MCP server, which of course needs the SDK. So
+            # the check looks at the client's own modules instead, which is the
+            # invariant that was actually meant. The regex excludes
+            # mcp_switchboard_* by requiring a non-identifier character after
+            # "mcp".
             for sitePackages in ${switchboard.client}/lib/python*/site-packages; do
-              if [ -e "$sitePackages/mcp" ]; then
-                echo "mcp-switchboard-client must not depend on the mcp package" >&2
+              if grep -rEn '^[[:space:]]*(import|from)[[:space:]]+mcp([^_[:alnum:]]|$)' \
+                   "$sitePackages/mcp_switchboard_client/"; then
+                echo "mcp-switchboard-client must not import the mcp SDK" >&2
                 exit 1
               fi
             done
@@ -172,7 +205,7 @@
           vm = import ./nix/vm-test.nix {
             inherit pkgs mcpPython;
             module = self.nixosModules.default;
-            hubPackage = switchboard.hub;
+            hubPackage = hub;
             clientPackage = switchboard.client;
             fakeMcpServerSource = ./tests/fake_mcp_server.py;
           };
@@ -186,6 +219,16 @@
             pkgs.ruff
             pkgs.uv
             pkgs.nixfmt
+
+            # The hub is Go now (spec.md 0.1), and the console is a Vite build
+            # embedded into the binary. gcc is here only for `go test -race`,
+            # which needs cgo; the shipped binary is still CGO_ENABLED=0 with a
+            # pure-Go SQLite driver, which is what keeps it statically linkable.
+            pkgs.go
+            pkgs.gopls
+            pkgs.golangci-lint
+            pkgs.gcc
+            pkgs.nodejs_22
           ];
 
           env = {

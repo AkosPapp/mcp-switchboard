@@ -473,7 +473,7 @@ provides-extras = ["test"]
 [[package]]
 name = "mcp-switchboard-hub"
 version = "0.3.0"
-source = { editable = "hub" }
+source = { editable = "legacy/hub" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "fastapi" },

@@ -120,7 +120,7 @@ An `mcp.json` is optional: with none in the current directory the client tunnels
 built-in harness. The client also adds a built-in `harness` server (files, search, git, shell, background
 processes) by default, confined to the directory you start the client in; pass
 `--no-harness` to leave it out. It gives a shell to anyone who can reach `/mcp`, so read
-[the security model](spec.md#5-security-model) first.
+[the security model](spec.md#10-security-model) first.
 
 An entry may carry a `"project"` to group it (a top-level `"project"` sets the default
 for every entry without one). Servers in a project are exposed under an extra scope, see

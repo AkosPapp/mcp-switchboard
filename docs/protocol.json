@@ -1,0 +1,39 @@
+{
+  "$comment": "Normative manifest for tunnel protocol v1. docs/PROTOCOL.md is the prose source of truth; this file is its machine-readable projection, and every implementation checks itself against it (spec.md P1/P2). Add a frame here and both languages fail until they carry it.",
+  "protocolVersion": 1,
+  "tunnelPath": "/tunnel/v1",
+  "nameSeparator": "__",
+  "serverStates": ["starting", "running", "exited", "failed"],
+  "frames": {
+    "hello": {
+      "direction": "client->hub",
+      "required": ["type", "protocol", "client", "servers"],
+      "optional": []
+    },
+    "hello_ack": {
+      "direction": "hub->client",
+      "required": ["type", "connectionId", "hub"],
+      "optional": []
+    },
+    "mcp": {
+      "direction": "both",
+      "required": ["type", "server", "payload"],
+      "optional": []
+    },
+    "server_state": {
+      "direction": "client->hub",
+      "required": ["type", "server", "state"],
+      "optional": ["exitCode", "error"]
+    },
+    "restart": {
+      "direction": "hub->client",
+      "required": ["type", "server"],
+      "optional": []
+    },
+    "error": {
+      "direction": "both",
+      "required": ["type", "message"],
+      "optional": ["server"]
+    }
+  }
+}

@@ -233,6 +233,20 @@ pkgs.testers.runNixOSTest {
     with subtest("prometheus metrics are exported"):
         hub.succeed("curl -fsS ${api}/metrics | grep -q mcpsb_tool_calls_total")
 
+    with subtest("the console is served out of the binary"):
+        # Nothing is fetched at runtime: the built console is embedded, so this
+        # also proves the asset the index names is in there (spec.md U1).
+        hub.succeed("curl -fsS ${api}/ | grep -qi '<!doctype html'")
+        asset = hub.succeed(
+            "curl -fsS ${api}/ | grep -o '/assets/[^\"]*\\.js' | head -1"
+        ).strip()
+        assert asset, "the console index named no script"
+        hub.succeed(f"curl -fsS '${api}{asset}' > /dev/null")
+
+        # A deep link is served by the hub's fallback rather than by the router
+        # alone, so a reload on /calls has to work.
+        hub.succeed("curl -fsS ${api}/calls | grep -qi '<!doctype html'")
+
     with subtest("the private listener is not reachable from the client machine"):
         # The reason the hub has two listeners at all: only the token-guarded
         # tunnel port faces the network.

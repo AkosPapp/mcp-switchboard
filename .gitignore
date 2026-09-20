@@ -5,6 +5,10 @@ __pycache__/
 venv/
 build/
 dist/
+# ...except the console's, which is committed on purpose: the hub embeds it, so
+# `go build` has to work without npm (spec.md U1). CI rebuilds it and fails if
+# this copy is stale.
+!hub/web/dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

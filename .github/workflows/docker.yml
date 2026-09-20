@@ -8,8 +8,6 @@ on:
     paths:
       - "Dockerfile"
       - ".dockerignore"
-      - "uv.lock"
-      - "pyproject.toml"
       - "hub/**"
       - ".github/workflows/docker.yml"
   workflow_dispatch:
@@ -40,10 +38,11 @@ jobs:
           owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "name=${{ env.REGISTRY }}/$owner/mcp-switchboard-hub" >> "$GITHUB_OUTPUT"
 
-      # arm64 is emulated, so it roughly triples the build. The hub is pure
-      # Python on top of a slim base, which keeps that tolerable (a couple of
-      # minutes), and the wheels it installs are all either py3-none-any or have
-      # native aarch64 wheels on PyPI - nothing gets compiled under QEMU.
+      # QEMU is still needed, but only for the runtime stage: `apk add` and
+      # `adduser` run as the target architecture. The expensive half - the
+      # compile - is cross-compiled natively on amd64 via GOARCH, so an arm64
+      # image costs seconds of emulation rather than minutes (see the
+      # Dockerfile's --platform=$BUILDPLATFORM build stage).
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
@@ -86,6 +85,8 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

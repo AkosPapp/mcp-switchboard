@@ -1,57 +1,39 @@
-# Keep the build context to the workspace manifests plus hub/ source.
-# Everything below either bloats the context or would invalidate the layer cache
-# on every commit for no reason.
+# The image is one Go binary, so the context is hub/ and nothing else.
+#
+# Written as "exclude everything, then add back" rather than as a list of
+# exclusions: the hub is now the only thing that gets built here, and a new
+# top-level directory should not silently start bloating the context or busting
+# the layer cache.
+*
+!hub/
 
-.git
-.github
-.gitignore
-.dockerignore
-Dockerfile
+# Inside hub/, the build reads the module files, the Go source, and the built
+# console that embed.go carries into the binary. The rest is either build-time
+# tooling or already compiled into dist/.
+#
+# node_modules is ~200MB that never reaches the image; the console's TypeScript
+# is already built; the Playwright suite needs a running hub and a browser, so
+# it could not run in here anyway.
+hub/web/node_modules/
+hub/web/src/
+hub/web/e2e/
+hub/web/public/
+hub/web/test-results/
+hub/web/playwright-report/
+hub/web/package.json
+hub/web/package-lock.json
+hub/web/*.config.*
+hub/web/tsconfig*.json
+hub/web/index.html
 
-# Nix
-flake.nix
-flake.lock
-nix/
-result
-result-*
+# Go tests do not run in the image build - CI runs them, with -race, which needs
+# a toolchain this stage deliberately does not have.
+hub/**/*_test.go
+hub/**/testdata/
 
-# Local state and secrets - never let these near an image layer
-.env
-.env.*
-!.env.example
-.venv
-venv
+# Local state that must never reach a layer.
 *.db
 *.sqlite
 *.sqlite3
-
-# Python build/test detritus
-__pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-build/
-dist/
-htmlcov/
-.coverage
-.coverage.*
-
-# Docs and repo furniture the hub does not need at runtime.
-# NOTE: hub/README.md is NOT excluded - hub/pyproject.toml declares
-# `readme = "README.md"`, so hatchling needs it in the context.
-docs/
-# servers/ is excluded except the harness manifest: it is a uv workspace member,
-# and `uv sync --locked` refuses to run unless every member's pyproject.toml is
-# present, even though only the hub gets installed.
-servers/**
-!servers/harness/pyproject.toml
-install.sh
-mcp.json
-tests/
-
-# Editor / OS
-.idea/
-.vscode/
-.DS_Store
+.env
+.env.*

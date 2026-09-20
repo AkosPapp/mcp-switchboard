@@ -4,11 +4,15 @@
     {
       "label": "Switchboard: hub",
       "type": "shell",
-      "command": "uv run mcp-switchboard-hub",
+      // --env-file is spelled out because the task runs from hub/ (where the Go
+      // module is) while .env lives at the repo root; the hub's own default is
+      // ./.env relative to its working directory.
+      "command": "go run ./cmd/mcp-switchboard-hub --env-file ${workspaceFolder}/.env",
+      "options": { "cwd": "${workspaceFolder}/hub" },
       "isBackground": true,
       "problemMatcher": [],
       "presentation": { "panel": "dedicated", "group": "switchboard" },
-      "detail": "Hub: tunnel on 127.0.0.1:8097, console + /mcp on http://127.0.0.1:8099 (settings from .env)"
+      "detail": "Hub: tunnel on 127.0.0.1:8097, console + /mcp on http://127.0.0.1:8099 (settings from the repo's .env)"
     },
     {
       "label": "Switchboard: client",
@@ -24,6 +28,89 @@
       "dependsOn": ["Switchboard: hub", "Switchboard: client"],
       "dependsOrder": "parallel",
       "problemMatcher": []
+    },
+    {
+      "label": "Console: dev server",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": { "cwd": "${workspaceFolder}/hub/web" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "panel": "dedicated", "group": "switchboard" },
+      "detail": "Vite on :5173 with hot reload, proxying /api and /mcp to a hub on :8099. Run the hub task too."
+    },
+    {
+      "label": "Console: build",
+      "type": "shell",
+      "command": "npm run build",
+      "options": { "cwd": "${workspaceFolder}/hub/web" },
+      "problemMatcher": ["$tsc"],
+      "presentation": { "panel": "dedicated", "group": "switchboard" },
+      "detail": "Rebuild hub/web/dist, which the hub binary embeds. Commit the result - CI fails if it is stale."
+    },
+    {
+      "label": "Test: hub (go)",
+      "type": "shell",
+      "command": "go test ./... -race",
+      "options": { "cwd": "${workspaceFolder}/hub" },
+      "group": "test",
+      "problemMatcher": ["$go"],
+      "presentation": { "panel": "dedicated", "group": "switchboard-test" },
+      "detail": "Go unit tests with the race detector (needs a C compiler; the dev shell has one)."
+    },
+    {
+      "label": "Test: console (vitest)",
+      "type": "shell",
+      "command": "npm test",
+      "options": { "cwd": "${workspaceFolder}/hub/web" },
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": { "panel": "dedicated", "group": "switchboard-test" },
+      "detail": "Component and hook tests for the console."
+    },
+    {
+      "label": "Test: console end-to-end (playwright)",
+      "type": "shell",
+      "command": "go build -o \"$TMPDIR/mcp-switchboard-hub\" ./cmd/mcp-switchboard-hub && cd web && MCP_SWITCHBOARD_HUB_BINARY=\"$TMPDIR/mcp-switchboard-hub\" npm run test:e2e",
+      "options": {
+        "cwd": "${workspaceFolder}/hub",
+        "env": { "CGO_ENABLED": "0", "TMPDIR": "${workspaceFolder}/hub/web/test-results" }
+      },
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": { "panel": "dedicated", "group": "switchboard-test" },
+      "detail": "Drives the built binary with a real client behind it. Needs browsers: npx playwright install chromium."
+    },
+    {
+      "label": "Test: python (client, harness, end-to-end)",
+      "type": "shell",
+      "command": "go build -o \"$TMPDIR/mcp-switchboard-hub\" ./cmd/mcp-switchboard-hub && cd .. && MCP_SWITCHBOARD_HUB_BINARY=\"$TMPDIR/mcp-switchboard-hub\" uv run pytest client/tests servers/harness/tests tests -q",
+      "options": {
+        "cwd": "${workspaceFolder}/hub",
+        "env": { "CGO_ENABLED": "0", "TMPDIR": "${workspaceFolder}/hub/web/test-results" }
+      },
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": { "panel": "dedicated", "group": "switchboard-test" },
+      "detail": "The acceptance suite runs a real client against the compiled hub, so it builds the binary first."
+    },
+    {
+      "label": "Build: container image",
+      "type": "shell",
+      "command": "docker build -t mcp-switchboard-hub:dev .",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": { "panel": "dedicated", "group": "switchboard" },
+      "detail": "Builds the shipped image. Uses the committed hub/web/dist, so build the console first if you changed it."
+    },
+    {
+      "label": "Build: nix package",
+      "type": "shell",
+      "command": "nix build .#hub",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": { "panel": "dedicated", "group": "switchboard" },
+      "detail": "Builds the hub the way the NixOS module consumes it. Nix only sees git-tracked files, so `git add` new ones first."
     }
   ]
 }
