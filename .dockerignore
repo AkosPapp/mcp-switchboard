@@ -7,24 +7,19 @@
 *
 !hub/
 
-# Inside hub/, the build reads the module files, the Go source, and the built
-# console that embed.go carries into the binary. The rest is either build-time
-# tooling or already compiled into dist/.
+# Inside hub/, the build reads the module files and the Go source, and (in the
+# console stage) hub/web's own source and npm lockfile - not a prebuilt dist/,
+# which the console stage produces itself.
 #
-# node_modules is ~200MB that never reaches the image; the console's TypeScript
-# is already built; the Playwright suite needs a running hub and a browser, so
-# it could not run in here anyway.
+# node_modules is ~200MB that never needs to cross the build context (npm ci
+# installs it inside the stage instead); the Playwright suite needs a running
+# hub and a browser, so it could not run in here anyway.
 hub/web/node_modules/
-hub/web/src/
+hub/web/dist/
 hub/web/e2e/
-hub/web/public/
 hub/web/test-results/
 hub/web/playwright-report/
-hub/web/package.json
-hub/web/package-lock.json
-hub/web/*.config.*
-hub/web/tsconfig*.json
-hub/web/index.html
+hub/web/*.tsbuildinfo
 
 # Go tests do not run in the image build - CI runs them, with -race, which needs
 # a toolchain this stage deliberately does not have.

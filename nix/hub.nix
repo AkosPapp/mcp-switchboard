@@ -1,13 +1,11 @@
-# The hub, built from hub/ with buildGoModule.
-#
-# No npm anywhere in this derivation: the console's build output is committed at
-# hub/web/dist and embedded by hub/web/embed.go (spec.md U1), so a Nix build
-# needs one toolchain rather than two, and an offline build works. CI rebuilds
-# the console and fails if that committed copy is stale, which is what keeps the
-# arrangement honest.
+# The hub, built from hub/ with buildGoModule. The console (hub/web) is built
+# separately by console.nix - via Nix's own npm support, not a committed
+# dist/ - and copied into place below before the Go build reads it through
+# hub/web/embed.go's `go:embed all:dist` (spec.md U1).
 {
   lib,
   buildGoModule,
+  console,
   version ? "0.3.0",
 }:
 
@@ -17,7 +15,8 @@ buildGoModule (finalAttrs: {
 
   # Only what the build reads. Narrowed with a fileset rather than by copying
   # hub/ wholesale, so an edit to a test fixture or to node_modules does not
-  # invalidate the derivation.
+  # invalidate the derivation. hub/web/dist is not part of this: it is not
+  # committed, and postPatch below fills it in from `console` instead.
   src = lib.fileset.toSource {
     root = ../hub;
     fileset = lib.fileset.unions [
@@ -26,9 +25,16 @@ buildGoModule (finalAttrs: {
       ../hub/cmd
       ../hub/internal
       ../hub/web/embed.go
-      ../hub/web/dist
     ];
   };
+
+  # `go:embed all:dist` (hub/web/embed.go) needs this directory to exist with
+  # real content before configurePhase, or the build fails outright - which
+  # includes doCheck's `go test` below, not just the final binary.
+  postPatch = ''
+    mkdir -p web/dist
+    cp -r ${console}/. web/dist/
+  '';
 
   vendorHash = "sha256-i3Cp9CZ6oa30Ds7L3Buf/6ViOfh+KdiSS7KyKWfqrkQ=";
 

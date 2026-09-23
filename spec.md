@@ -1133,11 +1133,13 @@ serves hashed assets with long cache headers.
 - **U1. Single artifact.** `go build` produces one binary containing the console. Nothing is
   fetched at runtime; the loopback-only-box constraint that made the old console build-free is
   satisfied by building ahead of time instead of not building at all.
-  **`hub/web/dist/` is committed**, because `go build` has to work without npm — for `go install`,
-  for the Nix build, and for anyone who checks the repo out to change one line of Go. `npm run
-  build` in `hub/web` regenerates it. The Vite build is byte-reproducible for a given lockfile and
-  node version, so CI rebuilds it and fails on any diff; that is a real check rather than a
-  heuristic about timestamps.
+  `hub/web/dist/` is **not** committed: `npm run build` in `hub/web` has to produce it before any
+  `go build`/`go vet`/`go test` against `hub/`, or `embed.go`'s `go:embed all:dist` fails outright
+  with "no matching files". Every build path does this itself rather than trusting a checked-in
+  copy - CI's `hub (go)`, `end-to-end` and `console (playwright)` jobs each run `npm ci && npm run
+  build` first, the Nix package builds the console with its own derivation (`nix/console.nix`, via
+  `buildNpmPackage`) and copies its output in, and the Docker image has a dedicated `node:alpine`
+  stage for it.
 - **U1a. Asset URLs are absolute** (`base: "/"`). Every unmatched path serves `index.html` so
   client-side routing works, which means a relative asset URL would resolve against whatever route
   the browser is showing — `/calls/` would ask for `/calls/assets/…`. A hub behind a
@@ -1792,10 +1794,9 @@ New:
   search (U6) needs FTS5 and pure-Go drivers differ on whether they ship it; V5 asserts an FTS5
   query works, so a driver swap that drops it fails CI rather than surfacing as an empty search
   box.
-- **E2. Dockerfile** becomes **two** stages, not three: a Go stage building the binary and a
-  minimal runtime stage with a non-root user and the `/var/lib/mcp-switchboard` volume. There is no
-  node stage, because `web/dist` is committed (U1) — one toolchain in the image build, and an
-  offline build works. The runtime stage is `FROM alpine` rather than `scratch`: a non-root user
+- **E2. Dockerfile** is three stages: a node stage building the console (U1), a Go stage building
+  the binary against that output, and a minimal runtime stage with a non-root user and the
+  `/var/lib/mcp-switchboard` volume. The runtime stage is `FROM alpine` rather than `scratch`: a non-root user
   needs `/etc/passwd`, the volume needs an owner, TLS to Loki or an LLM provider needs a CA bundle,
   and the healthcheck needs a shell. That is ~8 MB for four reasons, against a 26 MB image.
   The build stage is pinned to `--platform=$BUILDPLATFORM` and cross-compiles via `GOARCH`, so an

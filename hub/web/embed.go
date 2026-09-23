@@ -4,10 +4,10 @@
 // live in internal/console, which takes an fs.FS so they can be tested without
 // a build of the console sitting on disk.
 //
-// dist/ is committed for the same reason it is embedded - `go build` has to
-// work without npm, for `go install`, for the Nix build and for anyone who
-// checks the repo out to fix one line of Go. CI rebuilds it and fails if the
-// committed copy is stale (spec.md U1).
+// dist/ is not committed: `npm run build` in hub/web (or `nix build`, which
+// does this itself - see nix/console.nix) has to produce it before any `go
+// build`/`go vet`/`go test` here, or the embed below fails outright with "no
+// matching files" (spec.md U1).
 package web
 
 import (

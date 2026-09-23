@@ -50,7 +50,19 @@ jobs:
         with:
           go-version: "1.26"
           cache-dependency-path: hub/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: hub/web/package-lock.json
       - run: pip install -e ./servers/harness -e "./client[test]"
+      # hub/web/dist is not committed (Nix builds it too, from the same
+      # package-lock.json - see nix/console.nix): build it before the hub
+      # binary that embeds it via hub/web/embed.go's `go:embed all:dist`.
+      - run: npm ci
+        working-directory: hub/web
+      - run: npm run build
+        working-directory: hub/web
       # The hub under test is the shipped artifact: the same CGO-free binary the
       # container and the Nix package build, not an in-process import of it.
       - name: build the hub
@@ -74,6 +86,19 @@ jobs:
         with:
           go-version: "1.26"
           cache-dependency-path: hub/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: hub/web/package-lock.json
+      # hub/web/dist is not committed (Nix builds it too, from the same
+      # package-lock.json - see nix/console.nix): every Go command below
+      # compiles hub/web/embed.go's `go:embed all:dist`, which fails outright
+      # without this.
+      - run: npm ci
+        working-directory: hub/web
+      - run: npm run build
+        working-directory: hub/web
       # -race needs cgo, which is why this job does not set CGO_ENABLED=0. The
       # shipped binary still builds without cgo; the build step below proves it.
       - run: go vet ./...
@@ -106,17 +131,6 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
-      # dist/ is committed because `go build` has to work without npm, so it can
-      # go stale. The Vite build is byte-reproducible for a given lockfile and
-      # node version, which is what makes rebuilding and diffing a reliable
-      # check rather than a flaky one (spec.md U1).
-      - name: dist/ is up to date
-        run: |
-          if ! git diff --quiet -- dist; then
-            echo "hub/web/dist is stale. Run 'npm run build' in hub/web and commit the result." >&2
-            git diff --stat -- dist >&2
-            exit 1
-          fi
 
   console-e2e:
     name: console (playwright)
@@ -136,14 +150,16 @@ jobs:
         with:
           python-version: "3.13"
       # The suite drives the shipped binary with a real client behind it, so it
-      # needs all three toolchains. The console comes from dist/, which is
-      # committed, so no npm build step is required to produce the binary.
+      # needs all three toolchains. hub/web/dist is not committed (Nix builds
+      # it too - see nix/console.nix), so it has to be built here first.
       - run: pip install -e ./servers/harness -e ./client
+      - run: npm ci
+        working-directory: hub/web
+      - run: npm run build
+        working-directory: hub/web
       - name: build the hub
         run: CGO_ENABLED=0 go build -o "$RUNNER_TEMP/mcp-switchboard-hub" ./cmd/mcp-switchboard-hub
         working-directory: hub
-      - run: npm ci
-        working-directory: hub/web
       - run: npx playwright install --with-deps chromium
         working-directory: hub/web
       - run: npm run test:e2e

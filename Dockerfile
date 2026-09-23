@@ -26,6 +26,24 @@
 #     ghcr.io/akospapp/mcp-switchboard-hub:latest
 
 # ---------------------------------------------------------------------------
+# console stage: the web console, built by npm from its own lockfile
+# ---------------------------------------------------------------------------
+# --platform=$BUILDPLATFORM: the console is static JS/CSS, architecture-
+# independent, so it is built once for the machine doing the building rather
+# than once per $TARGETARCH.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS console
+
+WORKDIR /src/hub/web
+
+# Dependencies first, so editing the console's source does not reinstall
+# node_modules on every build.
+COPY hub/web/package.json hub/web/package-lock.json ./
+RUN npm ci
+
+COPY hub/web/ ./
+RUN npm run build
+
+# ---------------------------------------------------------------------------
 # build stage: one static binary, console included
 # ---------------------------------------------------------------------------
 # --platform=$BUILDPLATFORM pins this stage to the machine doing the building,
@@ -42,10 +60,9 @@ COPY hub/go.mod hub/go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 
-# The console is committed at hub/web/dist and embedded by hub/web/embed.go, so
-# there is no node stage here: one toolchain, and an offline build works. CI
-# rebuilds the console and fails if that committed copy is stale (spec.md U1).
 COPY hub/ ./
+# hub/web/embed.go's `go:embed all:dist` needs this before the build below.
+COPY --from=console /src/hub/web/dist ./web/dist
 
 # Supplied by buildx per target platform; VERSION comes from the workflow's
 # image tag, and defaults so a plain `docker build` still works.

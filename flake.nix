@@ -61,7 +61,10 @@
         {
           # The hub is Go and owes nothing to the Python set; the client and the
           # harness still come out of uv.lock.
-          mcp-switchboard-hub = final.callPackage ./nix/hub.nix { };
+          mcp-switchboard-console = final.callPackage ./nix/console.nix { };
+          mcp-switchboard-hub = final.callPackage ./nix/hub.nix {
+            console = final.mcp-switchboard-console;
+          };
           mcp-switchboard-client = switchboard.client;
           mcp-switchboard-server-harness = switchboard.harness;
         };
@@ -78,7 +81,8 @@
         switchboard = mkSwitchboard pkgs;
         inherit (switchboard) workspace pythonSet python;
 
-        hub = pkgs.callPackage ./nix/hub.nix { };
+        console = pkgs.callPackage ./nix/console.nix { };
+        hub = pkgs.callPackage ./nix/hub.nix { inherit console; };
 
         # Dev shell: the full workspace closure - both members plus every extra,
         # which is where pytest and pytest-asyncio come from - with hub/ and
@@ -138,7 +142,7 @@
       in
       {
         packages = {
-          inherit hub;
+          inherit hub console;
           inherit (switchboard) client harness;
           default = hub;
         };
