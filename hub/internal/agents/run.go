@@ -232,14 +232,27 @@ func (m *Manager) turn(rs *runState, agent *store.Agent) (turnResult, error) {
 	ctx := rs.ctx
 	plan, err := m.planTurn(ctx, agent, nil) // agent is already effective (resolveAgent)
 	if err != nil {
+		if ctx.Err() != nil { // cancelled while the turn was being set up: a cancel, not a failure
+			return turnResult{kind: turnCancelled}, nil
+		}
 		return turnResult{}, err
 	}
 	cat := plan.cat
 	path, err := m.st.ActivePath(ctx, rs.chatID)
 	if err != nil {
+		if ctx.Err() != nil {
+			return turnResult{kind: turnCancelled}, nil
+		}
 		return turnResult{}, err
 	}
-	msgs := expandSlashSkills(toLLMMessages(path), func() []store.Skill { k, _ := m.st.ListSkills(ctx); return k }())
+	skills, err := m.st.ListSkills(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return turnResult{kind: turnCancelled}, nil
+		}
+		m.log.Warn("could not list skills; /commands are sent as typed", "error", err)
+	}
+	msgs := expandSlashSkills(toLLMMessages(path), skills)
 
 	mc, err := parseModel(agent.Model)
 	if err != nil {
