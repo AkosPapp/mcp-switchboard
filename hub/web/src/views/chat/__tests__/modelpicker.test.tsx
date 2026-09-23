@@ -26,7 +26,7 @@ describe("model picker", () => {
         <MessageView message={message} tools={[]} actions={actions} />
       </MemoryRouter>,
     );
-    const trigger = screen.getByLabelText("regenerate with another model");
+    const trigger = screen.getByLabelText("change reply model");
     expect(trigger.textContent).toContain("qwen");
     fireEvent.click(trigger);
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "lla" } });

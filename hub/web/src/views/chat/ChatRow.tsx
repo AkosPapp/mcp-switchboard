@@ -39,7 +39,7 @@ function Hits({ hits }: { hits: SearchHit[] }) {
 }
 
 const ACTION =
-  "flex h-11 w-11 items-center justify-center rounded text-xs hover:bg-bg hover:text-text md:h-5 md:w-5 [@media(hover:none)]:md:h-11 [@media(hover:none)]:md:w-11";
+  "flex h-[44px] w-[44px] items-center justify-center rounded text-xs hover:bg-bg hover:text-text md:h-5 md:w-5 [@media(hover:none)]:md:h-[44px] [@media(hover:none)]:md:w-[44px]";
 // Shown on hover and keyboard focus-within; always on touch screens, which have no hover.
 const REVEAL =
   "opacity-0 focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100";
@@ -191,7 +191,7 @@ export default function ChatRow({
                 })}
                 aria-label="Confirm delete"
                 title="Confirm delete"
-                className="flex h-11 w-11 items-center justify-center text-danger md:h-5 md:w-5 [@media(hover:none)]:md:h-11 [@media(hover:none)]:md:w-11"
+                className="flex h-[44px] w-[44px] items-center justify-center text-danger md:h-5 md:w-5 [@media(hover:none)]:md:h-[44px] [@media(hover:none)]:md:w-[44px]"
               >
                 <span aria-hidden="true">✓</span>
               </button>
@@ -200,7 +200,7 @@ export default function ChatRow({
                 onClick={stop(() => setConfirming(false))}
                 aria-label="Cancel delete"
                 title="Cancel delete"
-                className="flex h-11 w-11 items-center justify-center text-muted md:h-5 md:w-5 [@media(hover:none)]:md:h-11 [@media(hover:none)]:md:w-11"
+                className="flex h-[44px] w-[44px] items-center justify-center text-muted md:h-5 md:w-5 [@media(hover:none)]:md:h-[44px] [@media(hover:none)]:md:w-[44px]"
               >
                 <span aria-hidden="true">✗</span>
               </button>

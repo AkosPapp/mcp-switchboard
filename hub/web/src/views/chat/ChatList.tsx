@@ -106,7 +106,7 @@ function GroupBranch({
           aria-label={`new chat for ${group.label ?? "no client"}`}
           title="New chat in this group"
           onClick={onNewChat}
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded text-sm text-muted hover:bg-raised hover:text-text md:h-5 md:w-5 md:opacity-0 md:focus:opacity-100 md:group-hover/h:opacity-100 [@media(hover:none)]:md:opacity-100"
+          className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded text-sm text-muted hover:bg-raised hover:text-text md:h-5 md:w-5 md:opacity-0 md:focus:opacity-100 md:group-hover/h:opacity-100 [@media(hover:none)]:md:opacity-100"
         >
           +
         </button>

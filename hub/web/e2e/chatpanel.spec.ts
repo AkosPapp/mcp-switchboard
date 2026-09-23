@@ -198,7 +198,7 @@ test("child chats nest under their parent, collapse, and old peer chats stay ord
   // Collapse: the children are hidden and counted; the choice is remembered.
   await page.getByRole("button", { name: `collapse sub-chats of parent-${run}` }).click();
   await expect(page.getByText(`kid-${run}`)).toHaveCount(0);
-  await expect(p.getByTestId("child-count").first()).toHaveText("2 sub-chats");
+  await expect(p.getByTestId("child-count").first()).toHaveText("2");
   await page.reload();
   await expect(page.getByText(`kid-${run}`)).toHaveCount(0);
   await page.getByRole("button", { name: `expand sub-chats of parent-${run}` }).click();
@@ -365,7 +365,9 @@ test("the client shows its project and environment in the group header and the p
   const head = group(page, LABEL).getByTestId("client-badge").first();
   await expect(head).toContainText(`${LABEL}`);
   await expect(head).toContainText(`proj-${run}`);
-  await expect(head.getByText("devcontainer")).toBeVisible();
+  // The header is deliberately bare (label and project); the environment chips live in its tooltip.
+  await expect(head.getByText("devcontainer")).toHaveCount(0);
+  await expect(head).toHaveAttribute("title", /environment: devcontainer, direnv/);
   await expect(head).toHaveAttribute("title", /workspace: \/work\/proj/);
 
   await page.getByRole("button", { name: "New chat", exact: true }).click();

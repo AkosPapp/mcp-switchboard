@@ -192,7 +192,7 @@ function ReplyModel({ message, actions }: { message: Message; actions: MessageAc
     <ModelPicker
       models={actions.models}
       value={modelKey(current)}
-      ariaLabel="regenerate with another model"
+      ariaLabel="change reply model"
       disabled={actions.busy}
       onChange={(key) => {
         const picked = actions.models.find((m) => modelKey(m) === key);
