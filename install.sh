@@ -169,14 +169,17 @@ ensure_ca_bundle() {
 main() {
     ensure_ca_bundle
 
+    # Releases are rolling dev builds published from every commit to main (no
+    # tags), so pre-release resolution has to be allowed explicitly or uvx
+    # will refuse to consider any version at all.
     if has_cmd npx && has_cmd uvx; then
         log "npx and uvx already on PATH, nothing to bootstrap"
-        exec uvx "$PACKAGE_NAME" "$@"
+        exec uvx --prerelease allow "$PACKAGE_NAME" "$@"
     fi
 
     if has_cmd nix; then
         log "npx and/or uvx missing; using 'nix shell' to provide them for this run only"
-        exec nix shell nixpkgs#nodejs nixpkgs#uv --command uvx "$PACKAGE_NAME" "$@"
+        exec nix shell nixpkgs#nodejs nixpkgs#uv --command uvx --prerelease allow "$PACKAGE_NAME" "$@"
     fi
 
     log "nix not available; installing missing tools natively (no sudo, per-user only)"
@@ -192,7 +195,7 @@ main() {
     has_cmd npx || die "npx still not available after installation attempts"
     has_cmd uvx || die "uvx still not available after installation attempts"
 
-    exec uvx "$PACKAGE_NAME" "$@"
+    exec uvx --prerelease allow "$PACKAGE_NAME" "$@"
 }
 
 main "$@"

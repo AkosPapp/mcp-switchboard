@@ -3,6 +3,12 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  push:
+    branches: [main]
+    paths:
+      - "client/**"
+      - "servers/harness/**"
+      - ".github/workflows/publish-pypi.yml"
   workflow_dispatch:
     inputs:
       package:
@@ -35,6 +41,18 @@ jobs:
       - name: Decide whether this package is in scope
         id: scope
         run: |
+          # Plain pushes to main are rolling dev releases of harness+client only;
+          # hub has no pyproject.toml (it's a Go binary, not a PyPI package) and
+          # `all` would fail trying to build it.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            if [ "${{ matrix.package }}" = "hub" ]; then
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              echo "skipping hub (not a PyPI package)"
+            else
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
           want="${{ github.event.inputs.package || 'all' }}"
           if [ "$want" = "all" ] || [ "$want" = "${{ matrix.package }}" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -66,6 +84,24 @@ jobs:
           fi
           echo "tag $tag matches ${{ matrix.package }} version $version"
 
+      - name: Stamp a rolling dev version
+        # Every push to main publishes; PyPI never accepts a re-upload of the
+        # same version, so each build gets a unique, monotonically increasing
+        # dev suffix. github.run_number always increases across workflow runs,
+        # regardless of how the base version in pyproject.toml moves.
+        if: steps.scope.outputs.run == 'true' && github.event_name == 'push'
+        working-directory: ${{ matrix.dir }}
+        run: |
+          set -euo pipefail
+          base_version="$(python -c '
+          import sys, tomllib
+          with open("pyproject.toml", "rb") as f:
+              print(tomllib.load(f)["project"]["version"])
+          ')"
+          dev_version="${base_version}.dev${{ github.run_number }}"
+          sed -i "s/^version = \"${base_version}\"\$/version = \"${dev_version}\"/" pyproject.toml
+          echo "stamped ${{ matrix.package }} as $dev_version"
+
       - name: Build
         if: steps.scope.outputs.run == 'true'
         working-directory: ${{ matrix.dir }}
@@ -81,4 +117,4 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
           pip install twine
-          twine upload dist/*
+          twine upload --skip-existing dist/*
