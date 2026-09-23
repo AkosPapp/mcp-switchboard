@@ -30,7 +30,7 @@ buildGoModule (finalAttrs: {
     ];
   };
 
-  vendorHash = "sha256-1QB5V7cMvuYULcGA82lEcmSBJu1AcVrSjDYzU1j39Ic=";
+  vendorHash = "sha256-i3Cp9CZ6oa30Ds7L3Buf/6ViOfh+KdiSS7KyKWfqrkQ=";
 
   # A static binary, which is what lets the container be built FROM a minimal
   # base and the Nix closure stay free of a libc dependency. The pure-Go SQLite

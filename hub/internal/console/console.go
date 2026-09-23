@@ -73,12 +73,16 @@ func Handler(assets fs.FS) http.Handler {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		}
 
+		// Set explicitly rather than letting http.ServeContent guess from the
+		// system mime registry: that registry varies by machine (some don't
+		// know ".webmanifest") and its sniffing fallback misreads content.
+		w.Header().Set("Content-Type", contentType(name))
+
 		seeker, ok := file.(io.ReadSeeker)
 		if !ok {
 			// Without a seeker there is no range support; send it whole rather
 			// than refuse. embed.FS files always seek, so this is for the tests
 			// and for any future backing store.
-			w.Header().Set("Content-Type", contentType(name))
 			_, _ = io.Copy(w, file)
 			return
 		}
