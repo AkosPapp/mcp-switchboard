@@ -113,8 +113,9 @@ export default function ProfileForm({
           <span>
             Can create sub-chats
             <span className={`block ${HELP}`}>
-              Enables switchboard.chat.spawn, chat.list and chat.stop, plus the graph and grant
-              tools. Sub-chats inherit this prompt&apos;s client, approval mode and model.
+              Enables switchboard.chat.spawn, chat.list, chat.stop and mcp.list_tools. Sub-chats
+              inherit this prompt&apos;s client, approval mode and model. Connecting chats and
+              granting MCP servers is done from the Graph view, not by the chat itself.
             </span>
           </span>
         </label>
@@ -128,7 +129,7 @@ export default function ProfileForm({
           <span>
             Can message other chats
             <span className={`block ${HELP}`}>
-              Enables switchboard.chat.send, switchboard.chat.list, switchboard.inbox.read and switchboard.mcp.list_servers.
+              Enables switchboard.chat.send, switchboard.chat.list and switchboard.mcp.list_tools.
             </span>
           </span>
         </label>

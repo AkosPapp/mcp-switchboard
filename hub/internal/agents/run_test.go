@@ -153,11 +153,11 @@ func TestSwitchboardToolVisibilityFollowsCapabilities(t *testing.T) {
 		t.Errorf("leaf sees %v", got)
 	}
 	if got := strings.Join(names(e.agent("boss", caps(true, false))), ","); got !=
-		"switchboard.chat.list,switchboard.chat.spawn,switchboard.chat.stop,switchboard.graph.set_edge,switchboard.mcp.grant,switchboard.mcp.list_servers" {
+		"switchboard.chat.list,switchboard.chat.spawn,switchboard.chat.stop,switchboard.mcp.list_tools" {
 		t.Errorf("spawner sees %s", got)
 	}
 	if got := strings.Join(names(e.agent("talker", caps(false, true))), ","); got !=
-		"switchboard.chat.list,switchboard.chat.send,switchboard.inbox.read,switchboard.mcp.list_servers" {
+		"switchboard.chat.list,switchboard.chat.send,switchboard.mcp.list_tools" {
 		t.Errorf("messenger sees %s", got)
 	}
 	// The catalog offered to the model uses provider-safe names.
@@ -429,34 +429,6 @@ func TestSpawnIntersectsGrantsAndEnforcesLimits(t *testing.T) {
 	c1, _ := e2.m.CreateAgent(context.Background(), CreateAgentInput{ParentID: root.ID, Name: "c1", Approval: "never"})
 	if _, err := e2.m.CreateAgent(context.Background(), CreateAgentInput{ParentID: c1.ID, Name: "c2"}); !errors.Is(err, ErrLimit) {
 		t.Errorf("depth err = %v", err)
-	}
-}
-
-func TestGrantToolCannotEscalate(t *testing.T) {
-	e := newEnv(t)
-	parent := e.agent("parent", chain(withModel("p"), caps(true, false), func(in *CreateAgentInput) {
-		in.Grants = []store.Grant{{Label: "box", Project: "", Server: "demo", Allowed: true}}
-	}))
-	kid, err := e.m.CreateAgent(context.Background(), CreateAgentInput{ParentID: parent.ID, Name: "kid", Approval: "never", Grants: []store.Grant{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.provider(llm.NewScriptedFunc("p", func(call int, _ []llm.Message) llm.Turn {
-		switch call {
-		case 0:
-			return llm.CallTool("switchboard_mcp_grant", map[string]any{"chat_id": e.chatOf(kid.ID), "label": "box", "project": "", "server": "secret", "allowed": true})
-		case 1:
-			return llm.CallTool("switchboard_mcp_grant", map[string]any{"chat_id": e.chatOf(kid.ID), "label": "box", "project": "", "server": "demo", "allowed": true})
-		}
-		return llm.Say("ok")
-	}))
-	e.waitRun(e.post(parent.ID, "grant").RunID)
-	gs, _ := e.st.ListGrants(context.Background(), kid.ID)
-	if len(gs) != 1 || gs[0].Server != "demo" || gs[0].Source != store.GrantExplicit {
-		t.Fatalf("grants = %+v", gs)
-	}
-	if rows := e.callRows(store.CallFilter{Status: store.StatusDenied}); len(rows) != 1 {
-		t.Fatalf("denied rows = %+v", rows)
 	}
 }
 

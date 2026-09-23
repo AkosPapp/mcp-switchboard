@@ -62,7 +62,7 @@ func TestSendInjectsIntoRecipientChatFireAndForget(t *testing.T) {
 	sp := llm.NewScriptedFunc("s", func(call int, msgs []llm.Message) llm.Turn {
 		switch {
 		case call == 0:
-			return llm.CallTool("switchboard_chat_send", map[string]any{"to_chat_id": e.chatOf(recv.ID), "message": "hello there"})
+			return llm.CallTool("switchboard_chat_send", map[string]any{"to": recv.Name, "message": "hello there"})
 		default:
 			return llm.Say("noted")
 		}
@@ -110,7 +110,7 @@ func TestSendInjectsIntoRecipientChatFireAndForget(t *testing.T) {
 	}
 	// ... and the model saw the fixed preamble before the text.
 	seen := rp.Calls()[0].Messages[0]
-	want := `[Message from chat "researcher" (id ` + e.chatOf(sender.ID) + `). Reply with switchboard.chat.send to that id.]` + "\n\nhello there"
+	want := `[Message from chat "researcher". Reply with switchboard.chat.send {to: "S"}.]` + "\n\nhello there"
 	if seen.Role != llm.RoleUser || blocksText(seen.Content) != want {
 		t.Errorf("model saw %q, want %q", blocksText(seen.Content), want)
 	}
@@ -143,15 +143,15 @@ func TestSendInjectsIntoRecipientChatFireAndForget(t *testing.T) {
 func TestSendToUnknownOrForbiddenChat(t *testing.T) {
 	e := newEnv(t)
 	sender := e.agent("S", caps(false, true))
-	other := e.agent("O", nil)
+	_ = e.agent("O", nil) // unrelated, no edge to sender: not reachable by name either
 	cc := &callCtx{agent: sender}
-	if _, err := e.m.toolSend(context.Background(), cc, map[string]any{"to_chat_id": "nope", "message": "x"}); !errors.Is(err, ErrNotFound) {
-		t.Errorf("unknown chat: %v", err)
+	if _, err := e.m.toolSend(context.Background(), cc, map[string]any{"to": "nope", "message": "x"}); err == nil || !strings.Contains(err.Error(), "is reachable") {
+		t.Errorf("unknown name: %v", err)
 	}
-	if _, err := e.m.toolSend(context.Background(), cc, map[string]any{"to_chat_id": e.chatOf(other.ID), "message": "x"}); err == nil || !strings.Contains(err.Error(), "no allowed edge") {
+	if _, err := e.m.toolSend(context.Background(), cc, map[string]any{"to": "O", "message": "x"}); err == nil || !strings.Contains(err.Error(), "is reachable") {
 		t.Errorf("no edge: %v", err)
 	}
-	if _, err := e.m.toolSend(context.Background(), cc, map[string]any{"to_chat_id": e.chatOf(sender.ID), "message": "x"}); !errors.Is(err, ErrInvalid) {
+	if _, err := e.m.toolSend(context.Background(), cc, map[string]any{"to": "S", "message": "x"}); err == nil || !strings.Contains(err.Error(), "is reachable") {
 		t.Errorf("self: %v", err)
 	}
 }
@@ -219,7 +219,7 @@ func TestSpawnMakesChildChatUnderParentChatWithFirstMessage(t *testing.T) {
 }
 
 func TestInjectedMessageRendering(t *testing.T) {
-	sender := mustJSON(senderMeta{ChatID: "abc", ChatTitle: `the "boss"`, Kind: SenderMessage})
+	sender := mustJSON(senderMeta{ChatID: "abc", ChatTitle: `the "boss"`, SenderName: "boss", Kind: SenderMessage})
 	path := []store.Message{
 		{Role: store.RoleUser, Content: mustJSON(textBlocks("plain"))},
 		{Role: store.RoleUser, Content: mustJSON(textBlocks("hi")), Sender: sender},
@@ -230,10 +230,10 @@ func TestInjectedMessageRendering(t *testing.T) {
 	if blocksText(got[0].Content) != "plain" {
 		t.Errorf("human message changed: %q", blocksText(got[0].Content))
 	}
-	if want := `[Message from chat "the \"boss\"" (id abc). Reply with switchboard.chat.send to that id.]` + "\n\nhi"; blocksText(got[1].Content) != want {
+	if want := `[Message from chat "the \"boss\"". Reply with switchboard.chat.send {to: "boss"}.]` + "\n\nhi"; blocksText(got[1].Content) != want {
 		t.Errorf("got %q", blocksText(got[1].Content))
 	}
-	if len(got[2].Content) != 2 || got[2].Content[0].Text != `[Reply from chat "untitled" (id abc).]` {
+	if len(got[2].Content) != 2 || got[2].Content[0].Text != `[Reply from chat "untitled".]` {
 		t.Errorf("non-text first block: %+v", got[2].Content)
 	}
 	if string(path[1].Content) != string(mustJSON(textBlocks("hi"))) {
@@ -461,7 +461,7 @@ func TestHubToolsSpeakOfChatsOnly(t *testing.T) {
 	e := newEnv(t)
 	want := map[string]bool{
 		"switchboard.chat.spawn": true, "switchboard.chat.send": true, "switchboard.chat.list": true, "switchboard.chat.stop": true,
-		"switchboard.inbox.read": true, "switchboard.graph.set_edge": true, "switchboard.mcp.grant": true, "switchboard.mcp.list_servers": true,
+		"switchboard.mcp.list_tools": true,
 	}
 	for _, ht := range e.m.HubTools() {
 		if !want[ht.Name] {
@@ -478,41 +478,17 @@ func TestHubToolsSpeakOfChatsOnly(t *testing.T) {
 	}
 	// The old names are not tools any more, not even for a full-capability chat.
 	a := e.agent("all", caps(true, true))
-	for _, old := range []string{"switchboard.agent.send", "switchboard.agent.spawn", "switchboard.agent.list", "switchboard.agent.stop"} {
+	for _, old := range []string{
+		"switchboard.agent.send", "switchboard.agent.spawn", "switchboard.agent.list", "switchboard.agent.stop",
+		"switchboard.inbox.read", "switchboard.graph.set_edge", "switchboard.mcp.grant", "switchboard.mcp.list_servers",
+	} {
 		if out := e.m.execTool(context.Background(), a, nil, old, map[string]any{}, ""); !out.IsError || !strings.Contains(out.Text(), "unknown tool") {
 			t.Errorf("%s still callable: %+v", old, out)
 		}
 	}
-	// Argument checks by chat id.
+	// Argument checks by name.
 	cc := &callCtx{agent: a}
-	if _, err := e.m.toolSetEdge(context.Background(), cc, map[string]any{"chat_id": "nope", "allowed": true}); err == nil {
-		t.Error("set_edge accepted an unknown chat")
-	}
-	if _, err := e.m.toolSetEdge(context.Background(), cc, map[string]any{"chat_id": e.chatOf(a.ID), "allowed": true}); err == nil {
-		t.Error("set_edge accepted connecting a chat to itself")
-	}
-}
-
-// set_edge connects the caller to any chat it can name, not just its own
-// subtree (D14): two unrelated leaf chats can now open an edge directly.
-func TestSetEdgeConnectsArbitraryChats(t *testing.T) {
-	e := newEnv(t)
-	x := e.agent("x", caps(true, true))
-	y := e.agent("y", caps(true, true))
-	cc := &callCtx{agent: x}
-	if _, err := e.m.toolSetEdge(context.Background(), cc, map[string]any{"chat_id": e.chatOf(y.ID), "allowed": true}); err != nil {
-		t.Fatal(err)
-	}
-	if ok, _ := e.st.EdgeAllowed(context.Background(), x.ID, y.ID); !ok {
-		t.Error("edge should be allowed after set_edge")
-	}
-	if ok, _ := e.st.EdgeAllowed(context.Background(), y.ID, x.ID); !ok {
-		t.Error("edge should be symmetric (D14)")
-	}
-	if _, err := e.m.toolSetEdge(context.Background(), cc, map[string]any{"chat_id": e.chatOf(y.ID), "allowed": false}); err != nil {
-		t.Fatal(err)
-	}
-	if ok, _ := e.st.EdgeAllowed(context.Background(), y.ID, x.ID); ok {
-		t.Error("edge should be denied from either side after closing it")
+	if _, err := e.m.toolSend(context.Background(), cc, map[string]any{"to": "nope", "message": "x"}); err == nil {
+		t.Error("send accepted an unreachable name")
 	}
 }

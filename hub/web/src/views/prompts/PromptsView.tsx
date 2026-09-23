@@ -50,8 +50,8 @@ function ProfileRow({
         <Chip title="default model">
           {profile.model ? `${profile.model.provider}/${profile.model.model}` : "hub default model"}
         </Chip>
-        {profile.capabilities.canSpawn && <Chip title="switchboard.chat.spawn and the graph and grant tools">can create sub-chats</Chip>}
-        {profile.capabilities.canMessage && <Chip title="switchboard.chat.send, chat.list, inbox.read">can message chats</Chip>}
+        {profile.capabilities.canSpawn && <Chip title="switchboard.chat.spawn, chat.list, chat.stop">can create sub-chats</Chip>}
+        {profile.capabilities.canMessage && <Chip title="switchboard.chat.send, chat.list">can message chats</Chip>}
         <Chip title="approval mode">approval: {profile.approval}</Chip>
       </div>
     </button>

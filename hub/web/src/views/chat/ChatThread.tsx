@@ -34,7 +34,19 @@ import MessageView, { DraftView, type MessageActions } from "./MessageView";
 import SystemPromptPanel from "./SystemPromptPanel";
 import ToolsPanel from "./ToolsPanel";
 import ToolCard, { type ToolCardData } from "./ToolCard";
-import { ACTIVE_RUN, type ContentBlock, type Message } from "./types";
+import { ACTIVE_RUN, type ContentBlock, type Message, type ModelInfo } from "./types";
+
+/** A short one-line preview of a queued message's content, for the queue strip. */
+function previewContent(content: string | ContentBlock[]): string {
+  const text =
+    typeof content === "string"
+      ? content
+      : content
+          .map((b) => (b.type === "text" ? (b.text ?? "") : `[${b.type}]`))
+          .join(" ");
+  const trimmed = text.trim();
+  return trimmed.length > 80 ? `${trimmed.slice(0, 80)}…` : trimmed || "(attachment)";
+}
 
 /** Tool results by the call they answer (R6: one result per tool message). */
 function resultsByCall(messages: Message[]) {
@@ -162,7 +174,7 @@ export default function ChatThread({
 
   // One key per user action, reused if the same send is retried.
   const pendingKey = useRef<string | null>(null);
-  const send = async (content: string | ContentBlock[], model: { provider: string; model: string } | null) => {
+  const sendNow = async (content: string | ContentBlock[], model: { provider: string; model: string } | null) => {
     pendingKey.current ??= newKey();
     await postMessage(
       chatId,
@@ -173,6 +185,40 @@ export default function ChatThread({
     stick.current = true;
     refresh();
   };
+
+  // While a run is active, Enter/Send queues the message locally instead of
+  // posting it right away: the composer clears immediately (so the next
+  // message can be typed straight away), and each queued message is sent,
+  // one at a time, once the chat is no longer running (below).
+  interface Queued {
+    id: string;
+    content: string | ContentBlock[];
+    model: ModelInfo | null;
+  }
+  const [queue, setQueue] = useState<Queued[]>([]);
+  const draining = useRef(false);
+  const send = async (content: string | ContentBlock[], model: ModelInfo | null) => {
+    if (runActive || queue.length > 0) {
+      setQueue((q) => [...q, { id: newKey(), content, model }]);
+      return;
+    }
+    await sendNow(content, model);
+  };
+  useEffect(() => {
+    if (runActive || draining.current || queue.length === 0) return;
+    const [next, ...rest] = queue;
+    draining.current = true;
+    setQueue(rest);
+    sendNow(next.content, next.model)
+      .catch((error) => toast.show(error instanceof Error ? error.message : "could not send queued message"))
+      .finally(() => {
+        draining.current = false;
+      });
+    // sendNow and toast are stable enough for this effect's purpose; only
+    // runActive and queue length should retrigger the drain.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runActive, queue]);
+  const removeQueued = (id: string) => setQueue((q) => q.filter((m) => m.id !== id));
 
   const title = chat.data?.title || "Untitled chat";
   // Without a profile the prompt is the chat's own text or none; only the prompt endpoint says which.
@@ -441,6 +487,28 @@ export default function ChatThread({
       ) : null}
       {promptOpen ? <SystemPromptPanel chatId={chatId} onClose={() => setPromptOpen(false)} /> : null}
       {toolsOpen ? <ToolsPanel chatId={chatId} onClose={() => setToolsOpen(false)} /> : null}
+
+      {queue.length > 0 ? (
+        <ul className="shrink-0 space-y-1 border-t border-border bg-surface px-3 pt-2" data-testid="message-queue">
+          {queue.map((q, i) => (
+            <li
+              key={q.id}
+              className="flex items-center gap-2 rounded border border-border bg-raised px-2 py-1 text-xs text-muted"
+            >
+              <span className="shrink-0 text-[10px] text-muted">#{i + 1} queued</span>
+              <span className="min-w-0 flex-1 truncate">{previewContent(q.content)}</span>
+              <button
+                type="button"
+                aria-label="remove queued message"
+                className="shrink-0 px-1 text-muted hover:text-text"
+                onClick={() => removeQueued(q.id)}
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
 
       <Composer
         chatId={chatId}

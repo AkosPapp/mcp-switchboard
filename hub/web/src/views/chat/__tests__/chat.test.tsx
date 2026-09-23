@@ -120,6 +120,35 @@ describe("ChatThread", () => {
     });
   });
 
+  it("queues a message sent while a run is active instead of posting it right away", async () => {
+    const running = { ...a2, runId: "r1" };
+    const r = {
+      "GET chats/c1": chat({ activeLeafId: "a2" }),
+      "GET chats/c1/messages": { chatId: "c1", activeLeafId: "a2", tree: false, messages: [u1, running] },
+      "GET agents/a1": agent,
+      "GET models": { models: [{ provider: "p", model: "big" }] },
+      "GET runs/r1": { status: "running" },
+      "POST chats/c1/messages": { messageId: "u9", runId: "r2" },
+    };
+    const calls = hub(r);
+    renderView(<ChatThread chatId="c1" onOpenList={() => {}} />);
+    await screen.findByText("second answer");
+    await screen.findByText("Stop"); // confirms the run is seen as active
+
+    fireEvent.change(screen.getByLabelText("message"), { target: { value: "queued one" } });
+    fireEvent.click(screen.getByText("Send"));
+    await screen.findByTestId("message-queue");
+    expect(screen.getByText("queued one")).toBeTruthy();
+    expect(calls.some((c) => c.key === "POST chats/c1/messages")).toBe(false);
+    // The textarea is free again immediately, ready for the next message.
+    expect((screen.getByLabelText("message") as HTMLTextAreaElement).value).toBe("");
+
+    // Removing it before it is ever sent drops it for good.
+    fireEvent.click(screen.getByLabelText("remove queued message"));
+    expect(screen.queryByTestId("message-queue")).toBeNull();
+    expect(calls.some((c) => c.key === "POST chats/c1/messages")).toBe(false);
+  });
+
   it("sends with an Idempotency-Key header", async () => {
     const r = { ...routes(), "POST chats/c1/messages": { messageId: "u9", runId: "r1" } };
     const seen: Record<string, string>[] = [];

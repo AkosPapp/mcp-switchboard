@@ -498,7 +498,7 @@ which wins where the two differ.
 | `tools` | json, null | the exact tool definitions (`llm.Tool[]`: name, description, input schema) that turn was generated against, set alongside `model` |
 | `finish_reason` | string, null | `stop` \| `tool_use` \| `max_tokens` \| `budget` \| `cancelled` \| `error` |
 | `run_id` | uuid, null | which run produced it |
-| `sender` | json, null | on a `user` message injected by another chat (B7): `{chatId, chatTitle, kind}`, `kind` = `message` (a `switchboard.chat.send`) \| `reply` (a returned answer, B8) \| `spawn` (the first task from the parent chat); `chatTitle` is the sender's title at that moment. Null on everything typed by a human or written by a model. The raw text is stored; the model-facing preamble is added when a request is built (B9) |
+| `sender` | json, null | on a `user` message injected by another chat (B7): `{chatId, chatTitle, senderName, kind}`, `kind` = `message` (a `switchboard.chat.send`) \| `reply` (a returned answer, B8) \| `spawn` (the first task from the parent chat); `chatTitle` is the sender's title at that moment, `senderName` its execution record's name at that moment (M4a) — what a reply's `chat.send` should pass as `to`. Null on everything typed by a human or written by a model. The raw text is stored; the model-facing preamble is added when a request is built (B9) |
 | `last_active_child_id` | uuid, null | which child was last active below this message; remembers a branch's leaf for A6 |
 | `created_at` | timestamptz | |
 
@@ -546,12 +546,12 @@ first.
   spawn time (A8). Once created, a **parent/child link is immutable**: nothing — no tool, no API
   route, no console action — ever changes or clears `parent_id`/`parent_chat_id` on an existing
   chat, and deleting the parent cascades (D13) rather than re-parenting. Edges, in contrast, are
-  freely mutable and are how *any two chats*, related or not, get to talk: `switchboard.graph.set_edge`
-  connects any chat the caller can name to itself (X8 still applies — a chat can only open an edge
-  that has itself as one endpoint, never wire up two other chats behind their backs), and the
-  console's Graph view (human operator, already trusted) may connect any two chats at all. This is
-  what lets two unrelated leaf chats collaborate directly instead of relaying through a shared
-  ancestor.
+  freely mutable and are how *any two chats*, related or not, get to talk: the console's Graph view
+  (human operator, already trusted) may connect any two chats at all, through `PUT
+  /api/graph/edges/{a}/{b}` (§7.2). There is no switchboard.* tool that opens an edge (§5.5) — a
+  chat cannot wire itself up to an arbitrary other chat on its own — so this is what lets two
+  unrelated leaf chats collaborate directly instead of relaying through a shared ancestor, but only
+  a human sets that up.
 
 `grants` — MCP permissions, server-level only:
 
@@ -574,8 +574,9 @@ Primary key `(agent_id, label, project, server)`.
   otherwise (A20). A chat made by `POST /api/chats` never gets it: it holds `(client, *, *)`, or nothing, (A19).
 - **A12. Inheritance and the escalation rule.** On spawn, a child's grant set is the parent's,
   intersected with whatever the parent asked for. **An agent can never grant a child more than it
-  holds itself.** This is enforced at every point where an agent *writes* a grant — spawn, and
-  `switchboard.mcp.grant` — against the granting agent's set at that moment.
+  holds itself.** This is enforced at the one point where an agent *writes* a grant — spawn —
+  against the granting agent's set at that moment; a chat cannot grant anything after the fact
+  (§5.5), only a human, from the Graph view (A13).
   At **call time the agent's own stored grant set is authoritative and is not re-derived from its
   ancestors.** Narrowing reaches descendants through A14's propagating transaction, which is the
   single mechanism for it; re-deriving at call time would additionally revoke the `human` grants
@@ -711,21 +712,24 @@ scopes: those scopes have no principal, so "the caller's child chats", "the call
 Whether external consumers should be able to attach to `/mcp/agent/{id}` at all is Q2, and until it
 is answered the scope is internal to the run loop. Every one of these is itself logged as a call.
 
-The tools speak of **chats**: arguments and results carry chat ids, which the hub translates to
-execution records internally (M4). The tool names of earlier revisions, which spoke of agents, are not offered.
+The tools speak of **chats**: arguments and results carry chat ids or names, which the hub
+translates to execution records internally (M4). The tool names of earlier revisions, which spoke
+of agents, are not offered. Editing the graph itself — opening an edge between two unrelated
+chats, or granting/revoking an MCP server — is a trusted-human operation now, done from the
+console's Graph view or its REST API (§7.2), not a switchboard.* self-service tool; a spawned
+child still gets an edge to its parent for free (A8), which is all `chat.send` needs day to day.
+Neither `chat.spawn` nor `chat.send` pauses for approval (M2): a chat with either capability is
+trusted to use it without a human in the loop for every call.
 
 | Tool | Input | Output | Behaviour |
 |---|---|---|---|
 | `switchboard.chat.spawn` | `{title, system_prompt, model?, grants?, budget?, capabilities?, approval?, message?}` | `{chat_id}` | Creates a child chat of the calling chat (A29). `model`, `capabilities` and `approval` default to the caller's (M3). `grants` are intersected with the caller's (A12). Fails if the child's depth (`parent.depth + 1`) would exceed `AGENT_MAX_DEPTH`, or if the caller already has `AGENT_MAX_CHILDREN` live direct children. `message`, when given, is injected into the child as `sender.kind = "spawn"` and wakes it; its final answer returns to the caller's chat as a reply (B8). |
-| `switchboard.chat.send` | `{to_chat_id, message}` | `{message_id}` | Requires an `allowed` edge between the two chats (D14; never to itself). Inserts `message` into the recipient's **own** chat exactly as if the human had typed it there — a plain `user`-role turn, distinguished only by `sender` metadata (chat id, title and kind, B7) — and wakes it (B2). Always fire-and-forget: there is no `wait`, no synchronous reply, and no special routing back. If the recipient wants to answer, it calls `switchboard.chat.send` back to the sender, exactly like any other message — the edge is symmetric (D14), so it always can. The one exception is `switchboard.chat.spawn`'s own `message` (B8): a spawned child's *final* answer is still returned to the spawning chat automatically, because that is a property of spawning a task, not of `chat.send`. |
-| `switchboard.chat.list` | `{}` | `[{chat_id, title, status, relation, depth?}]` | Every chat the caller can currently message: its parent and children (`relation: "parent"` / `"child"`, with `depth`) plus every chat joined by an edge (`relation: "connected"`). One flat list, no scope parameter — this is deliberately the *only* way a chat discovers who it can talk to, so there is nothing to get wrong. Never reveals a chat the caller cannot message. |
+| `switchboard.chat.send` | `{to, message}` | `{message_id}` | `to` is a **name**, as returned by `chat.list`'s `name` field — not a chat id (M4a). Resolved against the same set `chat.list` shows: the caller's parent, a child, or a chat joined to it by an allowed edge (D14; never itself). Inserts `message` into the recipient's **own** (most recently active) chat exactly as if the human had typed it there — a plain `user`-role turn, distinguished only by `sender` metadata (chat id, title and kind, B7) — and wakes it (B2). Always fire-and-forget: there is no `wait`, no synchronous reply, and no special routing back. If the recipient wants to answer, it calls `switchboard.chat.send` back to the sender, exactly like any other message — the edge is symmetric (D14), so it always can. The one exception is `switchboard.chat.spawn`'s own `message` (B8): a spawned child's *final* answer is still returned to the spawning chat automatically, because that is a property of spawning a task, not of `chat.send`. |
+| `switchboard.chat.list` | `{}` | `[{name, chat_id, title, status, relation, depth?}]` | Every chat the caller can currently message: its parent and children (`relation: "parent"` / `"child"`, with `depth`) plus every chat joined by an edge (`relation: "connected"`). One flat list, no scope parameter — this is deliberately the *only* way a chat discovers who it can talk to, so there is nothing to get wrong. Never reveals a chat the caller cannot message. `name` is what `chat.send`'s `to` takes. |
 | `switchboard.chat.stop` | `{chat_id}` | `{cancelled}` | Cancels a descendant chat's runs. Only on descendants. |
-| `switchboard.inbox.read` | `{wait?}` | `[{from_chat_id, chat_id, message_id, message}]` | Drains the caller's mailbox (§5.6): messages other chats sent while it was not set to wake. `message` is the raw text; `from_chat_id` is the sender chat. `wait` up to 30 s. |
-| `switchboard.graph.set_edge` | `{chat_id, allowed}` | `{ok}` | Opens or closes a symmetric edge (D14) between the caller and `chat_id`, any chat the caller can name — not limited to its own subtree. The caller must be one of the two endpoints (X8): a chat can connect *itself* to anything, never wire up two other chats. Applies immediately and publishes a change event. |
-| `switchboard.mcp.grant` | `{chat_id, label, project?, server, allowed}` | `{ok}` | Only on descendant chats, and only within the caller's own grants (A12). |
-| `switchboard.mcp.list_servers` | `{}` | `[{label, project, server, connected, tool_count}]` | The caller's own grants joined against the live registry, so a chat can see what it may use and what is currently reachable. |
+| `switchboard.mcp.list_tools` | `{}` | `[{label, project, server, connected, tools: [{name, description}]}]` | The caller's own grants joined against the live registry: which servers it may use, whether each is connected right now, and — for a connected one — every tool on it, named exactly as the caller would call it (naming.go's client-pinning rule applies here too, so a single-client chat sees the same short names it would actually use). |
 
-- **M1.** The `switchboard.chat.*`, `graph`, `mcp` and `inbox` tools are only listed for a chat whose
+- **M1.** The `switchboard.chat.*` and `mcp.list_tools` tools are only listed for a chat whose
   `capabilities.can_spawn` / `can_message` flags are set. A leaf worker chat gets none of them,
   which is both cheaper (fewer tokens) and safer. While a chat references a profile the flags are
   the profile's current ones (A23): editing the profile affects every chat using it, from its next
@@ -733,13 +737,11 @@ execution records internally (M4). The tool names of earlier revisions, which sp
   canMessage`, or `always`) is derived from the same visibility predicate the catalog uses and
   served by `GET /api/hub-tools` (A21). The capability flags keep their names; the console words
   them in terms of chats.
-- **M2. Annotations.** `chat.list` and `mcp.list_servers` are `readOnlyHint: true`. Everything
-  else changes state and is annotated honestly, so §5.8's approval gate can see it:
-  `chat.spawn` and `chat.send` are `destructiveHint: false, openWorldHint: true` (effects outside
-  the caller); `chat.stop`, `graph.set_edge` and `mcp.grant` are `destructiveHint: true,
-  openWorldHint: false` (they kill work or rewrite permissions); `inbox.read` is
-  `readOnlyHint: false, idempotentHint: false` because it *drains* the mailbox — the same reasoning
-  that makes the harness's `process_read` non-idempotent (§9.6).
+- **M2. Annotations.** `chat.list` and `mcp.list_tools` are `readOnlyHint: true`. `chat.spawn` and
+  `chat.send` are annotated `destructiveHint: false, openWorldHint: false`: their effects reach
+  outside the caller, same as before, but they are the two actions §5.5 exists to let a chat take on
+  its own, so §5.8's approval gate never pauses them regardless of approval mode. `chat.stop` is
+  `destructiveHint: true, openWorldHint: false` (it kills work).
 
 - **M3. Sub-chats inherit.** A child made by `switchboard.chat.spawn` inherits from its parent:
   **the client restriction** (through A12: its grants are a subset of the parent's, so it can never
@@ -751,14 +753,20 @@ execution records internally (M4). The tool names of earlier revisions, which sp
   child-count limits still apply. The child chat records the spawning chat's
   `client_label` and `profile_id`, so the console can show which client a sub-chat belongs to.
 - **M4. Chat ids in, records inside.** Tool arguments and results name chats; the hub resolves a
-  chat id to its execution record and authorises by the **caller's own identity** (X8), exactly as
-  it authorised record ids before: an edge is checked between the two chats' records, "descendant"
-  means the record is below the caller's in the tree, `set_edge` needs the caller as one endpoint
-  (D14), and `grant` needs the target inside the caller's subtree. An unknown chat, or one whose
+  chat id (or, for `chat.send`, a name, M4a) to its execution record and authorises by the
+  **caller's own identity** (X8): an edge is checked between the two chats' records, and
+  "descendant" means the record is below the caller's in the tree. An unknown chat, or one whose
   record is deleted, is not found; a chat outside the caller's reach is `denied`. A `/mcp/agent/{id}`
   call with no run behind it acts in the record's most recently active human chat (created on demand
   if it has none). Which chat stands for a record that has several (older data) is that same rule:
   its most recently active human chat.
+- **M4a. Names, not ids, address a send.** `chat.send`'s `to` is the reachable chat's `name` (its
+  execution record's `agents.name`, §5.2) rather than a uuid: a model composes and remembers a
+  short human-legible name far more reliably than a chat id, and the two are equally safe here,
+  since both are resolved only against the caller's own reachable set (M4), never trusted from the
+  argument otherwise (X8). `name` is unique enough in practice to address by (it is built as
+  `title · <id suffix>`, chats.go's `agentNameFor`), and a reachable set is small and already
+  edge-gated, so a collision within it is not a realistic concern.
 
 ### 5.6 Mailbox, wake-up and termination
 
@@ -770,8 +778,10 @@ request/response; a chat that is not running cannot be called. So:
   injected message (B7), which already sits in that chat.
 - **B2. Delivery wakes the recipient.** `switchboard.chat.send` injects the message into the
   recipient's own chat and enqueues a run for that chat, queued behind any run already on it (R4).
-  A record with `auto_wake = false` accumulates the message instead (it is in its chat, and in the
-  mailbox for `switchboard.inbox.read`, but no run starts) and shows a badge in the Graph view.
+  A record with `auto_wake = false` accumulates the message instead (it is in its chat and in the
+  mailbox, but no run starts) and shows a badge in the Graph view; there is no switchboard.* tool to
+  drain the mailbox any more (§5.5) — the message is read from the chat itself, same as anything
+  else in it.
 - **B3. Delivery latency** is measured from the `send` call returning to the recipient's run
   starting, and is the `mcpsb_agent_message_delivery_seconds` histogram.
 - **B4. Budgets are the termination argument.** Two different things were conflated here in an
@@ -824,8 +834,9 @@ request/response; a chat that is not running cannot be called. So:
   leaf.
 
 - **B7. Messages are injected into the recipient's own chat.** A `switchboard.chat.send` appends
-  a `user`-role message to the chat named by `to_chat_id` — under its active leaf, deferred by R4 —
-  with `sender = {chatId, chatTitle, kind: "message"}` (§5.2), then wakes it exactly like a human
+  a `user`-role message to the recipient named by `to` (M4a) — its most recently active chat, under
+  its active leaf, deferred by R4 — with `sender = {chatId, chatTitle, senderName, kind: "message"}`
+  (§5.2), then wakes it exactly like a human
   message (trigger `agent_message`, `triggered_by_agent_id` = the sender's record). No chat is
   created for a message: there are no peer or "conversation" chats, and the ones older data holds
   are only read, never written. The console shows the message as "from <sender title>", linked to the
@@ -838,13 +849,15 @@ request/response; a chat that is not running cannot be called. So:
   A `spawn` message's answer returns the same way.
 - **B9. The model reads a preamble, the store keeps the raw text.** When a request is built, a
   user message carrying `sender` is prefixed by one fixed line naming the sender chat — for a
-  `message`: `[Message from chat "<title>" (id <chat id>). Reply with switchboard.chat.send to that
-  id.]`, for a `reply`: `[Reply from chat "<title>" (id <chat id>).]`, for a `spawn`: `[Task from your
-  parent chat "<title>" (id <chat id>). Your final answer is delivered back to it.]` — then a blank
-  line and the text. The line is produced by one function and only in the provider-facing
-  conversion; `messages.content`, the search index, `inbox.read` and the console see the raw text.
-  Being a deterministic function of stored data it does not disturb the catalog (T1) or the
-  cached prefix, and token accounting is the provider's own usage figures, so it is unaffected.
+  `message`: `[Message from chat "<title>". Reply with switchboard.chat.send {to: "<sender
+  name>"}.]`, for a `reply`: `[Reply from chat "<title>".]`, for a `spawn`: `[Task from your
+  parent chat "<title>". Your final answer is delivered back to it.]` — then a blank
+  line and the text. `<sender name>` is `sender.senderName` (M4a): the name a reply's `chat.send`
+  should use, so the recipient never has to call `chat.list` just to answer. The line is produced
+  by one function and only in the provider-facing conversion; `messages.content`, the search index
+  and the console see the raw text. Being a deterministic function of stored data it does not
+  disturb the catalog (T1) or the cached prefix, and token accounting is the provider's own usage
+  figures, so it is unaffected.
 
 ### 5.7 Models and providers
 
@@ -1022,7 +1035,7 @@ Two retention policies now coexist, and conflating them was an inconsistency in 
 
 All under the private listener. JSON bodies, camelCase fields, RFC 3339 UTC timestamps with an
 explicit `+00:00` offset. The camelCase rule covers this REST/SSE surface only: **MCP tool
-arguments and results stay snake_case** (`to_chat_id`, `exit_code`), because they sit in the same
+arguments and results stay snake_case** (`chat_id`, `exit_code`), because they sit in the same
 namespace as tunnelled servers' tools and a model should not have to learn two conventions inside
 one catalog. The handler layer is the boundary, and it is the only place that translates.
 
@@ -1051,7 +1064,7 @@ one catalog. The handler layer is the boundary, and it is the only place that tr
 | GET/PATCH/DELETE | `/api/agents/{id}` | `PATCH` also takes `profileId`, `clientLabel` (A24) and `name`; `DELETE` soft-deletes and cancels descendants |
 | GET | `/api/agents/{id}/grants` · PUT | grant set; `PUT` applies A14 propagation atomically |
 | GET | `/api/graph` | agents + edges + grants + live-connection join, in one response |
-| PUT | `/api/graph/edges/{a}/{b}` | `{allowed}`; symmetric (D14) — order of `a`/`b` does not matter and governs both directions. Unlike the `switchboard.graph.set_edge` tool, the console (a trusted human operator) may connect any two chats at all, not just itself to another |
+| PUT | `/api/graph/edges/{a}/{b}` | `{allowed}`; symmetric (D14) — order of `a`/`b` does not matter and governs both directions. There is no switchboard.* tool that opens an edge (§5.5); only the console (a trusted human operator), here, may connect any two chats at all |
 | GET/POST | `/api/chats` | list (filter by `agentId`, `kind`, `tag`, `q`; each Chat carries `parentChatId`) / create. `POST` takes the primary form `{title?, profileId?, systemPrompt?, clientLabel?, model?, parentChatId?}` that creates the chat and its record together (A26; 400 on a `*`/empty label, 404 on an unknown profile or parent), or, when `agentId` is present, the legacy attach form `{agentId, title?}` (A20), which takes precedence |
 | GET/PATCH/DELETE | `/api/chats/{id}` | `PATCH` sets `title`, `tags`, `archived`, `activeLeafId`, `selectMessageId` and rebinds `profileId`, `systemPrompt`, `clientLabel` (A27); `DELETE` is permanent and cascades to child chats and their records (A28), returning `200 {deletedChats}` |
 | GET | `/api/chats/{id}/tools` | `{clientLabel, clientConnected, tools[]}`: what the chat's agent can call right now (A21) |
@@ -1713,7 +1726,7 @@ access to every machine running a default client.**
   names an existing regular file is replaced by its contents, so sops-nix and systemd
   `LoadCredential` need no special support. Keys are never returned by any endpoint, never
   written to the call log, and redacted from Loki payloads.
-- **X8. Model-supplied identifiers are never trusted.** A chat id (`to_chat_id`, `chat_id`, …) in a
+- **X8. Model-supplied identifiers are never trusted.** A chat id or name (`to`, `chat_id`, …) in a
   `switchboard.*` call is authorised against the *calling* chat's identity, which the hub knows from the session's scope
   (`/mcp/agent/{id}`), not from the arguments. A tool call cannot assert who it is *in its
   arguments* — but the scope URL does assert it, and that is the whole of the authentication. An

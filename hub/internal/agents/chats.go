@@ -27,9 +27,10 @@ const (
 
 // senderMeta is messages.sender.
 type senderMeta struct {
-	ChatID    string `json:"chatId"`
-	ChatTitle string `json:"chatTitle"`
-	Kind      string `json:"kind"`
+	ChatID     string `json:"chatId"`
+	ChatTitle  string `json:"chatTitle"`
+	SenderName string `json:"senderName"` // the sender record's name; what a reply's chat.send names as `to`
+	Kind       string `json:"kind"`
 }
 
 func parseSender(raw json.RawMessage) (senderMeta, bool) {
@@ -51,11 +52,11 @@ func injectedPreamble(s senderMeta) string {
 	}
 	switch s.Kind {
 	case SenderReply:
-		return fmt.Sprintf("[Reply from chat %q (id %s).]", title, s.ChatID)
+		return fmt.Sprintf("[Reply from chat %q.]", title)
 	case SenderSpawn:
-		return fmt.Sprintf("[Task from your parent chat %q (id %s). Your final answer is delivered back to it.]", title, s.ChatID)
+		return fmt.Sprintf("[Task from your parent chat %q. Your final answer is delivered back to it.]", title)
 	}
-	return fmt.Sprintf("[Message from chat %q (id %s). Reply with switchboard.chat.send to that id.]", title, s.ChatID)
+	return fmt.Sprintf("[Message from chat %q. Reply with switchboard.chat.send {to: %q}.]", title, s.SenderName)
 }
 
 // withPreamble returns blocks with the preamble in front of the first text block

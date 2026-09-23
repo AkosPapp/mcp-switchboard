@@ -85,23 +85,6 @@ func deriveChildGrants(parent []store.Grant, requested []store.Grant) []store.Gr
 	return res
 }
 
-// withinHolder reports whether granting r (an allow) stays inside the holder's
-// own set (A12): some allow covers it and no deny overlaps it.
-func withinHolder(holder []store.Grant, r pattern) bool {
-	covered := false
-	for _, g := range holder {
-		p := patOf(g)
-		if g.Allowed {
-			if covers(p, r) {
-				covered = true
-			}
-		} else if _, overlap := intersect(p, r); overlap {
-			return false
-		}
-	}
-	return covered
-}
-
 // holdsHarness is W1: does the grant set (at creation) include a `harness`
 // server (directly or through a wildcard)?
 func holdsHarness(grants []store.Grant) bool {

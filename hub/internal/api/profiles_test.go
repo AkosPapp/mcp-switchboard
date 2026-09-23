@@ -177,7 +177,7 @@ func TestProfilesEndToEndWithRealManager(t *testing.T) {
 	requireStatus(t, rec, 200)
 	var hub struct{ Tools []agents.HubTool }
 	decode(t, rec, &hub)
-	if len(hub.Tools) < 8 {
+	if len(hub.Tools) < 5 {
 		t.Fatalf("hub tools = %d", len(hub.Tools))
 	}
 	if b, _ := json.Marshal(hub.Tools[0]); !strings.Contains(string(b), `"requires"`) {

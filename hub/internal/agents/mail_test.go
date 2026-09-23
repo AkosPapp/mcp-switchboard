@@ -24,7 +24,7 @@ func TestSymmetricEdgeCycleTerminatesOnLifetimeCeiling(t *testing.T) {
 			if lastIsTool(msgs) {
 				return llm.Say("sent").WithUsage(500, 500)
 			}
-			return llm.CallTool("switchboard_chat_send", map[string]any{"to_chat_id": e.chatOf((*peer).ID), "message": "ping"}).WithUsage(500, 500)
+			return llm.CallTool("switchboard_chat_send", map[string]any{"to": (*peer).Name, "message": "ping"}).WithUsage(500, 500)
 		}
 	}
 	pa, pb := llm.NewScriptedFunc("pa", script(&b)), llm.NewScriptedFunc("pb", script(&a))
@@ -80,15 +80,15 @@ func TestSendRequiresAnEdgeAndFallsBackToMailbox(t *testing.T) {
 	e.provider(llm.NewScriptedFunc("p", func(call int, msgs []llm.Message) llm.Turn {
 		switch call {
 		case 0:
-			return llm.CallTool("switchboard_chat_send", map[string]any{"to_chat_id": e.chatOf(target.ID), "message": "hello"})
+			return llm.CallTool("switchboard_chat_send", map[string]any{"to": "sleeper", "message": "hello"})
 		}
 		return llm.Say("done")
 	}))
 	sender := e.agent("sender", chain(withModel("p"), caps(false, true)))
 	target = e.agent("sleeper", chain(withModel("p"), func(in *CreateAgentInput) { f := false; in.AutoWake = &f }))
 	e.waitRun(e.post(sender.ID, "go").RunID)
-	// No edge: denied, recorded as such.
-	if rows := e.callRows(store.CallFilter{Status: store.StatusDenied}); len(rows) != 1 || !strings.Contains(rows[0].Error, "no allowed edge") {
+	// No edge: "sleeper" is not reachable by name, denied, recorded as such.
+	if rows := e.callRows(store.CallFilter{Status: store.StatusDenied}); len(rows) != 1 || !strings.Contains(rows[0].Error, "reachable") {
 		t.Fatalf("rows = %+v", rows)
 	}
 	// With an edge and auto_wake off: mail accumulates, nobody runs.
@@ -99,7 +99,7 @@ func TestSendRequiresAnEdgeAndFallsBackToMailbox(t *testing.T) {
 		if lastIsTool(msgs) {
 			return llm.Say("done")
 		}
-		return llm.CallTool("switchboard_chat_send", map[string]any{"to_chat_id": e.chatOf(target.ID), "message": "hello"})
+		return llm.CallTool("switchboard_chat_send", map[string]any{"to": "sleeper", "message": "hello"})
 	}))
 	e.waitRun(e.post(sender.ID, "again").RunID)
 	if n, _ := e.st.CountInbox(context.Background(), target.ID); n != 1 {
@@ -115,14 +115,15 @@ func TestSendRequiresAnEdgeAndFallsBackToMailbox(t *testing.T) {
 			t.Errorf("unread = %d", ga.UnreadMail)
 		}
 	}
-	// inbox.read drains it, with sender identity.
-	out, err := e.m.toolInbox(context.Background(), &callCtx{agent: target}, map[string]any{})
+	// The mailbox mechanism (B1) is still there at the store level, even
+	// though switchboard.inbox.read no longer exposes it as a tool: the
+	// console reads the message from the chat itself instead.
+	items, err := e.st.DrainInbox(context.Background(), target.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	items := out.([]map[string]any)
-	if len(items) != 1 || items[0]["from_chat_id"] != e.chatOf(sender.ID) || items[0]["message"] != "hello" {
-		t.Fatalf("inbox.read = %+v", items)
+	if len(items) != 1 || items[0].ChatID != e.chatOf(target.ID) {
+		t.Fatalf("mailbox = %+v", items)
 	}
 	if n, _ := e.st.CountInbox(context.Background(), target.ID); n != 0 {
 		t.Errorf("not drained: %d", n)
@@ -142,7 +143,7 @@ func TestSendToChildIsAllowedButFireAndForget(t *testing.T) {
 		if lastIsTool(msgs) {
 			return llm.Say("sent")
 		}
-		return llm.CallTool("switchboard_chat_send", map[string]any{"to_chat_id": e.chatOf(kid.ID), "message": "compute"})
+		return llm.CallTool("switchboard_chat_send", map[string]any{"to": "kid", "message": "compute"})
 	}))
 	e.scripted("kid", llm.Say("forty-two"))
 	parent := e.agent("parent", chain(withModel("parent"), caps(true, true)))

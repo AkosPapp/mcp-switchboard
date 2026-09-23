@@ -2,7 +2,6 @@ package agents
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -65,6 +64,7 @@ func init() {
 		"server": typ("string", "server name or *"), "allowed": typ("boolean", "default true"),
 	})
 	write := &mcp.ToolAnnotations{DestructiveHint: bp(true), OpenWorldHint: bp(false)}
+	noApproval := &mcp.ToolAnnotations{DestructiveHint: bp(false), OpenWorldHint: bp(false)}
 	sbTools = []*sbTool{
 		{name: "switchboard.chat.spawn",
 			desc: "Create a child chat of the current chat. Grants, capabilities and approval are bounded by your own (you can never give more than you hold); omit them to pass on what you have. An optional first message is delivered to the child as its task, and its final answer comes back to you as a message.",
@@ -78,13 +78,13 @@ func init() {
 					"properties": map[string]any{"can_spawn": map[string]any{"type": "boolean"}, "can_message": map[string]any{"type": "boolean"}}},
 				"approval": map[string]any{"type": "string", "enum": []string{"never", "destructive", "always"}, "description": "at least as strict as yours"},
 				"message":  typ("string", "the child's first task, delivered as a message from this chat")}),
-			ann:     &mcp.ToolAnnotations{DestructiveHint: bp(false), OpenWorldHint: bp(true)},
+			ann:     noApproval,
 			visible: canSpawn, run: (*Manager).toolSpawn},
 		{name: "switchboard.chat.send",
-			desc: "Send a message to another chat you have an allowed edge to. It is delivered into that chat as a message from this chat and wakes it. Always fire-and-forget: there is no wait and no synchronous reply. If the recipient wants to answer, it sends a message back to you the same way.",
-			schema: obj([]string{"to_chat_id", "message"}, map[string]any{
-				"to_chat_id": typ("string", "recipient chat id"), "message": typ("string", "the message")}),
-			ann:     &mcp.ToolAnnotations{DestructiveHint: bp(false), OpenWorldHint: bp(true)},
+			desc: "Send a message to another chat you can reach: your parent, a child, or one connected to you (see chat.list). It is delivered into that chat as a message from this chat and wakes it. Always fire-and-forget: there is no wait and no synchronous reply. If the recipient wants to answer, it sends a message back to you the same way.",
+			schema: obj([]string{"to", "message"}, map[string]any{
+				"to": typ("string", "recipient's name, as returned by chat.list"), "message": typ("string", "the message")}),
+			ann:     noApproval,
 			visible: canMessage, run: (*Manager).toolSend},
 		{name: "switchboard.chat.list",
 			desc:    "List every chat you can currently message: your parent and children, and every chat joined to you by an edge.",
@@ -96,29 +96,11 @@ func init() {
 			schema:  obj([]string{"chat_id"}, map[string]any{"chat_id": typ("string", "descendant chat id")}),
 			ann:     write,
 			visible: canSpawn, run: (*Manager).toolStop},
-		{name: "switchboard.inbox.read",
-			desc:    "Drain your mailbox of messages other chats sent while you were not set to wake. wait (seconds, at most 30) blocks until mail arrives.",
-			schema:  obj(nil, map[string]any{"wait": typ("number", "seconds to wait, at most 30")}),
-			ann:     &mcp.ToolAnnotations{DestructiveHint: bp(false), OpenWorldHint: bp(false)},
-			visible: canMessage, run: (*Manager).toolInbox},
-		{name: "switchboard.graph.set_edge",
-			desc: "Open or close a symmetric edge between you and another chat, any chat you can name. You must be one of the two endpoints: this connects you to chat_id, never two other chats to each other.",
-			schema: obj([]string{"chat_id", "allowed"}, map[string]any{
-				"chat_id": typ("string", "the other chat"), "allowed": typ("boolean", "")}),
-			ann:     write,
-			visible: canSpawn, run: (*Manager).toolSetEdge},
-		{name: "switchboard.mcp.grant",
-			desc: "Grant or revoke an MCP server for one of your descendant chats, within your own grants.",
-			schema: obj([]string{"chat_id", "label", "server", "allowed"}, map[string]any{
-				"chat_id": typ("string", "descendant chat"), "label": typ("string", ""), "project": typ("string", "\"\" for none, or *"),
-				"server": typ("string", ""), "allowed": typ("boolean", "")}),
-			ann:     write,
-			visible: canSpawn, run: (*Manager).toolGrant},
-		{name: "switchboard.mcp.list_servers",
-			desc:    "List the MCP servers you may use and whether each is connected right now.",
+		{name: "switchboard.mcp.list_tools",
+			desc:    "List the tools you may call right now, grouped by MCP server, with each server's connection state.",
 			schema:  obj(nil, map[string]any{}),
 			ann:     &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: bp(false)},
-			visible: canEither, run: (*Manager).toolListServers},
+			visible: canEither, run: (*Manager).toolListTools},
 	}
 	for _, t := range sbTools {
 		sbByName[t.name] = t
@@ -301,7 +283,7 @@ func (m *Manager) deliverChatMessage(ctx context.Context, from *store.Agent, fro
 	msgID := store.NewID()
 	msg := &store.Message{
 		ID: msgID, ChatID: toChat.ID, Role: store.RoleUser, Content: mustJSON(textBlocks(text)),
-		Sender: mustJSON(senderMeta{ChatID: fromChat.ID, ChatTitle: fromChat.Title, Kind: kind}),
+		Sender: mustJSON(senderMeta{ChatID: fromChat.ID, ChatTitle: fromChat.Title, SenderName: from.Name, Kind: kind}),
 	}
 	if !to.AutoWake {
 		if err := m.appendPending(ctx, submission{chat: toChat, msg: msg}, nil); err != nil {
@@ -326,38 +308,35 @@ func (m *Manager) deliverChatMessage(ctx context.Context, from *store.Agent, fro
 
 func (m *Manager) toolSend(ctx context.Context, cc *callCtx, args map[string]any) (any, error) {
 	caller := cc.agent
-	toChatID, message := argStr(args, "to_chat_id"), argStr(args, "message")
-	if toChatID == "" || message == "" {
-		return nil, fmt.Errorf("%w: to_chat_id and message are required", ErrInvalid)
+	toName, message := argStr(args, "to"), argStr(args, "message")
+	if toName == "" || message == "" {
+		return nil, fmt.Errorf("%w: to and message are required", ErrInvalid)
 	}
-	toChat, err := m.st.GetChat(ctx, toChatID)
+	// A8/A9: only a chat reachable from the caller (its parent, a child, or one
+	// connected by an allowed edge) can be named — the same set chat.list shows
+	// (X8: resolved by the caller's own identity, never trusted from the
+	// arguments). Absence means denied, not merely "not found".
+	reach, err := m.reachable(ctx, caller)
 	if err != nil {
 		return nil, err
 	}
-	if toChat == nil {
-		return nil, fmt.Errorf("%w: no chat %s", ErrNotFound, toChatID)
+	var to *store.Agent
+	for _, r := range reach {
+		if r.agent.Name == toName {
+			to = r.agent
+			break
+		}
 	}
-	to, err := m.st.GetAgent(ctx, toChat.AgentID)
+	if to == nil {
+		return nil, denied("no chat named %q is reachable; call switchboard.chat.list", toName)
+	}
+	toChat, err := m.primaryChat(ctx, to, true)
 	if err != nil {
 		return nil, err
-	}
-	if to == nil || to.DeletedAt != nil {
-		return nil, fmt.Errorf("%w: no chat %s", ErrNotFound, toChatID)
-	}
-	if to.ID == caller.ID {
-		return nil, fmt.Errorf("%w: a chat cannot message itself", ErrInvalid)
 	}
 	outChat, err := m.callerChat(ctx, cc) // whose message this is, for sender metadata
 	if err != nil {
 		return nil, err
-	}
-	// A8/A9: no allowed edge, no message. Absence means denied. The edge is
-	// between the two chats' execution records; the caller is who it is by its
-	// own identity, never by anything in the arguments (X8).
-	if ok, err := m.st.EdgeAllowed(ctx, caller.ID, to.ID); err != nil {
-		return nil, err
-	} else if !ok {
-		return nil, denied("no allowed edge %q -> %q", outChat.Title, toChat.Title)
 	}
 
 	// Always fire-and-forget (spec.md 5.5): no wait, no synchronous reply, no
@@ -430,20 +409,22 @@ func (m *Manager) deliverReply(rs *runState, out runOutcome) {
 
 // -------------------------------------------------------------------- list
 
-// toolList returns one flat list of every chat the caller can currently
-// message: its parent and children (relation parent/child, with depth) plus
-// every chat joined to it by an allowed edge (relation connected). There is
-// no scope argument (spec.md 5.5): this is deliberately the only way a chat
-// discovers who it can talk to. A chat that is both, e.g. a child the caller
-// also holds an edge to (A8 makes that the common case), is listed once as
-// parent/child, not duplicated as connected.
-func (m *Manager) toolList(ctx context.Context, cc *callCtx, _ map[string]any) (any, error) {
-	type row struct {
-		agent    *store.Agent
-		relation string
-		depth    int
-	}
-	seen := map[string]*row{}
+// reachableRow is one chat the caller can currently message.
+type reachableRow struct {
+	agent    *store.Agent
+	relation string
+	depth    int
+}
+
+// reachable computes every chat the caller can currently message: its parent
+// and children (relation parent/child, with depth) plus every chat joined to
+// it by an allowed edge (relation connected), keyed by agent id. A chat that
+// is both, e.g. a child the caller also holds an edge to (A8 makes that the
+// common case), is listed once as parent/child, not duplicated as connected.
+// This is the one place both chat.list and chat.send's name lookup draw from,
+// so a name always resolves to something chat.list would also show.
+func (m *Manager) reachable(ctx context.Context, agent *store.Agent) (map[string]*reachableRow, error) {
+	seen := map[string]*reachableRow{}
 	add := func(a *store.Agent, relation string, depth int) {
 		if a == nil || a.DeletedAt != nil {
 			return
@@ -451,24 +432,24 @@ func (m *Manager) toolList(ctx context.Context, cc *callCtx, _ map[string]any) (
 		if _, ok := seen[a.ID]; ok {
 			return // parent/child (added first) wins over connected
 		}
-		seen[a.ID] = &row{agent: a, relation: relation, depth: depth}
+		seen[a.ID] = &reachableRow{agent: a, relation: relation, depth: depth}
 	}
 
-	if cc.agent.ParentID != nil {
-		parent, err := m.st.GetAgent(ctx, *cc.agent.ParentID)
+	if agent.ParentID != nil {
+		parent, err := m.st.GetAgent(ctx, *agent.ParentID)
 		if err != nil {
 			return nil, err
 		}
-		add(parent, "parent", cc.agent.Depth-1)
+		add(parent, "parent", agent.Depth-1)
 	}
-	children, err := m.st.ListAgents(ctx, store.AgentFilter{ParentID: cc.agent.ID})
+	children, err := m.st.ListAgents(ctx, store.AgentFilter{ParentID: agent.ID})
 	if err != nil {
 		return nil, err
 	}
 	for i := range children {
 		add(&children[i], "child", children[i].Depth)
 	}
-	edges, err := m.st.ListEdges(ctx, store.EdgeFilter{From: cc.agent.ID})
+	edges, err := m.st.ListEdges(ctx, store.EdgeFilter{From: agent.ID})
 	if err != nil {
 		return nil, err
 	}
@@ -482,7 +463,17 @@ func (m *Manager) toolList(ctx context.Context, cc *callCtx, _ map[string]any) (
 		}
 		add(a, "connected", 0)
 	}
+	return seen, nil
+}
 
+// toolList returns one flat list of every chat the caller can currently
+// message. There is no scope argument (spec.md 5.5): this is deliberately the
+// only way a chat discovers who it can talk to.
+func (m *Manager) toolList(ctx context.Context, cc *callCtx, _ map[string]any) (any, error) {
+	seen, err := m.reachable(ctx, cc.agent)
+	if err != nil {
+		return nil, err
+	}
 	ids := make([]string, 0, len(seen))
 	for id := range seen {
 		ids = append(ids, id)
@@ -495,7 +486,7 @@ func (m *Manager) toolList(ctx context.Context, cc *callCtx, _ map[string]any) (
 		if err != nil {
 			return nil, err
 		}
-		row := map[string]any{"chat_id": chat.ID, "title": chat.Title, "status": r.agent.Status, "relation": r.relation}
+		row := map[string]any{"name": r.agent.Name, "chat_id": chat.ID, "title": chat.Title, "status": r.agent.Status, "relation": r.relation}
 		if r.relation != "connected" {
 			row["depth"] = r.depth
 		}
@@ -536,131 +527,12 @@ func (m *Manager) toolStop(ctx context.Context, cc *callCtx, args map[string]any
 	return map[string]any{"cancelled": n}, nil
 }
 
-// ------------------------------------------------------------------- inbox
-
-func (m *Manager) toolInbox(ctx context.Context, cc *callCtx, args map[string]any) (any, error) {
-	wait := time.Duration(0)
-	switch v := args["wait"].(type) {
-	case float64:
-		wait = time.Duration(v * float64(time.Second))
-	case bool:
-		if v {
-			wait = 30 * time.Second
-		}
-	}
-	wait = min(max(wait, 0), 30*time.Second)
-	items, err := m.st.DrainInbox(ctx, cc.agent.ID)
-	if err != nil {
-		return nil, err
-	}
-	if len(items) == 0 && wait > 0 {
-		m.enterWait(cc.rs, false)
-		deadline := time.NewTimer(wait)
-		tick := time.NewTicker(100 * time.Millisecond)
-	poll:
-		for len(items) == 0 {
-			select {
-			case <-ctx.Done():
-				break poll
-			case <-deadline.C:
-				break poll
-			case <-tick.C:
-				if items, err = m.st.DrainInbox(ctx, cc.agent.ID); err != nil {
-					break poll
-				}
-			}
-		}
-		deadline.Stop()
-		tick.Stop()
-		m.leaveWait(cc.rs, false)
-		if err != nil {
-			return nil, err
-		}
-	}
-	out := make([]map[string]any, 0, len(items))
-	for _, it := range items {
-		text, from := "", ""
-		if msg, _ := m.st.GetMessage(ctx, it.MessageID); msg != nil {
-			text = messageText(msg)
-			if sm, ok := parseSender(msg.Sender); ok {
-				from = sm.ChatID // the raw text; the model-facing preamble is not stored
-			}
-		}
-		out = append(out, map[string]any{"from_chat_id": from, "chat_id": it.ChatID, "message_id": it.MessageID, "message": text})
-	}
-	m.publish(events.Event{Type: events.TypeAgent, AgentID: cc.agent.ID})
-	return out, nil
-}
-
-func messageText(msg *store.Message) string {
-	var blocks []struct{ Type, Text string }
-	_ = json.Unmarshal(msg.Content, &blocks)
-	s := ""
-	for _, b := range blocks {
-		if b.Type == "text" {
-			s += b.Text
-		}
-	}
-	return s
-}
-
 // ---------------------------------------------------------- edges and grants
-
-// toolSetEdge always connects the caller to chat_id (spec.md 5.5, M4): the
-// caller must be one of the two endpoints (X8), but chat_id itself is no
-// longer limited to the caller's own subtree, which is what lets two
-// unrelated leaf chats connect directly.
-func (m *Manager) toolSetEdge(ctx context.Context, cc *callCtx, args map[string]any) (any, error) {
-	allowed, present := argBool(args, "allowed")
-	if !present {
-		return nil, fmt.Errorf("%w: allowed is required", ErrInvalid)
-	}
-	chatID := argStr(args, "chat_id")
-	_, other, ok := m.chatRecord(ctx, chatID)
-	if !ok {
-		return nil, fmt.Errorf("%w: no chat %s", ErrNotFound, chatID)
-	}
-	if other.ID == cc.agent.ID {
-		return nil, fmt.Errorf("%w: a chat cannot connect to itself", ErrInvalid)
-	}
-	if _, err := m.SetEdge(ctx, cc.agent.ID, other.ID, allowed); err != nil {
-		return nil, err
-	}
-	return map[string]any{"ok": true}, nil
-}
-
-func (m *Manager) toolGrant(ctx context.Context, cc *callCtx, args map[string]any) (any, error) {
-	chatID := argStr(args, "chat_id")
-	_, rec, ok := m.chatRecord(ctx, chatID)
-	if !ok {
-		return nil, denied("chat %q is not a descendant of yours", chatID)
-	}
-	target, ok := m.isDescendant(ctx, cc.agent.ID, rec.ID)
-	if !ok {
-		return nil, denied("chat %q is not a descendant of yours", chatID)
-	}
-	allowed, present := argBool(args, "allowed")
-	g := store.Grant{AgentID: target.ID, Label: argStr(args, "label"), Project: argStr(args, "project"), Server: argStr(args, "server"), Allowed: allowed, Source: store.GrantExplicit}
-	if !present || g.Label == "" || g.Server == "" {
-		return nil, fmt.Errorf("%w: label, server and allowed are required", ErrInvalid)
-	}
-	if allowed {
-		// A12, enforced against the granting record's set at this moment.
-		own, err := m.st.ListGrants(ctx, cc.agent.ID)
-		if err != nil {
-			return nil, err
-		}
-		if !withinHolder(own, patOf(g)) {
-			return nil, denied("you cannot grant %s/%s/%s: it is not within your own grants", g.Label, g.Project, g.Server)
-		}
-	}
-	revoked, err := m.st.SetGrant(ctx, g)
-	if err != nil {
-		return nil, err
-	}
-	m.afterGrant(g, revoked)
-	return map[string]any{"ok": true}, nil
-}
+//
+// Both edges and grants stay mutable only from a trusted human operator (the
+// console's Graph view and its REST API, spec.md 7.2): there is no
+// switchboard.* self-service any more. A parent/child edge is still opened
+// automatically on spawn (A8), which is all switchboard.chat.send needs.
 
 func (m *Manager) afterGrant(g store.Grant, revoked []store.Grant) {
 	m.emit("grant_changed", map[string]any{"agentId": g.AgentID, "label": g.Label, "project": g.Project, "server": g.Server, "allowed": g.Allowed, "source": g.Source, "revoked": len(revoked)})
@@ -668,16 +540,20 @@ func (m *Manager) afterGrant(g store.Grant, revoked []store.Grant) {
 	m.publish(events.Event{Type: events.TypeAgent, AgentID: g.AgentID})
 }
 
-func (m *Manager) toolListServers(ctx context.Context, cc *callCtx, _ map[string]any) (any, error) {
+// toolListTools lists the tools the caller may call right now, grouped by
+// server, named exactly as the caller would compose them (resolveAgentTool's
+// inverse): a chat pinned to one client drops the redundant label (naming.go).
+func (m *Manager) toolListTools(ctx context.Context, cc *callCtx, _ map[string]any) (any, error) {
 	grants, err := m.st.ListGrants(ctx, cc.agent.ID)
 	if err != nil {
 		return nil, err
 	}
 	rules := agentRules(grants)
+	_, pinned := soleClient(grants)
 	type row struct {
 		Label, Project, Server string
 		connected              bool
-		tools                  int
+		tools                  []map[string]any
 	}
 	seen := map[registry.ServerRef]*row{}
 	for _, e := range m.reg.IterServers() {
@@ -687,12 +563,18 @@ func (m *Manager) toolListServers(ctx context.Context, cc *callCtx, _ map[string
 		}
 		r := seen[ref]
 		if r == nil {
-			r = &row{Label: ref.Label, Project: ref.Project, Server: ref.Server}
+			r = &row{Label: ref.Label, Project: ref.Project, Server: ref.Server, tools: []map[string]any{}}
 			seen[ref] = r
 		}
 		if e.Channel.Ready() {
 			r.connected = true
-			r.tools = len(e.Channel.Tools())
+			for _, ti := range e.Channel.Tools() {
+				name, ok := agentToolName(pinned, ref.Label, ref.Project, ref.Server, ti.Name)
+				if !ok {
+					continue
+				}
+				r.tools = append(r.tools, map[string]any{"name": name, "description": ti.Description})
+			}
 		}
 	}
 	// Held-but-offline grants (A15) are listed too, as not connected.
@@ -702,7 +584,7 @@ func (m *Manager) toolListServers(ctx context.Context, cc *callCtx, _ map[string
 		}
 		ref := registry.ServerRef{Label: g.Label, Project: g.Project, Server: g.Server}
 		if ok, _ := Resolve(rules, ref); ok && seen[ref] == nil {
-			seen[ref] = &row{Label: ref.Label, Project: ref.Project, Server: ref.Server}
+			seen[ref] = &row{Label: ref.Label, Project: ref.Project, Server: ref.Server, tools: []map[string]any{}}
 		}
 	}
 	rows := make([]*row, 0, len(seen))
@@ -715,7 +597,7 @@ func (m *Manager) toolListServers(ctx context.Context, cc *callCtx, _ map[string
 	})
 	out := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, map[string]any{"label": r.Label, "project": r.Project, "server": r.Server, "connected": r.connected, "tool_count": r.tools})
+		out = append(out, map[string]any{"label": r.Label, "project": r.Project, "server": r.Server, "connected": r.connected, "tools": r.tools})
 	}
 	return out, nil
 }
