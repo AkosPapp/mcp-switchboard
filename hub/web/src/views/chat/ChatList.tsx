@@ -305,13 +305,24 @@ export default function ChatList({
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface">
       <div className="space-y-2 border-b border-border p-3">
-        <button
-          type="button"
-          onClick={() => onNewChat(null)}
-          className="min-h-[44px] w-full rounded bg-accent px-3 py-1.5 text-sm font-medium text-bg md:min-h-0"
-        >
-          New chat
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onNewChat(null)}
+            className="min-h-[44px] flex-1 rounded bg-accent px-3 py-1.5 text-sm font-medium text-bg md:min-h-0"
+          >
+            New chat
+          </button>
+          {attention.count > 0 ? (
+            <span
+              data-testid="chat-attention-badge"
+              aria-label={`${attention.count} chat${attention.count === 1 ? "" : "s"} need you`}
+              className="shrink-0 rounded-full bg-warn px-2 py-1 text-xs font-semibold leading-none text-bg"
+            >
+              {attention.count}
+            </span>
+          ) : null}
+        </div>
         {attention.permission === "default" ? (
           <button
             type="button"

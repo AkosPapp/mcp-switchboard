@@ -259,7 +259,7 @@ describe("chat header: settings, system prompt and delete", () => {
     renderView(<ChatThread chatId="c1" onOpenList={onOpenList} />, "/chat/c1");
     await screen.findByText("prompt: Assistant");
 
-    fireEvent.click(screen.getByRole("button", { name: "open chat list" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chats" }));
     expect(onOpenList).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole("button", { name: "chat menu" }));

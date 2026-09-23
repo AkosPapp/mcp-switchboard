@@ -245,7 +245,6 @@ export default function Composer({
           <button
             type="button"
             onClick={onOpenList}
-            aria-label="open chat list"
             className="shrink-0 rounded border border-border px-2 py-1 text-xs text-text md:hidden"
           >
             Chats

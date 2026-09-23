@@ -97,6 +97,12 @@ test("hover archives a chat at once; the archived view offers unarchive", async 
   // On a phone the list is a slide-over behind a button in the thread header.
   if (await drawer.first().isVisible().catch(() => false)) await drawer.first().click();
 
+  // The shared hub accumulates chats from every spec in the whole run (one hub
+  // for the whole suite - see fixtures.ts), so by the time this test runs the
+  // list can be long enough that the row sits well below the fold of the
+  // phone's slide-over; filter down to the one chat this test cares about
+  // rather than lean on scroll-into-view finding it in a long list.
+  await page.getByLabel("search chats").fill(title);
   const row = page.getByTestId("chat-row").filter({ hasText: title });
   await row.hover();
   await row.getByRole("button", { name: "Archive", exact: true }).click(); // no confirm dialog
