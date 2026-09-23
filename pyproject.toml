@@ -1,14 +1,9 @@
 # Workspace root only - deliberately NOT a distributable package.
 #
 # There is no [project] table here, which makes this a "virtual" uv workspace:
-# `uv lock` resolves hub/ and client/ together into a single root uv.lock, and
+# `uv lock` resolves client/ and servers/harness together into a single root uv.lock, and
 # the Nix build (see flake.nix) derives its entire Python package set from that
 # lock file via uv2nix. Add a member here and it shows up in Nix automatically.
-#
-# The two members are intentionally independent: the hub depends on mcp 2.x, the
-# client depends on nothing but websockets. Sharing a lock file does not create
-# a dependency between them - each `packages.<name>` virtualenv only ever
-# contains its own member's closure.
 #
 # Test tooling lives in each member's `test` extra rather than in a root
 # [dependency-groups] table, because uv2nix's workspace.deps does not surface
@@ -17,4 +12,4 @@
 # it from nixpkgs instead of from the lock.
 
 [tool.uv.workspace]
-members = ["legacy/hub", "client", "servers/harness"]
+members = ["client", "servers/harness"]

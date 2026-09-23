@@ -13,6 +13,9 @@ func testAssets() fstest.MapFS {
 		"assets/index-a1b2c3.js":  {Data: []byte("console.log(1)")},
 		"assets/index-d4e5f6.css": {Data: []byte("body{}")},
 		"favicon.svg":             {Data: []byte("<svg/>")},
+		"manifest.webmanifest":    {Data: []byte(`{"name":"mcp-switchboard"}`)},
+		"sw.js":                   {Data: []byte("self.addEventListener('install', () => {});")},
+		"icons/icon-192.png":      {Data: []byte("png-bytes-192")},
 	}
 }
 
@@ -57,6 +60,29 @@ func TestFingerprintedAssetsAreCachedForever(t *testing.T) {
 	}
 	if rec.Body.String() != "console.log(1)" {
 		t.Errorf("body = %q", rec.Body.String())
+	}
+}
+
+// The manifest and service worker are hand-written files with no content hash
+// in their name, unlike the fingerprinted build output, so they must be
+// revalidated on every request like index.html (spec.md U60/U61).
+func TestTheManifestAndServiceWorkerAreNeverCached(t *testing.T) {
+	handler := Handler(testAssets())
+	for _, target := range []string{"/manifest.webmanifest", "/sw.js"} {
+		rec := get(t, handler, target)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d", target, rec.Code)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store, must-revalidate" {
+			t.Errorf("%s: Cache-Control = %q", target, got)
+		}
+	}
+}
+
+func TestTheManifestHasTheRightContentType(t *testing.T) {
+	rec := get(t, Handler(testAssets()), "/manifest.webmanifest")
+	if got := rec.Header().Get("Content-Type"); got != "application/manifest+json" {
+		t.Errorf("Content-Type = %q", got)
 	}
 }
 

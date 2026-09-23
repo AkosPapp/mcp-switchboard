@@ -31,6 +31,10 @@ type Options struct {
 	RetentionDays int
 	MaxRows       int
 
+	// InboxRetentionDays is how long delivered mailbox rows are kept (6.3);
+	// zero means DefaultInboxRetentionDays.
+	InboxRetentionDays int
+
 	// ReadConns sizes the reader pool. WAL lets readers run concurrently with
 	// the writer, so this is just "how many console requests may hit the disk
 	// at once".
@@ -41,7 +45,9 @@ type Options struct {
 const (
 	DefaultRetentionDays = 30
 	DefaultMaxRows       = 100_000
-	defaultReadConns     = 8
+	// DefaultInboxRetentionDays is INBOX_RETENTION_DAYS' default (6.3).
+	DefaultInboxRetentionDays = 7
+	defaultReadConns          = 8
 )
 
 // SQLiteStore is the Store implementation. It holds two handles over one file:
@@ -70,6 +76,9 @@ func Open(ctx context.Context, opts Options) (*SQLiteStore, error) {
 	}
 	if opts.MaxRows == 0 {
 		opts.MaxRows = DefaultMaxRows
+	}
+	if opts.InboxRetentionDays == 0 {
+		opts.InboxRetentionDays = DefaultInboxRetentionDays
 	}
 	if opts.ReadConns <= 0 {
 		opts.ReadConns = defaultReadConns

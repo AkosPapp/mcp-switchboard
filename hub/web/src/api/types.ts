@@ -30,11 +30,19 @@ export interface ServerInfo {
   tools: ToolInfo[];
 }
 
+export interface ClientEnvironment {
+  kinds: string[];
+  project?: string;
+  workspace?: string;
+  details?: Record<string, string>;
+}
+
 export interface ClientInfo {
   name: string;
   version: string;
   instance: string;
   label: string;
+  environment?: ClientEnvironment | null;
 }
 
 export interface ConnectionInfo {
@@ -110,8 +118,138 @@ export interface JsonSchema {
 
 /** An event from the global feed. Notifications only - never content (N3). */
 export interface ChangeEvent {
-  type: "connections" | "call" | "agent" | "graph" | "chat";
+  type: "connections" | "call" | "agent" | "graph" | "chat" | "profile";
   callId?: string;
   agentId?: string;
   chatId?: string;
+}
+
+/* ---- Orchestrator surface (docs/API.md) ---- */
+
+export type AgentStatus = "idle" | "running" | "waiting" | "blocked" | "done" | "error";
+export type AgentOrigin = "manual" | "spawn" | "chat";
+export type ApprovalMode = "never" | "destructive" | "always";
+export type GrantSource = "inherited" | "explicit" | "human";
+
+export interface AgentModel {
+  provider?: string;
+  model?: string;
+  [key: string]: unknown;
+}
+
+export interface Agent {
+  id: string;
+  parentId: string | null;
+  name: string;
+  description: string;
+  project: string | null;
+  model: AgentModel;
+  systemPrompt: string;
+  depth: number;
+  status: AgentStatus;
+  budget: Record<string, unknown>;
+  capabilities: { canSpawn: boolean; canMessage: boolean };
+  approval: ApprovalMode;
+  autoWake: boolean;
+  tokenTotal: number;
+  costTotalMicros: number;
+  createdAt: string;
+  updatedAt: string;
+  lastActivityAt: string;
+  deletedAt: string | null;
+  /** The execution record behind a chat (1:1 with it); the console never shows it as such. */
+  origin?: AgentOrigin;
+  /** The one MCP client the agent may use; null = none. */
+  clientLabel?: string | null;
+  /** Live profile reference; null = the agent's own systemPrompt. */
+  profileId?: string | null;
+}
+
+export interface Grant {
+  agentId: string;
+  label: string;
+  project: string;
+  server: string;
+  allowed: boolean;
+  source: GrantSource;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GrantInput {
+  label: string;
+  project?: string;
+  server: string;
+  allowed: boolean;
+}
+
+export interface Edge {
+  fromAgentId: string;
+  toAgentId: string;
+  allowed: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GraphAgent extends Agent {
+  unreadMail: number;
+  currentTool?: string;
+}
+
+export interface GraphGrant extends Grant {
+  connected: boolean;
+  orphaned?: boolean;
+}
+
+export interface GraphServer {
+  label: string;
+  project: string;
+  server: string;
+  connected: boolean;
+  toolCount: number;
+}
+
+export interface GraphView {
+  agents: GraphAgent[];
+  edges: Edge[];
+  grants: GraphGrant[];
+  servers: GraphServer[];
+}
+
+export interface PatchAgentInput {
+  name?: string;
+  description?: string;
+  project?: string | null;
+  model?: AgentModel;
+  systemPrompt?: string;
+  budget?: Record<string, unknown>;
+  capabilities?: { canSpawn: boolean; canMessage: boolean };
+  approval?: ApprovalMode;
+  autoWake?: boolean;
+  clientLabel?: string | null;
+  profileId?: string | null;
+}
+
+export interface ModelInfo {
+  provider: string;
+  model: string;
+  prices?: Record<string, unknown>;
+  contextWindow?: number;
+  supportsTools?: boolean;
+  /** Found from the provider rather than declared in the models file. */
+  discovered?: boolean;
+}
+
+/** GET /api/push/vapid-public-key (spec.md 8.7). */
+export interface VapidPublicKey {
+  publicKey: string;
+}
+
+/** A registered Web Push subscription, as the hub stores and returns it. */
+export interface PushSubscriptionRecord {
+  id: string;
+  endpoint: string;
+  createdAt: string;
+  lastSeenAt: string;
+  label?: string | null;
 }

@@ -125,6 +125,8 @@ class TunnelSettings:
     label: str
     reconnect_delay: float = DEFAULT_RECONNECT_DELAY
     max_retries: int = DEFAULT_MAX_RETRIES
+    # Detected once at startup (see environment.detect); sent in every hello.
+    environment: Optional[Dict[str, Any]] = None
 
 
 class HubConnection:
@@ -262,6 +264,7 @@ class HubConnection:
                         self.instance,
                         self.settings.label,
                         self._descriptors(),
+                        self.settings.environment,
                     )
                 )
                 async for raw in ws:

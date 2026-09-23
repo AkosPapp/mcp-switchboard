@@ -4,7 +4,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 
 import App from "./App";
+import { registerServiceWorker } from "./pwa/registerServiceWorker";
 import "./index.css";
+
+registerServiceWorker();
 
 const queryClient = new QueryClient({
   defaultOptions: {

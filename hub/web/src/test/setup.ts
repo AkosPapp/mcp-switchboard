@@ -6,6 +6,7 @@ class StubEventSource {
   onopen: (() => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: (() => void) | null = null;
+  addEventListener() {}
   close() {}
 }
 

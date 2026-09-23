@@ -123,7 +123,6 @@
                   });
               in
               {
-                mcp-switchboard-hub = trim "mcp-switchboard-hub" "mcp_switchboard_hub";
                 mcp-switchboard-client = trim "mcp-switchboard-client" "mcp_switchboard_client";
                 mcp-switchboard-server-harness = trim "mcp-switchboard-server-harness" "mcp_switchboard_server_harness";
               }

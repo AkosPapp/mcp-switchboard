@@ -36,7 +36,13 @@ required: this listener is the one intended to face the public internet.
     "name": "mcp-switchboard-client",
     "version": "0.3.0",
     "instance": "3f8a…",
-    "label": "legion5"
+    "label": "legion5",
+    "environment": {
+      "kinds": ["devcontainer", "direnv"],
+      "project": "myproject",
+      "workspace": "/workspaces/myproject",
+      "details": {"devcontainerName": "myproject", "direnvDir": "/workspaces/myproject"}
+    }
   },
   "servers": [
     {"name": "git", "command": "uvx mcp-server-git --repository ."},
@@ -48,7 +54,17 @@ required: this listener is the one intended to face the public internet.
 `instance` is a per-process UUID. `label` identifies the machine, defaults to its hostname, and is what
 the hub uses to tag tools by host. `command` is descriptive only — the hub never executes it.
 
-`project` is optional. It groups a server under a named project on that machine, which the hub uses in
+`client.environment` is optional and additive (the protocol version stays 1; older clients omit it). It
+tells the hub where the client runs so a console can show it: `kinds` is a list of open strings (today
+`devcontainer`, `container`, `direnv`, `nix-shell`, `venv`; may be empty), `project` the project name
+(devcontainer.json `name`, else the git root's directory name, else the cwd basename, or an explicit
+`MCP_SWITCHBOARD_PROJECT_NAME`), `workspace` the client's absolute cwd, and `details` a small map of
+non-secret strings (paths and names only, never environment variable values). The hub decodes it
+tolerantly: unknown kinds are kept, a malformed `environment` is dropped without rejecting the hello,
+and sizes are capped (kinds at 8, details at 16 entries, every string at 256 characters).
+`docs/protocol.json` lists it under `hello.clientOptional`.
+
+`project` (per server) is optional. It groups a server under a named project on that machine, which the hub uses in
 tool names (`{label}__{project}__{server}__{tool}`) and in the project-scoped `/mcp` endpoints. Omit it
 for a server that belongs to no project.
 

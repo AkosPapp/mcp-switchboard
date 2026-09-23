@@ -24,15 +24,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AkosPapp/mcp-switchboard/hub/internal/agents"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/api"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/calls"
+	"github.com/AkosPapp/mcp-switchboard/hub/internal/chatstream"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/config"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/console"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/events"
+	"github.com/AkosPapp/mcp-switchboard/hub/internal/llm"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/loki"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/mcpserver"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/metrics"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/protocol"
+	"github.com/AkosPapp/mcp-switchboard/hub/internal/push"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/registry"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/store"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/tunnel"
@@ -167,19 +171,76 @@ func run() error {
 		Logger:  logger,
 	})
 
-	mcpEndpoint := mcpserver.New(reg, dispatcher, mcpserver.Options{
-		Version: version,
-		Logger:  logger,
-	})
+	// Web Push (spec.md 8.7): constructed unconditionally, Send is a no-op
+	// without VAPID keys (push.Config.Enabled).
+	pushSender := push.New(db, push.Config{
+		VAPIDPublicKey:  settings.PushVAPIDPublicKey,
+		VAPIDPrivateKey: settings.PushVAPIDPrivateKey,
+		Subscriber:      "mailto:push@" + settings.PrivateHost,
+	}, logger)
 
-	apiHandler := api.New(api.Options{
+	// The orchestrator exists only when enabled (E7): with it off there is no
+	// LLM registry, no /mcp/agent/* scope, no switchboard.* tools and no
+	// orchestrator routes in the API.
+	var (
+		manager *agents.Manager
+		streams *chatstream.Hub
+	)
+	mcpOpts := mcpserver.Options{Version: version, Logger: logger}
+	if settings.AgentsEnabled {
+		llmRegistry, err := llm.NewRegistryFromSettings(settings)
+		if err != nil {
+			return err
+		}
+		streams = chatstream.NewHub()
+		defer streams.Close()
+		go func() {
+			t := time.NewTicker(5 * time.Second)
+			defer t.Stop()
+			for {
+				collectors.SetStreamClients("chat", streams.Subscribers())
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+				}
+			}
+		}()
+		manager = agents.New(agents.Options{
+			Store:      db,
+			Registry:   reg,
+			Dispatcher: dispatcher,
+			LLM:        llmRegistry,
+			Bus:        bus,
+			Streamer:   streams,
+			Settings:   settings,
+			Metrics:    collectors,
+			Loki:       exporter,
+			Logger:     logger,
+			Push:       pushSender,
+		})
+		if err := manager.Start(ctx); err != nil {
+			return err
+		}
+		mcpOpts.Agents = manager
+	}
+
+	mcpEndpoint := mcpserver.New(reg, dispatcher, mcpOpts)
+
+	apiOpts := api.Options{
 		Settings:   settings,
 		Registry:   reg,
 		Store:      db,
 		Dispatcher: dispatcher,
 		Bus:        bus,
 		Logger:     logger,
-	})
+		PushStore:  db,
+	}
+	if manager != nil {
+		apiOpts.Agents = manager
+		apiOpts.Streams = streams
+	}
+	apiHandler := api.New(apiOpts)
 
 	tunnelHandler := tunnel.NewHandler(reg, tunnel.Options{
 		Token:        settings.TunnelToken,
@@ -194,6 +255,7 @@ func run() error {
 	// are refreshed whenever the topology changes rather than on a timer.
 	go watchTopology(ctx, bus, reg, collectors)
 	go purgeLoop(ctx, db, logger)
+	go storeRowsLoop(ctx, db, collectors)
 
 	tunnelSrv := &http.Server{
 		Addr:              net.JoinHostPort(settings.TunnelHost, strconv.Itoa(settings.TunnelPort)),
@@ -241,6 +303,10 @@ func run() error {
 	defer cancel()
 	_ = tunnelSrv.Shutdown(shutdownCtx)
 	_ = privateSrv.Shutdown(shutdownCtx)
+	if manager != nil {
+		// G3: cancel runs; they are recorded as interrupted.
+		_ = manager.Shutdown(shutdownCtx)
+	}
 	exporter.Close(shutdownCtx)
 
 	return nil
@@ -329,7 +395,36 @@ func purgeLoop(ctx context.Context, db *store.SQLiteStore, logger *slog.Logger) 
 		} else if deleted > 0 {
 			logger.Info("purged call records", "rows", deleted)
 		}
+		// Runs, idempotency keys and delivered mail are pruned by the same
+		// retention pass (D9, 6.3); harmless when the orchestrator is off.
+		if deleted, err := db.PurgeRuns(ctx); err != nil {
+			logger.Warn("could not purge runs", "error", err)
+		} else if deleted > 0 {
+			logger.Info("purged runs", "rows", deleted)
+		}
+		if deleted, err := db.PruneInbox(ctx); err != nil {
+			logger.Warn("could not prune the inbox", "error", err)
+		} else if deleted > 0 {
+			logger.Info("pruned delivered mail", "rows", deleted)
+		}
 
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// storeRowsLoop keeps mcpsb_store_rows fresh; the row counts are the early
+// warning for unbounded chat growth (D11).
+func storeRowsLoop(ctx context.Context, db *store.SQLiteStore, collectors *metrics.Metrics) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		if stats, err := db.Stats(ctx); err == nil {
+			collectors.SetStoreRows(stats.Tables)
+		}
 		select {
 		case <-ctx.Done():
 			return

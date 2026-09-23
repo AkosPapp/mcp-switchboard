@@ -18,6 +18,8 @@ type Target struct {
 	Label   string
 	Project string
 	Server  string
+	// AgentID is set for ScopeAgent only, and comes from the URL (spec.md X8).
+	AgentID string
 }
 
 // parseTarget maps a request path to the scope it serves (spec.md H6).
@@ -28,10 +30,11 @@ type Target struct {
 //	/mcp/host/{label}/server/{server}                    server
 //	/mcp/host/{label}/project/{project}/server/{server}  project + server
 //
-// ok is false for anything else, including /mcp/agent/{id}: the agent scope is
-// internal to the run loop and is deliberately not reachable from here (H6, Q2).
-// When it lands it becomes another case below, and everything downstream of
-// Target already handles registry.ScopeAgent.
+//	/mcp/agent/{id}                                      agent (only when agents are enabled)
+//
+// ok is false for anything else. parseTarget is pure: whether the agent scope
+// exists at all is the Endpoint's decision (E7: with the orchestrator off,
+// /mcp/agent/* is a 404).
 func parseTarget(path string) (Target, bool) {
 	segments := strings.Split(strings.Trim(path, "/"), "/")
 	if len(segments) == 0 || segments[0] != "mcp" {
@@ -41,6 +44,12 @@ func parseTarget(path string) (Target, bool) {
 	rest := segments[1:]
 	if len(rest) == 0 {
 		return Target{Scope: registry.ScopeAll}, true
+	}
+	if rest[0] == "agent" {
+		if len(rest) != 2 || rest[1] == "" {
+			return Target{}, false
+		}
+		return Target{Scope: registry.ScopeAgent, AgentID: rest[1]}, true
 	}
 	if rest[0] != "host" || len(rest) < 2 || rest[1] == "" {
 		return Target{}, false
@@ -121,7 +130,7 @@ func (t Target) matches(connection *registry.Connection, channel *registry.Serve
 // a NUL because it cannot occur in a path segment, so two different targets can
 // never collide on one key.
 func (t Target) key() string {
-	return strings.Join([]string{string(t.Scope), t.Label, t.Project, t.Server}, "\x00")
+	return strings.Join([]string{string(t.Scope), t.Label, t.Project, t.Server, t.AgentID}, "\x00")
 }
 
 func targetForRequest(r *http.Request) (Target, bool) {

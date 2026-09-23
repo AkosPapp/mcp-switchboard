@@ -33,6 +33,50 @@ type fakeStore struct {
 	lastFilter store.CallFilter
 
 	err error
+
+	// Push subscriptions, keyed by endpoint - same upsert-by-endpoint
+	// semantics as the real store, kept simple for handler-level tests.
+	subs    []store.PushSubscription
+	pushErr error
+}
+
+func (f *fakeStore) UpsertPushSubscription(_ context.Context, sub store.PushSubscription) (store.PushSubscription, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pushErr != nil {
+		return store.PushSubscription{}, f.pushErr
+	}
+	for i, existing := range f.subs {
+		if existing.Endpoint == sub.Endpoint {
+			sub.ID = existing.ID
+			f.subs[i] = sub
+			return sub, nil
+		}
+	}
+	f.subs = append(f.subs, sub)
+	return sub, nil
+}
+
+func (f *fakeStore) ListPushSubscriptions(context.Context) ([]store.PushSubscription, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]store.PushSubscription(nil), f.subs...), f.pushErr
+}
+
+func (f *fakeStore) DeletePushSubscription(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pushErr != nil {
+		return f.pushErr
+	}
+	out := f.subs[:0]
+	for _, s := range f.subs {
+		if s.ID != id {
+			out = append(out, s)
+		}
+	}
+	f.subs = out
+	return nil
 }
 
 func (f *fakeStore) ListCalls(_ context.Context, filter store.CallFilter) ([]store.CallRecord, error) {
@@ -187,6 +231,7 @@ func newFixture(t *testing.T, mutate func(*Options)) *fixture {
 		Store:      f.store,
 		Dispatcher: f.dispatch,
 		Bus:        bus,
+		PushStore:  f.store,
 	}
 	if mutate != nil {
 		mutate(&opts)

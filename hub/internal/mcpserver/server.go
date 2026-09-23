@@ -44,6 +44,9 @@ type Endpoint struct {
 	dispatcher *calls.Dispatcher
 	version    string
 	log        *slog.Logger
+	// agents backs /mcp/agent/{id}; nil when the orchestrator is disabled,
+	// which makes that whole scope a 404 (spec.md E7).
+	agents AgentBackend
 
 	// One SDK server per distinct target, created on first use.
 	//
@@ -65,6 +68,22 @@ type Endpoint struct {
 type Options struct {
 	Version string
 	Logger  *slog.Logger
+	// Agents, when set, enables the /mcp/agent/{id} scope and its switchboard.*
+	// tools (spec.md 5.5). Leave nil when AGENTS_ENABLED is false.
+	Agents AgentBackend
+}
+
+// AgentBackend is what the agent scope needs from the orchestrator. The agent
+// is identified by the URL alone (X8); nothing in a tool call's arguments can
+// change who is calling.
+type AgentBackend interface {
+	// HasAgent reports whether a live agent has this id.
+	HasAgent(ctx context.Context, agentID string) bool
+	// AgentTools is the agent's catalog: granted registry tools composed at
+	// ScopeAll plus the switchboard.* tools its capabilities allow (5.4, M1).
+	AgentTools(ctx context.Context, agentID string) ([]*mcp.Tool, error)
+	// CallAgentTool authorises and dispatches one call as the agent.
+	CallAgentTool(ctx context.Context, agentID, name string, args map[string]any) (*mcp.CallToolResult, error)
 }
 
 // New returns an endpoint serving reg's tools, dispatching calls through d.
@@ -83,6 +102,7 @@ func New(reg *registry.Registry, d *calls.Dispatcher, opts Options) *Endpoint {
 		dispatcher: d,
 		version:    version,
 		log:        logger,
+		agents:     opts.Agents,
 		servers:    make(map[string]*mcp.Server),
 	}
 	streamable := mcp.NewStreamableHTTPHandler(endpoint.serverFor, &mcp.StreamableHTTPOptions{
@@ -92,7 +112,13 @@ func New(reg *registry.Registry, d *calls.Dispatcher, opts Options) *Endpoint {
 		PropagateRequestCancellation: true,
 	})
 	endpoint.handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := targetForRequest(r); !ok {
+		target, ok := targetForRequest(r)
+		if ok && target.Scope == registry.ScopeAgent &&
+			(endpoint.agents == nil || !endpoint.agents.HasAgent(r.Context(), target.AgentID)) {
+			http.NotFound(w, r)
+			return
+		}
+		if !ok {
 			// Answered here rather than by returning nil from serverFor, which
 			// the SDK reports as 400: a path that names no scope is a wrong
 			// URL, and 404 is what tells the operator that.
@@ -115,7 +141,7 @@ func (e *Endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) { e.handler
 // serverFor returns the server backing this request's scope, creating it once.
 func (e *Endpoint) serverFor(r *http.Request) *mcp.Server {
 	target, ok := targetForRequest(r)
-	if !ok {
+	if !ok || (target.Scope == registry.ScopeAgent && e.agents == nil) {
 		return nil
 	}
 
@@ -150,6 +176,13 @@ func (e *Endpoint) handle(target Target) mcp.Middleware {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			switch method {
 			case methodListTools:
+				if target.Scope == registry.ScopeAgent {
+					tools, err := e.agents.AgentTools(ctx, target.AgentID)
+					if err != nil {
+						return nil, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: err.Error()}
+					}
+					return &mcp.ListToolsResult{Tools: tools}, nil
+				}
 				return e.listTools(target), nil
 			case methodCallTool:
 				params, ok := req.GetParams().(*mcp.CallToolParamsRaw)
@@ -227,6 +260,10 @@ func (e *Endpoint) callTool(ctx context.Context, target Target, params *mcp.Call
 			Code:    jsonrpc.CodeInvalidParams,
 			Message: fmt.Sprintf("arguments for %q are not a JSON object: %v", params.Name, err),
 		}
+	}
+	if target.Scope == registry.ScopeAgent {
+		// Identity is the URL's, never the arguments' (X8).
+		return e.agents.CallAgentTool(ctx, target.AgentID, params.Name, arguments)
 	}
 
 	connection, channel, upstream, ok := e.registry.ResolveTool(target.Scope, params.Name, target.filter())

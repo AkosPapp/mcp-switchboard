@@ -2,12 +2,26 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- API and stream URLs are relative ("api/..."); without this they would resolve against nested routes such as /chat/:id (spec.md U1a). -->
+    <base href="/" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="color-scheme" content="light dark" />
     <title>mcp-switchboard</title>
     <link rel="icon" href="./favicon.svg" />
-    <script type="module" crossorigin src="/assets/index-CtMJFfXd.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-D_d_wJ5F.css">
+
+    <!-- Installability (spec.md 8.6): manifest + icons so Android/iOS both
+         offer "Add to Home Screen" with a proper icon, and the app opens
+         standalone/full-screen rather than in a browser tab. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="theme-color" content="#161a20" />
+    <!-- iOS Safari ignores the manifest's display mode unless told directly
+         that the page is capable of running standalone. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="switchboard" />
+    <script type="module" crossorigin src="/assets/index-DPATcuQA.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DM5M5ZfB.css">
   </head>
   <body>
     <div id="root"></div>

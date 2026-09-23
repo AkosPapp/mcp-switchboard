@@ -104,8 +104,47 @@ function renderView(entry = "/connections") {
   );
 }
 
-beforeEach(() => stubFetch(() => snapshot));
+beforeEach(() => {
+  localStorage.clear();
+  stubFetch(() => snapshot);
+});
 afterEach(() => vi.unstubAllGlobals());
+
+describe("Connections memory", () => {
+  it("brings the filter text back after the view is left and reopened", async () => {
+    const user = userEvent.setup();
+    const first = renderView();
+    await screen.findByText("echo");
+    await user.type(screen.getByPlaceholderText("filter tools, servers, machines"), "lsp");
+    first.unmount();
+
+    renderView();
+    expect(screen.getByPlaceholderText("filter tools, servers, machines")).toHaveValue("lsp");
+    await screen.findByText("lsp");
+    expect(screen.queryByText("echo")).not.toBeInTheDocument();
+  });
+
+  it("works when storage throws", async () => {
+    const spy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    const user = userEvent.setup();
+    renderView();
+    await screen.findByText("echo");
+    await user.type(screen.getByPlaceholderText("filter tools, servers, machines"), "x");
+    expect(spy).toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
+  it("reopens on the tool named by a remembered location", async () => {
+    renderView("/connections?connection=c1&server=demo&tool=echo");
+    const row = await screen.findByRole("treeitem", { name: /echo/ });
+    expect(row).toHaveAttribute("aria-selected", "true");
+  });
+});
 
 describe("Connections", () => {
   it("shows every machine, server and tool", async () => {
@@ -289,5 +328,57 @@ describe("Connections", () => {
 
     const editor = (await screen.findByLabelText("Arguments as JSON")) as HTMLTextAreaElement;
     expect(JSON.parse(editor.value)).toEqual({ message: "hi", extra: { deep: true } });
+  });
+});
+
+describe("Connections environment", () => {
+  const withEnv: Snapshot = {
+    connections: [
+      {
+        ...snapshot.connections[0],
+        client: {
+          ...snapshot.connections[0].client,
+          environment: {
+            kinds: ["devcontainer", "direnv"],
+            project: "orbit",
+            workspace: "/work/orbit",
+          },
+        },
+      },
+      {
+        ...snapshot.connections[0],
+        id: "c2",
+        label: "oldbox",
+        client: { ...snapshot.connections[0].client, label: "oldbox" },
+        servers: [{ ...snapshot.connections[0].servers[0], name: "other" }],
+      },
+    ],
+  };
+
+  it("shows project and chips, and says so for old clients", async () => {
+    stubFetch(() => withEnv);
+    renderView();
+    await screen.findAllByText("orbit");
+    expect(screen.getByText("devcontainer")).toBeInTheDocument();
+    expect(screen.getByText("direnv")).toBeInTheDocument();
+    expect(screen.getByText(/environment not reported/)).toBeInTheDocument();
+  });
+
+  it.each(["devcontainer", "orbit", "/work/orbit"])("filters by %s", async (needle) => {
+    const user = userEvent.setup();
+    stubFetch(() => withEnv);
+    renderView();
+    await screen.findAllByText("orbit");
+    await user.type(screen.getByPlaceholderText("filter tools, servers, machines"), needle);
+    expect(screen.getByText("orbit")).toBeInTheDocument();
+    expect(screen.queryByText("oldbox")).not.toBeInTheDocument();
+  });
+
+  it("shows the environment and workspace in the detail header", async () => {
+    stubFetch(() => withEnv);
+    renderView("/connections?connection=c1&server=demo&tool=echo");
+    const header = await screen.findByTestId("connection-env");
+    expect(within(header).getByText("devcontainer")).toBeInTheDocument();
+    expect(within(header).getByText("/work/orbit")).toBeInTheDocument();
   });
 });

@@ -1,0 +1,48 @@
+/* highlight.js tokens on the console palette, so both themes work without a
+ * second stylesheet (spec.md U4). */
+.hljs-comment,
+.hljs-quote {
+  color: rgb(var(--muted));
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag,
+.hljs-meta .hljs-keyword {
+  color: rgb(var(--accent));
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-meta .hljs-string {
+  color: rgb(var(--ok));
+}
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-link {
+  color: rgb(var(--warn));
+}
+.hljs-title,
+.hljs-section,
+.hljs-name,
+.hljs-type,
+.hljs-built_in,
+.hljs-class .hljs-title {
+  color: rgb(var(--accent));
+  font-weight: 600;
+}
+.hljs-deletion,
+.hljs-tag {
+  color: rgb(var(--danger));
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 700;
+}

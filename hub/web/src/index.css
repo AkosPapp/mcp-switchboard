@@ -77,3 +77,24 @@ body {
   @apply outline-none ring-2 ring-accent ring-offset-2;
   --tw-ring-offset-color: rgb(var(--bg));
 }
+
+/* React Flow follows the console's palette rather than its own light/dark. */
+.react-flow {
+  --xy-background-color: rgb(var(--bg));
+  --xy-background-pattern-dots-color-default: rgb(var(--border));
+  --xy-controls-button-background-color: rgb(var(--surface));
+  --xy-controls-button-background-color-hover: rgb(var(--raised));
+  --xy-controls-button-color: rgb(var(--text));
+  --xy-controls-button-border-color: rgb(var(--border));
+  --xy-edge-label-background-color: rgb(var(--surface));
+  --xy-edge-label-color: rgb(var(--muted));
+  --xy-minimap-background-color: rgb(var(--surface));
+  --xy-minimap-mask-background-color: rgb(var(--bg) / 0.6);
+  --xy-attribution-background-color: rgb(var(--surface) / 0.7);
+}
+@media (pointer: coarse) {
+  .react-flow__controls-button {
+    width: 44px;
+    height: 44px;
+  }
+}

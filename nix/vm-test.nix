@@ -175,6 +175,31 @@ pkgs.testers.runNixOSTest {
         ];
       };
 
+    # A second hub with the agent orchestrator on (spec.md E4, V8). The key is a
+    # dummy and no provider is ever contacted: the test only proves the module
+    # wires the options through and the hub comes up serving /api/agents.
+    agents =
+      { ... }:
+      {
+        imports = [ module ];
+
+        environment.etc."mcp-switchboard/llm-key".text = "dummy-key-not-real";
+
+        services.mcp-switchboard = {
+          enable = true;
+          package = hubPackage;
+          tunnelToken = token;
+          private.port = privatePort;
+          agents.enable = true;
+          llm = {
+            provider = "anthropic";
+            apiKeyFile = "/etc/mcp-switchboard/llm-key";
+          };
+        };
+
+        environment.systemPackages = [ pkgs.curl ];
+      };
+
     client =
       { ... }:
       {
@@ -246,6 +271,20 @@ pkgs.testers.runNixOSTest {
         # A deep link is served by the hub's fallback rather than by the router
         # alone, so a reload on /calls has to work.
         hub.succeed("curl -fsS ${api}/calls | grep -qi '<!doctype html'")
+
+    with subtest("agents are off by default: /api/agents does not exist"):
+        code = hub.succeed(
+            "curl -s -o /dev/null -w '%{http_code}' ${api}/api/agents"
+        ).strip()
+        assert code == "404", f"expected 404 with agents disabled, got {code}"
+
+    with subtest("with agents enabled the console is served and /api/agents answers"):
+        agents.wait_for_unit("mcp-switchboard.service")
+        agents.wait_for_open_port(${toString privatePort})
+        agents.succeed("curl -fsS ${api}/ | grep -qi '<!doctype html'")
+        agents.succeed("curl -fsS ${api}/api/agents")
+        # The key was handed over as a path and never appears in the unit.
+        agents.fail("systemctl show mcp-switchboard.service | grep -q dummy-key-not-real")
 
     with subtest("the private listener is not reachable from the client machine"):
         # The reason the hub has two listeners at all: only the token-guarded

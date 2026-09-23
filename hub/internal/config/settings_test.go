@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -182,5 +183,114 @@ func TestTheEnvironmentBeatsTheEnvFile(t *testing.T) {
 	}
 	if s.TunnelToken != "from-the-environment" {
 		t.Errorf("token = %q, want the environment to win", s.TunnelToken)
+	}
+}
+
+func TestAgentDefaults(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("MCP_SWITCHBOARD_TUNNEL_TOKEN", "t")
+	s, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.AgentsEnabled || s.AgentMaxDepth != 4 || s.AgentMaxChildren != 8 ||
+		s.AgentMaxConcurrentRuns != 16 || s.AgentMaxParallelToolCalls != 8 ||
+		s.AgentReplyTimeout != 300 || s.ApprovalTimeout != 3600 ||
+		s.InboxRetentionDays != 7 || s.ShutdownGrace != 10 {
+		t.Errorf("bad defaults: %+v", s)
+	}
+	b := s.AgentDefaultBudget
+	if b.MaxTurns != 32 || b.MaxToolCalls != 200 || b.MaxTokens != 1_000_000 ||
+		b.MaxCostMicros != 5_000_000 || b.MaxWallSeconds != 1800 || b.MaxLifetimeCostMicros != 50_000_000 {
+		t.Errorf("bad budget: %+v", b)
+	}
+	if len(s.AgentDefaultGrants) != 1 || s.AgentDefaultGrants[0] != (GrantSpec{"*", "*", "*"}) {
+		t.Errorf("grants = %+v", s.AgentDefaultGrants)
+	}
+}
+
+func TestAgentOverridesAndSecrets(t *testing.T) {
+	clearEnv(t)
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "key")
+	os.WriteFile(keyFile, []byte("sk-file\n"), 0o600)
+	t.Setenv("MCP_SWITCHBOARD_TUNNEL_TOKEN", "t")
+	t.Setenv("MCP_SWITCHBOARD_AGENTS_ENABLED", "true")
+	t.Setenv("MCP_SWITCHBOARD_LLM_ANTHROPIC_API_KEY", keyFile)
+	t.Setenv("MCP_SWITCHBOARD_LLM_OPENAI_COMPATIBLE_API_KEY", "sk-plain")
+	t.Setenv("MCP_SWITCHBOARD_LLM_OPENAI_COMPATIBLE_BASE_URL", "http://localhost:11434/v1/")
+	t.Setenv("MCP_SWITCHBOARD_AGENT_DEFAULT_BUDGET", `{"max_turns": 5}`)
+	t.Setenv("MCP_SWITCHBOARD_AGENT_DEFAULT_GRANTS", `[{"label":"a","project":"p","server":"s"}]`)
+	t.Setenv("MCP_SWITCHBOARD_AGENT_MAX_DEPTH", "2")
+	s, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.AgentsEnabled || s.LLMAnthropicAPIKey != "sk-file" || s.LLMOpenAICompatibleBaseURL != "http://localhost:11434/v1" {
+		t.Errorf("unexpected: %+v", s)
+	}
+	if s.AgentDefaultBudget.MaxTurns != 5 || s.AgentDefaultBudget.MaxToolCalls != 200 {
+		t.Errorf("budget should merge over defaults: %+v", s.AgentDefaultBudget)
+	}
+	if s.AgentMaxDepth != 2 || s.AgentDefaultGrants[0].Label != "a" {
+		t.Errorf("overrides lost: %+v", s)
+	}
+	out := fmt.Sprintf("%v %+v %#v", s, s, s)
+	for _, secret := range []string{"sk-file", "sk-plain", "t0ken"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("printed settings leak %q", secret)
+		}
+	}
+}
+
+func TestAgentBadValues(t *testing.T) {
+	for name, val := range map[string]string{
+		"AGENT_DEFAULT_BUDGET": "nope",
+		"AGENT_DEFAULT_GRANTS": `[{"label":"a"}]`,
+		"AGENT_MAX_DEPTH":      "x",
+	} {
+		clearEnv(t)
+		t.Setenv("MCP_SWITCHBOARD_TUNNEL_TOKEN", "t")
+		t.Setenv("MCP_SWITCHBOARD_"+name, val)
+		if _, err := Load(""); err == nil {
+			t.Errorf("%s=%q should fail", name, val)
+		}
+	}
+	clearEnv(t)
+	t.Setenv("MCP_SWITCHBOARD_TUNNEL_TOKEN", "t")
+	t.Setenv("MCP_SWITCHBOARD_LLM_OPENAI_API_KEY", "/nonexistent/key")
+	if _, err := Load(""); err == nil {
+		t.Error("a key pointing at a missing file must fail")
+	}
+}
+
+func TestOllamaSettings(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("MCP_SWITCHBOARD_TUNNEL_TOKEN", "t")
+	s, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.LLMOpenAICompatibleKind != "auto" || !s.LLMOpenAICompatibleDiscover || s.LLMOllamaNumCtx != 0 {
+		t.Errorf("defaults: %q %v %d", s.LLMOpenAICompatibleKind, s.LLMOpenAICompatibleDiscover, s.LLMOllamaNumCtx)
+	}
+	t.Setenv("MCP_SWITCHBOARD_LLM_OPENAI_COMPATIBLE_KIND", "Ollama")
+	t.Setenv("MCP_SWITCHBOARD_LLM_OPENAI_COMPATIBLE_DISCOVER", "false")
+	t.Setenv("MCP_SWITCHBOARD_LLM_OLLAMA_NUM_CTX", "16384")
+	s, err = Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.LLMOpenAICompatibleKind != "ollama" || s.LLMOpenAICompatibleDiscover || s.LLMOllamaNumCtx != 16384 {
+		t.Errorf("overrides: %q %v %d", s.LLMOpenAICompatibleKind, s.LLMOpenAICompatibleDiscover, s.LLMOllamaNumCtx)
+	}
+	t.Setenv("MCP_SWITCHBOARD_LLM_OPENAI_COMPATIBLE_KIND", "bogus")
+	if _, err := Load(""); err == nil {
+		t.Error("bad kind must fail")
+	}
+	t.Setenv("MCP_SWITCHBOARD_LLM_OPENAI_COMPATIBLE_KIND", "generic")
+	t.Setenv("MCP_SWITCHBOARD_LLM_OLLAMA_NUM_CTX", "x")
+	if _, err := Load(""); err == nil {
+		t.Error("bad num_ctx must fail")
 	}
 }

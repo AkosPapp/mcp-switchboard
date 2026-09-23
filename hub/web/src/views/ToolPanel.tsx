@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { useCallTool, useRestartServer } from "../api/queries";
 import type { CallRecord, ConnectionInfo, ServerInfo, ToolInfo } from "../api/types";
+import ClientBadge from "../components/ClientBadge";
 import CopyButton from "../components/CopyButton";
 import Json, { pretty } from "../components/Json";
 import { CallStatusBadge, formatDuration } from "../components/Status";
@@ -224,6 +225,24 @@ export default function ToolPanel({
             {connection?.label ?? selection.connectionId}
             {server?.project != null ? ` › ${server.project}` : ""} › {selection.server}
           </p>
+          {connection !== null && (
+            <div className="mt-1 text-xs" data-testid="connection-env">
+              <ClientBadge
+                label={connection.label}
+                environment={connection.client.environment}
+              />
+              {connection.client.environment?.workspace ? (
+                <p
+                  className="truncate font-mono text-[11px] text-muted"
+                  title={connection.client.environment.workspace}
+                >
+                  {connection.client.environment.workspace}
+                </p>
+              ) : connection.client.environment == null ? (
+                <p className="text-[11px] text-muted">environment not reported</p>
+              ) : null}
+            </div>
+          )}
         </div>
         {server !== null && connection !== null && (
           <button

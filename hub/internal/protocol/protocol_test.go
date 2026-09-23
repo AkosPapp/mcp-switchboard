@@ -2,8 +2,10 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +21,8 @@ type manifest struct {
 		Direction string   `json:"direction"`
 		Required  []string `json:"required"`
 		Optional  []string `json:"optional"`
+		// ClientOptional lists optional fields of hello.client.
+		ClientOptional []string `json:"clientOptional"`
 	} `json:"frames"`
 }
 
@@ -173,6 +177,112 @@ func TestValidateName(t *testing.T) {
 	for _, name := range []string{"", "a__b", "__", "x__"} {
 		if err := ValidateName(name, "server"); err == nil {
 			t.Errorf("ValidateName(%q) = nil, want an error", name)
+		}
+	}
+}
+
+func TestManifestDeclaresOptionalClientEnvironment(t *testing.T) {
+	m := load(t)
+	found := false
+	for _, f := range m.Frames[TypeHello].ClientOptional {
+		if f == "environment" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("manifest hello.clientOptional does not declare environment")
+	}
+	// ClientInfo must carry every field the manifest declares.
+	raw, err := json.Marshal(ClientInfo{Environment: &ClientEnvironment{Kinds: []string{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	_ = json.Unmarshal(raw, &out)
+	for _, f := range m.Frames[TypeHello].ClientOptional {
+		if _, ok := out[f]; !ok {
+			t.Errorf("ClientInfo does not carry declared optional field %q", f)
+		}
+	}
+}
+
+func helloWith(t *testing.T, client string) *ClientInfo {
+	t.Helper()
+	frame, err := Decode([]byte(`{"type":"hello","protocol":1,"client":` + client + `,"servers":[]}`))
+	if err != nil {
+		t.Fatalf("hello must decode: %v", err)
+	}
+	return frame.Client
+}
+
+func TestHelloWithoutEnvironment(t *testing.T) {
+	c := helloWith(t, `{"name":"c","version":"1","instance":"i","label":"lab"}`)
+	if c.Environment != nil || c.Label != "lab" {
+		t.Errorf("client = %+v", c)
+	}
+	raw, _ := json.Marshal(c)
+	if strings.Contains(string(raw), "environment") {
+		t.Errorf("absent environment must stay absent: %s", raw)
+	}
+}
+
+func TestEnvironmentDecodesUnknownKindsAndRoundTrips(t *testing.T) {
+	c := helloWith(t, `{"label":"lab","environment":{"kinds":["devcontainer","future-thing"],
+		"project":"proj","workspace":"/w","details":{"nixShell":"pure"},"extra":1}}`)
+	env := c.Environment
+	if env == nil || len(env.Kinds) != 2 || env.Kinds[1] != "future-thing" ||
+		env.Project != "proj" || env.Workspace != "/w" || env.Details["nixShell"] != "pure" {
+		t.Fatalf("environment = %+v", env)
+	}
+	raw, _ := json.Marshal(c)
+	var out struct {
+		Environment map[string]any `json:"environment"`
+	}
+	_ = json.Unmarshal(raw, &out)
+	for _, k := range []string{"kinds", "project", "workspace", "details"} {
+		if _, ok := out.Environment[k]; !ok {
+			t.Errorf("missing %s in %s", k, raw)
+		}
+	}
+}
+
+func TestMalformedEnvironmentIsDroppedNotRejected(t *testing.T) {
+	for _, env := range []string{`"nope"`, `[1]`, `{"kinds":"x"}`, `{"kinds":[1,2]}`, `{"details":{"a":1}}`, `null`, `{"project":5}`} {
+		c := helloWith(t, `{"label":"lab","environment":`+env+`}`)
+		if c.Environment != nil {
+			t.Errorf("environment %s should be dropped, got %+v", env, c.Environment)
+		}
+		if c.Label != "lab" {
+			t.Errorf("label lost for %s", env)
+		}
+	}
+}
+
+func TestEnvironmentSizeCaps(t *testing.T) {
+	long := strings.Repeat("x", 1000)
+	details := map[string]string{}
+	for i := 0; i < 40; i++ {
+		details[fmt.Sprintf("k%02d", i)] = long
+	}
+	kinds := []string{}
+	for i := 0; i < 20; i++ {
+		kinds = append(kinds, fmt.Sprintf("kind%d", i))
+	}
+	body, _ := json.Marshal(map[string]any{"label": "l", "environment": map[string]any{
+		"kinds": kinds, "project": long, "workspace": long, "details": details}})
+	env := helloWith(t, string(body)).Environment
+	if env == nil {
+		t.Fatal("environment dropped")
+	}
+	if len(env.Kinds) != MaxEnvKinds || len(env.Details) != MaxEnvDetails {
+		t.Errorf("kinds=%d details=%d", len(env.Kinds), len(env.Details))
+	}
+	if len(env.Project) != MaxEnvStringSize || len(env.Workspace) != MaxEnvStringSize {
+		t.Errorf("project/workspace not capped")
+	}
+	for k, v := range env.Details {
+		if len(k) > MaxEnvStringSize || len(v) != MaxEnvStringSize {
+			t.Errorf("detail %q not capped", k)
 		}
 	}
 }

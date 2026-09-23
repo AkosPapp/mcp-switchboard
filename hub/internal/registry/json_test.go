@@ -90,3 +90,41 @@ func TestSnapshotIsOrdered(t *testing.T) {
 		t.Errorf("servers are not sorted by name: %q first", snapshot.Connections[0].Servers[0].Name)
 	}
 }
+
+func TestConnectionJSONCarriesEnvironmentVerbatim(t *testing.T) {
+	env := &protocol.ClientEnvironment{
+		Kinds: []string{"devcontainer", "direnv"}, Project: "proj", Workspace: "/w",
+		Details: map[string]string{"direnvDir": "/w"},
+	}
+	reg := New(nil)
+	reg.AddConnection(NewConnection("a-id", "a", protocol.ClientInfo{Label: "a", Environment: env}, time.Now().UTC(), nil))
+	reg.AddConnection(NewConnection("b-id", "b", protocol.ClientInfo{Label: "b"}, time.Now().UTC(), nil))
+
+	raw, err := json.Marshal(reg.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Connections []struct {
+			Label  string `json:"label"`
+			Client map[string]any
+		} `json:"connections"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range got.Connections {
+		e, has := c.Client["environment"]
+		if c.Label == "b" {
+			if has {
+				t.Errorf("old client must have no environment, got %v", e)
+			}
+			continue
+		}
+		m := e.(map[string]any)
+		if m["project"] != "proj" || m["workspace"] != "/w" || len(m["kinds"].([]any)) != 2 ||
+			m["details"].(map[string]any)["direnvDir"] != "/w" {
+			t.Errorf("environment = %v", m)
+		}
+	}
+}

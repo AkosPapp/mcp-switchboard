@@ -70,9 +70,50 @@ NixOS, via the flake:
     private.host = "127.0.0.1";     # console + /mcp stay local
     loki.enable = true;
     prometheus.register = true;
+
+    # Optional: the agent orchestrator. Off by default; without it /api/agents
+    # does not exist. apiKeyFile is a path, read by the hub at startup.
+    agents.enable = true;
+    llm = {
+      provider = "anthropic";                       # or openai, openai-compatible
+      apiKeyFile = "/run/secrets/mcp-switchboard/llm-api-key";
+      # modelsFile = "/etc/mcp-switchboard/models.json";
+      # baseUrl = "http://127.0.0.1:11434/v1";      # required for openai-compatible
+      # openaiCompatible.kind = "auto";             # auto | ollama | generic
+      # openaiCompatible.discover = true;           # list models from the provider
+      # ollamaNumCtx = 0;                           # 0 = automatic
+    };
   };
 }
 ```
+
+`agents.enable` requires `llm.provider` and `llm.apiKeyFile` (the key is optional for
+`openai-compatible`, which needs `llm.baseUrl` instead). The limits are
+`agents.{maxDepth,maxChildren,maxConcurrentRuns,replyTimeout,approvalTimeout}`. These map to
+`MCP_SWITCHBOARD_AGENTS_ENABLED`, `MCP_SWITCHBOARD_LLM_<PROVIDER>_API_KEY` /
+`_BASE_URL` (provider upper-cased, `-` becomes `_`), `MCP_SWITCHBOARD_LLM_MODELS` and
+`MCP_SWITCHBOARD_AGENT_*`, so the same settings work with Docker.
+`llm.openaiCompatible.{kind,discover}` and `llm.ollamaNumCtx` map to
+`MCP_SWITCHBOARD_LLM_OPENAI_COMPATIBLE_{KIND,DISCOVER}` and
+`MCP_SWITCHBOARD_LLM_OLLAMA_NUM_CTX`; they are only written when they differ from
+their defaults (`auto`, `true`, `0`), or, for kind and discover, when the provider is
+`openai-compatible`.
+
+#### Using Ollama / LiteLLM
+
+Choose the `openai-compatible` provider and point `baseUrl` at the server:
+`http://localhost:11434/v1` for Ollama, or your LiteLLM proxy's URL.
+
+- Models are discovered automatically from the provider
+  (`MCP_SWITCHBOARD_LLM_OPENAI_COMPATIBLE_DISCOVER`, default on).
+  OpenRouter (openrouter.ai) is not auto-listed: declare its models in the models file
+  (`MCP_SWITCHBOARD_LLM_MODELS`).
+- `MCP_SWITCHBOARD_LLM_OPENAI_COMPATIBLE_KIND` is `auto` (detect Ollama), `ollama` or
+  `generic`.
+- For Ollama the hub uses Ollama's native API to set the context window. Ollama's
+  `/v1` endpoint cannot set it and falls back to 4096 tokens, which is too small for
+  agents with tools. `MCP_SWITCHBOARD_LLM_OLLAMA_NUM_CTX` sets it explicitly; the
+  default `0` is automatic: the model's own maximum, capped at 32768.
 
 Or with Docker (note it binds loopback by default, so override the hosts):
 

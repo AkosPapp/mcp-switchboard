@@ -29,6 +29,7 @@ const (
 	TypeAgent       = "agent"
 	TypeGraph       = "graph"
 	TypeChat        = "chat"
+	TypeProfile     = "profile"
 )
 
 // Event is one notification. The optional ids let a subscriber refetch only the

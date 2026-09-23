@@ -16,6 +16,15 @@ import (
 // IndexFile is the document every client-side route resolves to.
 const IndexFile = "index.html"
 
+// ManifestFile and ServiceWorkerFile are the PWA installability files
+// (spec.md 8.6, U60/U61). Both live in web/public and are copied verbatim by
+// the Vite build, so - unlike everything under assets/ - their names carry no
+// content hash and must never be cached long-term.
+const (
+	ManifestFile      = "manifest.webmanifest"
+	ServiceWorkerFile = "sw.js"
+)
+
 // Handler serves the console.
 //
 // Two caching rules, and they are opposites on purpose. Vite fingerprints every
@@ -51,7 +60,12 @@ func Handler(assets fs.FS) http.Handler {
 			return
 		}
 
-		if name == IndexFile {
+		if name == IndexFile || name == ManifestFile || name == ServiceWorkerFile {
+			// None of these three are fingerprinted by the build (the manifest
+			// and the service worker are hand-written files in public/, not
+			// Vite output), so caching them for a year like the fingerprinted
+			// assets below would leave an installed PWA running a stale service
+			// worker or advertising a manifest that no longer matches the app.
 			noStore(w)
 		} else {
 			// Fingerprinted by the build, so the content behind this URL can
@@ -120,6 +134,8 @@ func contentType(name string) string {
 		return "font/woff2"
 	case ".png":
 		return "image/png"
+	case ".webmanifest":
+		return "application/manifest+json"
 	default:
 		return "application/octet-stream"
 	}

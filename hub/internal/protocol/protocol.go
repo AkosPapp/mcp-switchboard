@@ -11,6 +11,8 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"sort"
 	"strings"
 )
 
@@ -66,12 +68,104 @@ func ValidateName(name, kind string) error {
 	return nil
 }
 
+// Limits on hello.client.environment. The client is not a trusted input and the
+// environment is shown to people, so its size is bounded rather than trusted.
+const (
+	MaxEnvKinds      = 8
+	MaxEnvDetails    = 16
+	MaxEnvStringSize = 256
+)
+
+// ClientEnvironment describes where a client runs (dev container, direnv, nix
+// shell, ...). Kinds are open strings: an unknown kind from a newer client is
+// preserved, not rejected.
+type ClientEnvironment struct {
+	Kinds     []string          `json:"kinds"`
+	Project   string            `json:"project,omitempty"`
+	Workspace string            `json:"workspace,omitempty"`
+	Details   map[string]string `json:"details,omitempty"`
+}
+
 // ClientInfo identifies the process at the other end of a tunnel.
 type ClientInfo struct {
-	Name     string `json:"name"`
-	Version  string `json:"version"`
-	Instance string `json:"instance"`
-	Label    string `json:"label"`
+	Name        string             `json:"name"`
+	Version     string             `json:"version"`
+	Instance    string             `json:"instance"`
+	Label       string             `json:"label"`
+	Environment *ClientEnvironment `json:"environment,omitempty"`
+}
+
+// UnmarshalJSON decodes the client object, treating environment as strictly
+// optional: a malformed one is logged and dropped, never a reason to refuse the
+// hello.
+func (c *ClientInfo) UnmarshalJSON(data []byte) error {
+	type plain struct {
+		Name        string          `json:"name"`
+		Version     string          `json:"version"`
+		Instance    string          `json:"instance"`
+		Label       string          `json:"label"`
+		Environment json.RawMessage `json:"environment"`
+	}
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*c = ClientInfo{Name: p.Name, Version: p.Version, Instance: p.Instance, Label: p.Label}
+	if len(p.Environment) > 0 && string(p.Environment) != "null" {
+		env, err := parseEnvironment(p.Environment)
+		if err != nil {
+			slog.Warn("dropping malformed hello.client.environment", "error", err)
+		} else {
+			c.Environment = env
+		}
+	}
+	return nil
+}
+
+func capString(s string) string {
+	if r := []rune(s); len(r) > MaxEnvStringSize {
+		return string(r[:MaxEnvStringSize])
+	}
+	return s
+}
+
+func parseEnvironment(raw json.RawMessage) (*ClientEnvironment, error) {
+	var in struct {
+		Kinds     []string          `json:"kinds"`
+		Project   string            `json:"project"`
+		Workspace string            `json:"workspace"`
+		Details   map[string]string `json:"details"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil, err
+	}
+	env := &ClientEnvironment{
+		Kinds:     []string{},
+		Project:   capString(in.Project),
+		Workspace: capString(in.Workspace),
+	}
+	for _, kind := range in.Kinds {
+		kind = strings.TrimSpace(kind)
+		if kind == "" || len(env.Kinds) >= MaxEnvKinds {
+			continue
+		}
+		env.Kinds = append(env.Kinds, capString(kind))
+	}
+	if len(in.Details) > 0 {
+		keys := make([]string, 0, len(in.Details))
+		for k := range in.Details {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		env.Details = map[string]string{}
+		for _, k := range keys {
+			if len(env.Details) >= MaxEnvDetails {
+				break
+			}
+			env.Details[capString(k)] = capString(in.Details[k])
+		}
+	}
+	return env, nil
 }
 
 // HubInfo identifies this hub to the client.

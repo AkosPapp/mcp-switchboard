@@ -131,11 +131,46 @@ let
     PRIVATE_TOKEN = cfg.privateToken;
   };
 
+  providerEnv = lib.toUpper (lib.replaceStrings [ "-" ] [ "_" ] (toString cfg.llm.provider));
+
+  compat = cfg.llm.provider == "openai-compatible";
+
+  agentSettings = lib.optionalAttrs cfg.agents.enable (
+    {
+      AGENTS_ENABLED = "true";
+      AGENT_MAX_DEPTH = toString cfg.agents.maxDepth;
+      AGENT_MAX_CHILDREN = toString cfg.agents.maxChildren;
+      AGENT_MAX_CONCURRENT_RUNS = toString cfg.agents.maxConcurrentRuns;
+      AGENT_REPLY_TIMEOUT = toString cfg.agents.replyTimeout;
+      APPROVAL_TIMEOUT = toString cfg.agents.approvalTimeout;
+    }
+    // lib.optionalAttrs (cfg.llm.modelsFile != null) {
+      LLM_MODELS = toString cfg.llm.modelsFile;
+    }
+    // lib.optionalAttrs (cfg.llm.baseUrl != null) {
+      "LLM_${providerEnv}_BASE_URL" = cfg.llm.baseUrl;
+    }
+    // lib.optionalAttrs (compat || cfg.llm.openaiCompatible.kind != "auto") {
+      LLM_OPENAI_COMPATIBLE_KIND = cfg.llm.openaiCompatible.kind;
+    }
+    // lib.optionalAttrs (compat || !cfg.llm.openaiCompatible.discover) {
+      LLM_OPENAI_COMPATIBLE_DISCOVER = boolToEnv cfg.llm.openaiCompatible.discover;
+    }
+    // lib.optionalAttrs (cfg.llm.ollamaNumCtx != 0) {
+      LLM_OLLAMA_NUM_CTX = toString cfg.llm.ollamaNumCtx;
+    }
+  );
+
+  # Like the tokens: a path, resolved by the hub at startup.
+  llmSecretSettings = lib.optionalAttrs (cfg.agents.enable && cfg.llm.apiKeyFile != null) {
+    "LLM_${providerEnv}_API_KEY" = toString cfg.llm.apiKeyFile;
+  };
+
   extraSettings = lib.mapAttrs' (
     k: v: lib.nameValuePair (lib.removePrefix prefix (normaliseKey k)) (renderValue v)
   ) cfg.settings;
 
-  allSettings = baseSettings // extraSettings // secretSettings;
+  allSettings = baseSettings // agentSettings // extraSettings // secretSettings // llmSecretSettings;
 
   environmentFile = pkgs.writeText "mcp-switchboard.env" (
     ''
@@ -148,7 +183,7 @@ let
     + "\n"
   );
 
-  literalSecrets = lib.filterAttrs (_: v: !(lib.hasPrefix "/" v)) secretSettings;
+  literalSecrets = lib.filterAttrs (_: v: !(lib.hasPrefix "/" v)) (secretSettings // llmSecretSettings);
 
   # 0.0.0.0 is a bind address, not a destination; scrape the loopback alias.
   scrapeHost =
@@ -326,6 +361,131 @@ in
       '';
     };
 
+    agents = {
+      enable = mkEnableOption "the agent orchestrator (LLM-driven agents that call tools through the hub)";
+
+      maxDepth = mkOption {
+        type = types.ints.positive;
+        default = 4;
+        description = "Maximum nesting depth of agents spawning agents (MCP_SWITCHBOARD_AGENT_MAX_DEPTH).";
+      };
+      maxChildren = mkOption {
+        type = types.ints.positive;
+        default = 8;
+        description = "Maximum children per agent (MCP_SWITCHBOARD_AGENT_MAX_CHILDREN).";
+      };
+      maxConcurrentRuns = mkOption {
+        type = types.ints.positive;
+        default = 16;
+        description = "Maximum agent runs executing at once (MCP_SWITCHBOARD_AGENT_MAX_CONCURRENT_RUNS).";
+      };
+      replyTimeout = mkOption {
+        type = types.ints.positive;
+        default = 300;
+        description = "Seconds an agent waits for a reply from another agent (MCP_SWITCHBOARD_AGENT_REPLY_TIMEOUT).";
+      };
+      approvalTimeout = mkOption {
+        type = types.ints.positive;
+        default = 3600;
+        description = "Seconds a pending tool-call approval waits before it expires (MCP_SWITCHBOARD_APPROVAL_TIMEOUT).";
+      };
+    };
+
+    llm = {
+      provider = mkOption {
+        type = types.nullOr (
+          types.enum [
+            "anthropic"
+            "openai"
+            "openai-compatible"
+          ]
+        );
+        default = null;
+        description = ''
+          LLM provider the agents use. Required when
+          {option}`services.mcp-switchboard.agents.enable` is set. Selects which
+          `MCP_SWITCHBOARD_LLM_<PROVIDER>_*` variables the other `llm.*` options
+          are written to.
+        '';
+      };
+
+      apiKeyFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        example = "/run/secrets/mcp-switchboard/llm-api-key";
+        description = ''
+          Path to a file holding the provider's API key. Passed to the hub as a
+          path (like {option}`services.mcp-switchboard.tunnelToken`), which it
+          replaces with the file's contents at startup, so the key never enters
+          the Nix store. The file must be readable by the service's dynamic user
+          (see {option}`services.mcp-switchboard.extraGroups`). Optional only for
+          `openai-compatible` endpoints that need no key.
+        '';
+      };
+
+      modelsFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        example = "/etc/mcp-switchboard/models.json";
+        description = ''
+          Path to a JSON file declaring the available models
+          (MCP_SWITCHBOARD_LLM_MODELS).
+        '';
+      };
+
+      baseUrl = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "http://127.0.0.1:11434/v1";
+        description = ''
+          Base URL override for the selected provider. Required for
+          `openai-compatible`.
+        '';
+      };
+
+      openaiCompatible = {
+        kind = mkOption {
+          type = types.enum [
+            "auto"
+            "ollama"
+            "generic"
+          ];
+          default = "auto";
+          description = ''
+            What sits behind an `openai-compatible` endpoint
+            (MCP_SWITCHBOARD_LLM_OPENAI_COMPATIBLE_KIND). `auto` detects
+            Ollama; `ollama` makes the hub use Ollama's native API for the
+            context window; `generic` treats it as any other server (LiteLLM,
+            vLLM, ...).
+          '';
+        };
+
+        discover = mkOption {
+          type = types.bool;
+          default = true;
+          description = ''
+            Discover the available models from the provider
+            (MCP_SWITCHBOARD_LLM_OPENAI_COMPATIBLE_DISCOVER). Skipped
+            automatically for openrouter.ai, whose models must be declared in
+            {option}`services.mcp-switchboard.llm.modelsFile`.
+          '';
+        };
+      };
+
+      ollamaNumCtx = mkOption {
+        type = types.int;
+        default = 0;
+        example = 16384;
+        description = ''
+          Context window, in tokens, the hub requests from Ollama
+          (MCP_SWITCHBOARD_LLM_OLLAMA_NUM_CTX). Ollama's OpenAI-compatible
+          `/v1` endpoint cannot set it and defaults to 4096, so the hub uses
+          Ollama's native API. `0` means automatic: the model's own maximum,
+          capped at 32768.
+        '';
+      };
+    };
+
     settings = mkOption {
       type = types.attrsOf (
         types.oneOf [
@@ -361,6 +521,23 @@ in
     ) literalSecrets;
 
     assertions = [
+      {
+        assertion = !cfg.agents.enable || cfg.llm.provider != null;
+        message = "services.mcp-switchboard.agents.enable requires services.mcp-switchboard.llm.provider to be set.";
+      }
+      {
+        assertion =
+          !cfg.agents.enable || cfg.llm.provider == "openai-compatible" || cfg.llm.apiKeyFile != null;
+        message = "services.mcp-switchboard.agents.enable requires services.mcp-switchboard.llm.apiKeyFile (optional only for the openai-compatible provider).";
+      }
+      {
+        assertion = !(cfg.agents.enable && cfg.llm.provider == "openai-compatible") || cfg.llm.baseUrl != null;
+        message = "services.mcp-switchboard.llm.provider = \"openai-compatible\" requires services.mcp-switchboard.llm.baseUrl.";
+      }
+      {
+        assertion = !cfg.agents.enable || cfg.llm.apiKeyFile == null || lib.hasPrefix "/" (toString cfg.llm.apiKeyFile);
+        message = "services.mcp-switchboard.llm.apiKeyFile must be an absolute path.";
+      }
       {
         assertion = cfg.tunnelToken != "";
         message = "services.mcp-switchboard.tunnelToken must be set: it authenticates the tunnel listener, which is the one intended to be publicly reachable.";

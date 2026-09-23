@@ -47,6 +47,8 @@ type Metrics struct {
 	toolCallDuration  *prometheus.HistogramVec
 	tunnelFrames      *prometheus.CounterVec
 	lokiDropped       prometheus.Counter
+
+	orch orchMetrics
 }
 
 // New builds a Metrics on its own registry.
@@ -111,6 +113,7 @@ func New() *Metrics {
 	}
 	m.connectionsActive.Set(0)
 	m.lokiDropped.Add(0)
+	m.orch = newOrchMetrics(reg)
 
 	return m
 }

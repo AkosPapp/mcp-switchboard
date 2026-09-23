@@ -308,3 +308,71 @@ func deref(value *string) string {
 	}
 	return *value
 }
+
+// ErrDenied, returned (possibly wrapped) by the function given to Local, makes
+// the call row status "denied" instead of "error" (spec.md R2).
+var ErrDenied = errors.New("not permitted")
+
+// LocalRequest describes a call answered inside the hub rather than by a
+// tunnelled server - the orchestrator's switchboard.* tools. It is logged,
+// metered and exported exactly like any other call (R1, 5.5: "every one of
+// these is itself logged as a call").
+type LocalRequest struct {
+	Label, Server, Tool, ExposedName string
+	Arguments                        map[string]any
+	Source                           string
+	AgentID, ChatID, RunID           *string
+}
+
+// Local runs fn as one call. fn returns the structured result; an error makes
+// the call an error (or a denial when it wraps ErrDenied) whose message is the
+// error text.
+func (d *Dispatcher) Local(ctx context.Context, req LocalRequest, fn func(context.Context) (any, error)) *Result {
+	record := store.CallRecord{
+		ID:           uuid.New().String(),
+		ConnectionID: "",
+		Label:        req.Label,
+		Server:       req.Server,
+		Tool:         req.Tool,
+		ExposedName:  req.ExposedName,
+		Arguments:    req.Arguments,
+		Status:       store.StatusOK,
+		Source:       req.Source,
+		StartedAt:    time.Now().UTC(),
+		AgentID:      req.AgentID,
+		ChatID:       req.ChatID,
+		RunID:        req.RunID,
+	}
+	if record.Arguments == nil {
+		record.Arguments = map[string]any{}
+	}
+	started := time.Now()
+	out, err := fn(ctx)
+	record.DurationMs = float64(time.Since(started).Microseconds()) / 1000
+	if err != nil {
+		record.Status = store.StatusError
+		if errors.Is(err, ErrDenied) {
+			record.Status = store.StatusDenied
+		}
+		record.Error = err.Error()
+		res := &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: record.Error}}}
+		record.Result = resultToMap(res)
+		d.finish(ctx, &record)
+		return &Result{CallID: record.ID, Result: res, IsError: true, Error: record.Error}
+	}
+	text := ""
+	switch v := out.(type) {
+	case string:
+		text = v
+	default:
+		raw, merr := json.Marshal(v)
+		if merr != nil {
+			raw = []byte(fmt.Sprintf("%v", v))
+		}
+		text = string(raw)
+	}
+	res := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
+	record.Result = resultToMap(res)
+	d.finish(ctx, &record)
+	return &Result{CallID: record.ID, Result: res}
+}

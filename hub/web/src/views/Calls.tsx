@@ -26,6 +26,9 @@ interface FilterState {
  * filtered log could not be linked or bookmarked - which is the first thing you
  * want when you are showing someone a call that went wrong.
  */
+/** A call a chat made is shown as "chat"; the wire value stays "agent". */
+const sourceLabel = (source: string) => (source === "agent" ? "chat" : source);
+
 function readFilters(params: URLSearchParams): FilterState {
   const limit = Number(params.get("limit"));
   return {
@@ -212,7 +215,7 @@ function Row({
       <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted">
         {formatDuration(record.durationMs)}
       </td>
-      <td className="whitespace-nowrap px-3 py-2 text-muted">{record.source}</td>
+      <td className="whitespace-nowrap px-3 py-2 text-muted">{sourceLabel(record.source)}</td>
     </tr>
   );
 }
@@ -249,7 +252,7 @@ function Card({
           <span aria-hidden="true">·</span>
           <span className="tabular-nums">{formatDuration(record.durationMs)}</span>
           <span aria-hidden="true">·</span>
-          <span>{record.source}</span>
+          <span>{sourceLabel(record.source)}</span>
         </span>
       </button>
     </li>
@@ -295,7 +298,7 @@ function Detail({ record, onClose }: { record: CallRecord; onClose: () => void }
           <span aria-hidden="true">·</span>
           <span>{formatDuration(call.durationMs)}</span>
           <span aria-hidden="true">·</span>
-          <span>{call.source}</span>
+          <span>{sourceLabel(call.source)}</span>
         </div>
 
         <div>
@@ -355,12 +358,6 @@ function Detail({ record, onClose }: { record: CallRecord; onClose: () => void }
           <dd className="break-all font-mono">{call.connectionId}</dd>
           {/* Orchestrator ids are optional on the wire and absent on a plain
               MCP call, so they appear only when the hub sent them. */}
-          {call.agentId ? (
-            <>
-              <dt>agent</dt>
-              <dd className="break-all font-mono">{call.agentId}</dd>
-            </>
-          ) : null}
           {call.chatId ? (
             <>
               <dt>chat</dt>
@@ -381,7 +378,15 @@ function Detail({ record, onClose }: { record: CallRecord; onClose: () => void }
 
 export default function Calls() {
   const [params, setParams] = useSearchParams();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The selected row lives in the URL (?call=ID) so it is linkable and the
+  // tab's remembered location includes it.
+  const selectedId = params.get("call");
+  const setSelectedId = (id: string | null) => {
+    const next = new URLSearchParams(params);
+    if (id === null) next.delete("call");
+    else next.set("call", id);
+    setParams(next, { replace: true });
+  };
 
   const filters = useMemo(() => readFilters(params), [params]);
   const query: CallFilters = useMemo(
@@ -403,14 +408,13 @@ export default function Calls() {
 
   const apply = (next: FilterState) => {
     setParams(writeFilters(next));
-    setSelectedId(null);
   };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* Remounting on a filter change resets the draft, so Reset and a
           back-button navigation both show what the URL actually asks for. */}
-      <Filters key={params.toString()} value={filters} onApply={apply} />
+      <Filters key={writeFilters(filters).toString()} value={filters} onApply={apply} />
 
       <div className="flex min-h-0 flex-1">
         <div className="min-w-0 flex-1 overflow-y-auto">

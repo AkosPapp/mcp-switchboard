@@ -60,7 +60,9 @@ def test_frame_type_constants_match_the_manifest() -> None:
 # One builder call per frame, with arguments chosen so that every optional field is
 # populated - a builder that silently dropped a field would otherwise pass.
 BUILDERS = {
-    "hello": lambda: protocol.hello("c", "0.0.0", "i", "lab", [{"name": "git"}]),
+    "hello": lambda: protocol.hello(
+        "c", "0.0.0", "i", "lab", [{"name": "git"}], {"kinds": ["direnv"], "workspace": "/w"}
+    ),
     "hello_ack": lambda: protocol.hello_ack("cid", "hub", "0.0.0"),
     "mcp": lambda: protocol.mcp("git", {"jsonrpc": "2.0"}),
     "server_state": lambda: protocol.server_state("git", protocol.STATE_EXITED, 1, "boom"),
@@ -85,3 +87,11 @@ def test_builder_emits_exactly_the_declared_fields(frame_type: str) -> None:
 def test_every_builder_is_covered() -> None:
     """A frame added to the manifest without a builder here would not be checked."""
     assert set(BUILDERS) == set(MANIFEST["frames"])
+
+
+def test_hello_client_optional_fields_are_declared_and_emitted() -> None:
+    declared = MANIFEST["frames"]["hello"]["clientOptional"]
+    assert "environment" in declared
+    client = protocol.hello("c", "0.0.0", "i", "lab", [], {"kinds": []})["client"]
+    assert set(client) <= {"name", "version", "instance", "label"} | set(declared)
+    assert "environment" in client

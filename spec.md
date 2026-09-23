@@ -5,7 +5,7 @@ separately in [docs/PROTOCOL.md](docs/PROTOCOL.md); this document covers everyth
 
 ## 0. Status of this revision
 
-Three changes land together, because each one forces the others:
+Four changes land together, because each one forces the others:
 
 1. **The hub is rewritten in Go.** The Python hub (FastAPI + `mcp` + aiosqlite) is replaced by a
    single static binary using the official [`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk).
@@ -20,6 +20,21 @@ Three changes land together, because each one forces the others:
    binary with `embed.FS`, adding a **Chat** view (branching conversations, OpenWebUI-style) and a
    **Graph** view (live agent tree, communication edges, MCP permissions), and designed
    mobile-first because both views are things you want to check from a phone.
+4. **Agent profiles and per-chat clients** (§5.2a). A chat is no longer opened against a
+   hand-assembled agent: it is created from a reusable **profile** (system prompt, default model,
+   hub-tool capabilities, approval mode) plus **exactly one MCP client** (a machine that dials the
+   hub), and the hub builds the chat's working agent with grants for that client alone. The console
+   gains an **Agents** panel for profiles, a hub-tools section, and per-chat tool inspection
+   (§7.2, §8). This is the first migration after the schema froze (`002_profiles`, §6.2), and its
+   REST contract is [docs/PROFILES_API.md](docs/PROFILES_API.md).
+
+5. **Chats are the unit** (§5.1, [docs/CHAT_MODEL_API.md](docs/CHAT_MODEL_API.md)). The user no
+   longer sees agents: a chat has a title, a system prompt and one client (or none), and chats talk
+   to each other by *injecting messages into each other's own chats* instead of holding separate
+   peer conversations. The `agents` row stays underneath as the chat's internal execution record,
+   1:1 with it for everything created from now on. Migration `005_chats_as_unit` (D13) adds
+   `chats.parent_chat_id` and `messages.sender`; the LLM-facing tools are renamed
+   `switchboard.chat.*` (§5.5).
 
 **Unchanged:** the client (`mcp-switchboard-client`), the harness server
 (`mcp-switchboard-server-harness`), and the tunnel protocol v1 on the wire. Both remain Python.
@@ -63,7 +78,7 @@ those machines — and, on top of that same catalog, run agents that use those t
 | Client | `mcp-switchboard-client` | Python | Spawns local stdio MCP servers from `mcp.json` (plus the built-in harness); multiplexes them over one outbound WebSocket. Speaks no MCP itself. |
 | Hub | `mcp-switchboard-hub` | Go | Terminates tunnels, runs one MCP client session per tunnelled server, aggregates tools, serves them over Streamable HTTP, and hosts the orchestrator, console, API and metrics. |
 | Harness server | `mcp-switchboard-server-harness` | Python | First-party stdio MCP server (files, search, git, shell, background processes). Added by the client by default; tunnelled like any other server. |
-| Console | `hub/web/` | TypeScript | Single-page app embedded in the hub binary. Connections, Calls, Endpoints, **Chat**, **Graph**. |
+| Console | `hub/web/` | TypeScript | Single-page app embedded in the hub binary. Connections (with the hub's own tools), Calls, Endpoints, **Chat**, **Graph**, **Agents** (profiles). |
 
 ## 2. Identity and naming
 
@@ -98,6 +113,16 @@ correctness rests on getting identity right.
 - **I6. Agents, chats, messages and runs are UUIDv7** (time-ordered, so they sort by creation and
   index well in SQLite). Stored as 32-char lowercase hex without dashes, matching the existing
   call-id convention.
+- **I7. An MCP client is only a process that dials the hub**, identified by its `label` (the
+  `label` of a connection, I1). It is neither an MCP *server* (a stdio process the client spawns
+  and tunnels, the second and third components of I1's triple) nor a *hub tool* (the built-in
+  `switchboard.*` tools of §5.5). The word "client" in the console and in `clientLabel` always
+  means this. A client offers zero or more servers; "this chat may use client `laptop`" is the
+  grant `(laptop, *, *)`.
+- **I8. A profile is a template, not an agent.** It is the reusable configuration a chat's working
+  agent is instantiated from (§5.2a). It has no parent, no tree position, no runs, no chats and —
+  deliberately — **no grants**: which client a conversation may use is chosen when the chat is
+  created, not when the profile is written.
 
 ## 3. Client
 
@@ -121,7 +146,7 @@ Unchanged by this revision. Retained verbatim for completeness.
   `/` naming an existing regular file is replaced by the file's contents. `LABEL` defaults to the hostname.
 - **C6. Connection.** One outbound `wss://<hub>/tunnel/v1` with `Authorization: Bearer <token>`.
   For `wss` the TLS context trusts certifi's CA bundle.
-- **C7. Lifecycle.** Sends `hello` (including each server's `project` when set), then supervises
+- **C7. Lifecycle.** Sends `hello` (including each server's `project` when set, and the optional `client.environment`), then supervises
   each server, forwarding stdout lines as `mcp` frames and `hub → client` frames to stdin, and sending
   `server_state` on every transition. `restart` stops and respawns one server.
 - **C8. Reconnect.** Exponential backoff 1s → 60s. After a reconnect every local server is restarted.
@@ -133,6 +158,10 @@ Unchanged by this revision. Retained verbatim for completeness.
   `MCP_SWITCHBOARD_HARNESS=false`. An `mcp.json` entry named `harness` replaces the built-in one.
 - **C10. Shutdown.** SIGINT/SIGTERM stops the connection and terminates children; exit code 0.
   A tunnel error exits 1.
+- **C11. Environment.** Detects, once at startup and without raising, where it runs (`kinds`:
+  devcontainer, container, direnv, nix-shell, venv; plus `project`, `workspace`, small non-secret
+  `details`) and sends it as the optional `hello.client.environment`. `MCP_SWITCHBOARD_PROJECT_NAME` /
+  `--project-name` overrides the project name. One INFO line summarises it.
 
 ## 4. Hub
 
@@ -147,6 +176,7 @@ Unchanged by this revision. Retained verbatim for completeness.
   credentials** and the **entire chat history**. Its threat model changes accordingly; see §10.
 - **H2. Hello validation.** Rejects with an `error` frame and closes on: unsupported protocol
   version, server or project names containing `__`, or two servers with the same name in one hello.
+  An optional `client.environment` is decoded tolerantly (unknown kinds kept, malformed dropped, sizes capped) and never rejects a hello.
 - **H3. Sessions.** Per tunnelled server, one MCP client session (`initialize`, `tools/list`).
   Tools appear in the catalog when the session is up and disappear when the server stops.
 - **H4. Restarts are reconciled, not reacted to.** Each server channel has one supervisor goroutine
@@ -184,7 +214,7 @@ Unchanged by this revision. Retained verbatim for completeness.
   | `/mcp/host/{label}/project/{project}` | project | `server__tool` |
   | `/mcp/host/{label}/server/{server}` | server | `tool` |
   | `/mcp/host/{label}/project/{project}/server/{server}` | project + server | `tool` |
-  | `/mcp/agent/{agent_id}` | agent | `label__[project__]server__tool`, filtered to that agent's grants, plus `switchboard.*`. **Internal to the run loop** — not offered to external consumers (§5.5, Q2) |
+  | `/mcp/agent/{agent_id}` | chat's execution record | `label__[project__]server__tool`, filtered to that record's grants, plus `switchboard.*`. **Internal to the run loop** — not offered to external consumers (§5.5, Q2) |
 
   Calls resolve against the same scope they were listed in. All scopes are backed by one server
   instance and one session manager; the scope is derived per request from path parameters.
@@ -200,9 +230,8 @@ Unchanged by this revision. Retained verbatim for completeness.
 
 ### 4.2 Go package layout
 
-Paths below are final. The Python hub is moved to `legacy/hub/` in one `git mv` at the start of
-step 4 of §15, so `hub/` means the Go tree from that point on and nothing in this document has to
-be read as provisional. `legacy/hub/` is deleted at step 11.
+Paths below are final. The Python hub was moved to `legacy/hub/` at the start of step 3 of §15
+and deleted at step 10, so `hub/` means the Go tree.
 
 ```
 hub/
@@ -240,17 +269,34 @@ hub/
 
 ### 5.1 Model
 
-An **agent** is a durable, named configuration: a model, a system prompt, a set of tool grants,
-and a place in a parent→child tree. It is not a process.
+A **chat** is what the user sees and works with: a title, a system prompt (a profile reference, its
+own text, or none), at most one MCP client, and a **DAG of messages**. A chat may have **child
+chats** (`parent_chat_id`, A29), which the console shows nested under it.
 
-A **run** is one execution of an agent against one chat: the loop *prompt → model → tool calls →
+Underneath, every chat has one **execution record** — the `agents` row of §5.2. It holds what a run
+needs (model, prompt, budget, grants, approval, status, the parent→child tree, cumulative cost) and
+is **1:1 with its chat** for everything created from now on: creating a chat creates its record,
+deleting the chat deletes it (A26, A28). Data from before that, where one agent has several chats,
+keeps working — a run is already per chat — and such chats simply appear as independent chats. The
+record is an implementation detail: the console shows it only in the Graph view (as a chat node)
+and the `/api/agents*` routes remain for that view and API callers.
+
+An **agent record** is therefore a durable, named configuration: a model, a system prompt, a set of
+tool grants, and a place in a parent→child tree. It is not a process.
+
+A **run** is one execution of a record against one chat: the loop *prompt → model → tool calls →
 model → …* until the model stops calling tools, a budget is exhausted, or it is cancelled. Runs
 are the unit of concurrency, cancellation and metering.
 
-A **chat** is a durable conversation owned by one agent, holding a **DAG of messages**.
+A **profile** (§5.2a) is a reusable system-prompt template a chat may reference; it is not itself an
+agent and has no place in the tree.
 
-- **A1.** Agents outlive runs. Killing a run does not delete the agent; deleting an agent
-  cancels its runs and its descendants' runs.
+Chats communicate by **injecting a user-role message with `sender` metadata into the recipient's own
+chat** and waking it as a human message would (B7); there are no separate peer or "conversation"
+chats.
+
+- **A1.** Records outlive runs. Killing a run does not delete the record; deleting a chat (A28) or
+  an agent (`DELETE /api/agents/{id}`) cancels its runs and its descendants' runs.
 - **A2.** Inference happens **in the hub process**. The hub holds provider API keys. This is the
   decision that makes the hub a stateful application rather than a gateway, and it is why §10 is
   substantially longer than it used to be.
@@ -260,7 +306,8 @@ A **chat** is a durable conversation owned by one agent, holding a **DAG of mess
 
 ### 5.2 Entities
 
-`agents`
+`agents` — the execution records of chats (§5.1). The console never presents one as a thing of its
+own; the Graph view draws each as its chat.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -280,6 +327,9 @@ A **chat** is a durable conversation owned by one agent, holding a **DAG of mess
 | `token_total`, `cost_total_micros` | int | **cumulative, self plus all descendants** (B5) |
 | `created_at`, `updated_at`, `last_activity_at` | timestamptz | RFC 3339 UTC |
 | `deleted_at` | timestamptz, null | soft delete; history stays readable |
+| `profile_id` | uuid, null | the profile this agent references *live* (A23), or inherited from its parent (M3); `ON DELETE SET NULL`. Null when the agent uses its own prompt |
+| `origin` | enum | `manual` (a root made through `POST /api/agents` with a `clientLabel` key, A20) \| `spawn` (a child: made by `switchboard.chat.spawn`, by `POST /api/chats` with a `parentChatId`, or with a `parentId`) \| `chat` (the record of a top-level chat made by `POST /api/chats`, A26; also a root made through `POST /api/agents` without `clientLabel`). Default `chat` (D12) |
+| `client_label` | string, null | the one MCP client the agent is bound to (A19), null for none; kept in step with the grants, and cleared on a descendant when narrowing removes its access (A14) |
 
 `name` uniqueness needs a partial index, not a plain one: `parent_id` is `NULL` for roots and
 SQLite treats NULLs as distinct, and soft-deleted siblings must not hold a name hostage. The index
@@ -294,19 +344,142 @@ is therefore on `(COALESCE(parent_id, ''), name) WHERE deleted_at IS NULL`.
 | Field | Type | Notes |
 |---|---|---|
 | `id` | uuidv7 hex | |
-| `agent_id` | uuid | the agent that owns and executes this chat |
-| `peer_agent_id` | uuid, null | set when this chat is one side of an agent↔agent thread (§5.5) |
-| `title` | string | auto-generated from the first user message, editable |
-| `kind` | enum | `human` \| `agent` \| `spawn` |
+| `agent_id` | uuid | the chat's execution record (§5.1): 1:1 with the chat when created after D13, shared by several chats only in older data |
+| `parent_chat_id` | uuid, null | the chat that spawned this one (A29); a plain column (no foreign key) cleared by a trigger when the parent is deleted (D13). Null for top-level chats |
+| `peer_agent_id` | uuid, null | **legacy, no longer written**: set on chats of the retired agent↔agent threads (`kind` `agent`/`spawn`), which stay readable as ordinary chats |
+| `title` | string | `"New chat"` by default, replaced by the first user message while untouched; editable |
+| `kind` | enum | `human` for every chat written now; `agent` \| `spawn` only on legacy peer chats |
 | `active_leaf_id` | uuid, null | which leaf of the message DAG is the "current" conversation |
 | `tags` | json array | |
 | `token_total`, `cost_total_micros` | int | denormalised running totals, for list rendering without a join |
 | `created_at`, `updated_at` | timestamptz | |
 | `archived_at` | timestamptz, null | |
+| `profile_id` | uuid, null | the chat's profile reference, mirrored onto its record; `ON DELETE SET NULL` (A17) |
+| `client_label` | string, null | the chat's one client (A19), mirrored onto its record; a child chat records its parent chat's value when spawned (M3) |
 
-> A chat has exactly one *owning* agent. An agent↔agent exchange is **two chats**, one per side,
-> linked by `peer_agent_id` — not one shared chat. This keeps each agent's context window its own
-> and avoids a shared-mutable-history problem the moment the two sides branch independently.
+> A chat is created with its execution record in one step (`POST /api/chats`, A26). Rebinding its
+> profile, own prompt or client (`PATCH /api/chats/{id}`, A27) changes the record and the mirrored
+> fields together. Each chat keeps its own context window: another chat's words reach it only as
+> messages injected into it (B7), never through a shared history, which avoids the
+> shared-mutable-history problem the moment two sides branch independently.
+
+### 5.2a Profiles
+
+`profiles`
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | uuidv7 hex | |
+| `name` | string | unique among profiles (409 on a clash) |
+| `description` | string | |
+| `system_prompt` | text | required |
+| `model` | json, null | `{provider, model, ...}` as §5.7; null means the first configured model |
+| `capabilities` | json | `{can_spawn, can_message}`: which hub tools (§5.5) an agent made from it is offered (M1). Default both `false` |
+| `approval` | enum | `never` \| `destructive` \| `always`, default `destructive`; becomes the agent's stored mode (W1) |
+| `budget` | json | same keys as `agents.budget` (§5.6); `{}` means the hub defaults |
+| `is_default` | bool | exactly one profile is the default |
+| `created_at`, `updated_at` | timestamptz | |
+
+The REST shape is camelCase (`systemPrompt`, `isDefault`, `capabilities: {canSpawn, canMessage}`)
+and is specified in [docs/PROFILES_API.md](docs/PROFILES_API.md); the agent side of the model
+(manual creation, live reference, optional client) in [docs/AGENT_MODEL_API.md](docs/AGENT_MODEL_API.md),
+which wins where the two differ.
+
+- **A16. A profile is not an agent and carries no grants.** It has no place in the tree, no runs and
+  no MCP permissions of any kind; the Graph view never shows one (I8).
+- **A17. Exactly one default.** A partial unique index on `is_default = 1` makes "at most one" a
+  schema fact, and making a profile the default clears the previous one in the same transaction.
+  The default cannot be un-set except by making another profile the default, and the default
+  profile — like the last remaining one — cannot be deleted. Deleting any other profile leaves
+  every chat and agent using it working: their `profile_id` becomes null and the agent keeps the
+  prompt, model, capabilities, approval and budget it last had (A23). On first start with
+  the orchestrator enabled and no profiles, the hub seeds one default profile, `Assistant` (prompt
+  `You are a helpful assistant.`, no hub tools, approval `destructive`).
+- **A18. A chat is created whole.** `POST /api/chats` creates the chat and its execution record
+  together (A26); the console never creates an agent. Its prompt is a profile (`profileId`), or the
+  chat's own `systemPrompt` (empty meaning no system prompt at all), and its client is exactly one
+  client label or none (A19). The record is named `<title> · <short id>` (unique among siblings
+  whatever the titles), gets `origin = chat` (`spawn` under a parent chat) and no automatic
+  `AGENT_DEFAULT_GRANTS`. The Chat panel groups chats by `client_label`, never by prompt or profile
+  name, and nests child chats under their parent (A29).
+- **A19. Grants are exactly `(clientLabel, *, *)`, or none.** A chat with a client holds
+  that one allowed grant, `source = 'explicit'`, and nothing else: it reaches every server of that
+  one client and no other client's. A client-less chat holds no grant at all: its catalog is the
+  hub tools its capabilities allow (M1) and nothing from any client. A record with no grants is
+  simply not pinned (§5.4), which is harmless as it has no client tools to name.
+- **A20. `AGENT_DEFAULT_GRANTS` and `POST /api/agents` are the agent-level paths.** The default
+  grants apply only to a root record created through `POST /api/agents` **without** a
+  `clientLabel` key (the Graph view's spawn dialog, API callers), which gets `origin = chat` and
+  a `client_label` only if its grants happen to pin one client, and a first chat (nested under its
+  parent's chat when it has a parent). A `POST /api/agents` **with** a `clientLabel` key creates a
+  `manual` record with exactly the A19 grants and no chat; `POST /api/chats {agentId, title?}`
+  then attaches a chat to it, copying the record's profile and client. **`agentId` present means
+  this legacy attach form and takes precedence** over every other field of the body. The older
+  `{profileId?, clientLabel?, title?, model?}` body is the primary form (A26) with fewer fields
+  (`*` and the empty string are a 400 for `clientLabel`; 404 on an unknown profile).
+- **A21. Tool inspection uses the run loop's own function.** `GET /api/chats/{id}/tools` is
+  computed by the same catalog builder a run calls each turn (§5.4), so it cannot disagree with
+  what the model is offered; `GET /api/hub-tools` lists the `switchboard.*` definitions with the
+  capability each requires (M1). Both show real dotted names (I5); the provider-safe name mapping
+  (§5.7) is internal.
+- **A22. A pinned agent's tools are named without its client (§5.4 step 3).** Because such an agent has
+  exactly one client, the tool list shown by A21 and offered to the model drops the client label,
+  and drops the server name for the `harness` server; other servers keep theirs. The names an
+  operator sees in the chat's tools panel are exactly the names in the model's requests.
+- **A23. The profile reference is live.** While an agent's `profile_id` is set and the profile
+  exists, the agent's effective `system_prompt`, `model` (else the first configured model),
+  `capabilities`, `approval` and `budget` are the profile's *current* values. They are resolved at
+  the start of each run (which fixes the budget snapshot), again at the start of every turn (prompt,
+  model, catalog, the approval gate of W1), and for each `/mcp/agent/{id}` call, and they are
+  written back onto the agent row every time they differ (and when the profile is edited), so
+  deleting the profile, which only nulls the reference, never blanks a prompt. Without a reference
+  the agent's own fields apply. **Sub-agents** (`origin = spawn`) keep the profile reference for
+  display only: they run on the values they were spawned with, because a spawn call may narrow
+  capabilities and approval (M3) and a live profile value would silently undo that.
+- **A24. Rebinding the client.** `PATCH /api/agents/{id} {clientLabel}` (and A27's chat form)
+  rewrites the record's grants to exactly `(newClient, *, *)` with `source = 'explicit'` (or to none
+  for `null`) in one transaction, updates `client_label`, and, as a human edit (A13), propagates the
+  narrowing by A14: every descendant's inherited allow row for any other label is deleted, and a
+  descendant whose `client_label` is no longer served is cleared. Nothing is ever added to a
+  descendant.
+- **A25. The system prompt is inspectable and computed once.** `GET /api/chats/{id}/system-prompt`
+  returns `{systemPrompt, source: "profile" | "agent" | "none", profileId, profileName, model:
+  {provider, model} | null, toolCount}` for the chat's agent as the next turn will send it. The
+  text comes from `systemPromptFor`, the single function the run loop uses to build a turn's system
+  prompt, over the same resolved agent (A23), and `toolCount` is the size of the same turn plan's
+  catalog (§5.4). Today the hub adds nothing of its own: the prompt is exactly the effective
+  `system_prompt`, verbatim, with no sub-agent or tool notes prepended or appended (tools travel as
+  the request's tool list). Anything added later goes into that function and is reported here.
+
+- **A26. Chat creation.** `POST /api/chats {title?, profileId?, systemPrompt?, clientLabel?, model?,
+  parentChatId?}` creates the chat and its record together and returns the Chat (201). The prompt
+  source is decided as follows: `profileId` naming a profile is a live reference (A23; 404 if it does
+  not exist); an explicit `profileId: null` means no profile, and the chat's own `systemPrompt`
+  (default empty) is used; **`profileId` omitted means the default profile only if `systemPrompt`
+  is also omitted** — a request that sends its own `systemPrompt` and no `profileId` gets that text,
+  not the default profile. `clientLabel` omitted or `null` is no client; `*` or the empty string is
+  a 400. `title` defaults to `"New chat"` and is replaced by the first line of the first user
+  message while the chat has no messages. `model` overrides the profile's initial model copy
+  (`{provider, model}`). `parentChatId` makes a child chat (A29); the child's grants are bounded by
+  the parent's (A12), so a `clientLabel` outside the parent's is simply not granted.
+- **A27. Rebinding a chat.** `PATCH /api/chats/{id}` additionally accepts `profileId` (string, or
+  `null` to detach: the record keeps the values it last had), `systemPrompt` (the chat's own text,
+  used only while no profile is referenced, else ignored) and `clientLabel` (string or `null`,
+  A24). They change the chat's record and the mirrored `profile_id`/`client_label` of the record's
+  chats (and clear the client of descendants' chats that A14 narrowed away). A child chat (A23:
+  `origin = spawn`) that is bound to a profile this way takes the profile's values once, not live.
+- **A28. Deleting a chat is a cascade.** `DELETE /api/chats/{id}` permanently deletes the chat, its
+  messages, runs and draft, **every child chat** (`parent_chat_id`, transitively) and each
+  execution record no remaining chat uses — and that has no live child record outside the deleted
+  set, so older data whose child chats were never linked is not swept away — with the record's
+  descendants, grants, edges, inbox and call rows. Runs on the deleted chats are cancelled first.
+  All database changes happen in one transaction. The response is `200 {deletedChats: n}`.
+- **A29. Sub-chats.** `switchboard.chat.spawn` (and `POST /api/chats` with a `parentChatId`)
+  creates a *child chat* of the calling chat: a new chat with `parent_chat_id` set, whose record is
+  a child of the caller's record (depth, child-count limits, the A8 edge and A12 grant bounds apply).
+  It inherits client, capabilities, approval, model and profile reference (M3). An optional first
+  `message` is injected into it as `sender.kind = "spawn"` (B7) and its final answer comes back into
+  the spawning chat as a reply (B8). Nothing else ever creates a chat as a side effect of messaging.
 
 `messages` — a DAG, not a list (the decision taken in §0):
 
@@ -320,9 +493,12 @@ is therefore on `(COALESCE(parent_id, ''), name) WHERE deleted_at IS NULL`.
 | `tool_calls` | json, null | `[{id, name, arguments}]` as issued by the model |
 | `tool_results` | json, null | `[{tool_call_id, call_id, result, error}]`; `call_id` joins `calls` |
 | `token_input`, `token_output`, `cost_micros`, `latency_ms` | int | per-message metering |
-| `model` | json, null | the exact model that produced an assistant message (may differ from the agent's current config) |
+| `model` | json, null | the full turn options that produced an assistant message: `{provider, model, max_tokens, temperature, thinking}` (may differ from the agent's current config) |
+| `system_prompt` | text, null | the exact system prompt text that turn was generated against, set alongside `model` |
+| `tools` | json, null | the exact tool definitions (`llm.Tool[]`: name, description, input schema) that turn was generated against, set alongside `model` |
 | `finish_reason` | string, null | `stop` \| `tool_use` \| `max_tokens` \| `budget` \| `cancelled` \| `error` |
 | `run_id` | uuid, null | which run produced it |
+| `sender` | json, null | on a `user` message injected by another chat (B7): `{chatId, chatTitle, kind}`, `kind` = `message` (a `switchboard.chat.send`) \| `reply` (a returned answer, B8) \| `spawn` (the first task from the parent chat); `chatTitle` is the sender's title at that moment. Null on everything typed by a human or written by a model. The raw text is stored; the model-facing preamble is added when a request is built (B9) |
 | `last_active_child_id` | uuid, null | which child was last active below this message; remembers a branch's leaf for A6 |
 | `created_at` | timestamptz | |
 
@@ -338,22 +514,44 @@ is therefore on `(COALESCE(parent_id, ''), name) WHERE deleted_at IS NULL`.
   `tool_calls`/`tool_results`, *not* only by reference into `calls`, because the call log is
   pruned and chats are not (§6.3). The `call_id` cross-reference is kept anyway so the Calls view
   can jump to the message that caused a call while the call row still exists.
+- **A8m. `model`/`system_prompt`/`tools` are a per-turn snapshot, not a live reference.** They are
+  set once, when the assistant message is persisted, from exactly what that turn was sent (spec.md
+  §5.3's `plan.system`/`cat.llmTools()`/the resolved model options) — never recomputed later. This
+  is deliberate: the profile or grants a chat resolves through can change after the fact (A23), so
+  without this a JSON export (§7.2) could only reproduce what a chat resolves to *now*, not what a
+  past turn actually ran against — which breaks both offline prompt/tool iteration against a real
+  transcript and provider-side prompt caching, which needs a byte-identical request to hit.
 
-`edges` — agent↔agent communication permissions:
+`edges` — communication permissions between chats' execution records (the tools name chats, M4).
+**Edges are symmetric (D14):** one row stands for the pair, and `allowed` governs both directions
+— there is no such thing as "A may message B but not B may message A". This is what makes the
+connection *the* thing the agent reasons about: it does not have to know or care which side dialed
+first.
 
 | Field | Type | Notes |
 |---|---|---|
-| `from_agent_id`, `to_agent_id` | uuid | composite primary key |
+| `agent_a_id`, `agent_b_id` | uuid | composite primary key, stored with the lexicographically smaller id first so `(a,b)` and `(b,a)` are the same row |
 | `allowed` | bool | |
 | `created_at`, `updated_at` | timestamptz | |
 
-- **A8.** A parent→child edge is created `allowed = true` on spawn. Any other edge defaults to
-  denied; absence of a row means denied.
-- **A9.** Cycles are permitted structurally — two agents may be allowed to message each other —
+- **A8.** A parent↔child edge is created `allowed = true` on spawn (both directions, being the
+  same row, D14). Any other edge defaults to denied; absence of a row means denied.
+- **A9.** Cycles are permitted structurally — two chats may be allowed to message each other —
   but message loops are bounded by the budget rules of §5.6, not by the graph shape. This is
   deliberate: the failure this project exists to replace shipped a symmetric `heartbeat` that
   answered `heartbeat`, an infinite loop measured at ~80 msg/s (see PROTOCOL.md). A graph that
   permits cycles **must** have a termination argument that does not depend on the graph.
+- **D14. Connections are independent of the tree.** The parent/child structure (`chats.parent_chat_id`
+  / `agents.parent_id`) and the edge graph are two different relations that happen to agree at
+  spawn time (A8). Once created, a **parent/child link is immutable**: nothing — no tool, no API
+  route, no console action — ever changes or clears `parent_id`/`parent_chat_id` on an existing
+  chat, and deleting the parent cascades (D13) rather than re-parenting. Edges, in contrast, are
+  freely mutable and are how *any two chats*, related or not, get to talk: `switchboard.graph.set_edge`
+  connects any chat the caller can name to itself (X8 still applies — a chat can only open an edge
+  that has itself as one endpoint, never wire up two other chats behind their backs), and the
+  console's Graph view (human operator, already trusted) may connect any two chats at all. This is
+  what lets two unrelated leaf chats collaborate directly instead of relaying through a shared
+  ancestor.
 
 `grants` — MCP permissions, server-level only:
 
@@ -371,8 +569,9 @@ Primary key `(agent_id, label, project, server)`.
   use everything `label/project/server` exposes", which maps exactly onto the existing scope
   mechanism and needs no new resolution path.
 - **A11. Wildcards.** `label`, `project` and `server` may each be the literal `*`, matching any
-  value. `(*, *, *)` is "everything", which is what a root agent created from the console gets by
-  default unless `MCP_SWITCHBOARD_AGENT_DEFAULT_GRANTS` says otherwise.
+  value. `(*, *, *)` is "everything", which is what a root agent created through the legacy
+  `POST /api/agents` path gets by default unless `MCP_SWITCHBOARD_AGENT_DEFAULT_GRANTS` says
+  otherwise (A20). A chat made by `POST /api/chats` never gets it: it holds `(client, *, *)`, or nothing, (A19).
 - **A12. Inheritance and the escalation rule.** On spawn, a child's grant set is the parent's,
   intersected with whatever the parent asked for. **An agent can never grant a child more than it
   holds itself.** This is enforced at every point where an agent *writes* a grant — spawn, and
@@ -381,6 +580,10 @@ Primary key `(agent_id, label, project, server)`.
   ancestors.** Narrowing reaches descendants through A14's propagating transaction, which is the
   single mechanism for it; re-deriving at call time would additionally revoke the `human` grants
   that A13 and A14 exist to preserve, and the two rules cannot both hold.
+  A consequence worth naming: because a chat holds only `(client, *, *)`
+  (A19), every descendant it spawns holds a subset of that, so **the one-client restriction of an
+  agent propagates to its whole subtree by construction**, and asking for another client's grants
+  yields nothing.
 - **A13. Humans are not bound by A12.** A grant edited from the Graph view is stored with
   `source = 'human'` and may exceed the parent's set. It is rendered with a distinct badge, since
   it is the one way the tree's invariant is legitimately broken.
@@ -443,7 +646,10 @@ Primary key `(agent_id, label, project, server)`.
   every in-flight tool call (G2). The partial assistant message is persisted with
   `finish_reason = "cancelled"` so the transcript is never a lie about what happened.
 - **R4. At most one run per chat** at a time. A second trigger for a busy chat is queued, not run
-  in parallel, because two runs appending to one `active_leaf_id` is a lost-update race.
+  in parallel, because two runs appending to one `active_leaf_id` is a lost-update race. This
+  holds for a message injected by another chat exactly as for a human one (B7): its append is
+  deferred until its run reaches the head of the chat's queue, so it never lands between a tool
+  call and its results.
 - **R5. Idempotency.** `POST /api/chats/{id}/messages` accepts an `Idempotency-Key`; a repeat
   within 10 minutes returns the original run rather than starting a second one. Mobile networks
   retry, and a retried POST that spends money twice is not acceptable.
@@ -454,7 +660,7 @@ Primary key `(agent_id, label, project, server)`.
   has its own id to link to, cite and branch from. The provider layer (L6) regroups them into
   whatever shape the provider wants on the next request.
 - **R7. A run that is waiting does not occupy a concurrency slot.** `AGENT_MAX_CONCURRENT_RUNS` counts
-  runs in `running` only. A run blocked on a peer's reply (`switchboard.agent.send` with
+  runs in `running` only. A run blocked on another chat's reply (`switchboard.chat.send` with
   `wait: true`) or on a human approval (§5.8) is `waiting`: it holds no slot, and it re-acquires
   one to resume. Without this, a parent waiting on a child holds the slot the child needs and a
   tree deeper or wider than the hub-wide cap deadlocks until `AGENT_REPLY_TIMEOUT` fires. A
@@ -473,10 +679,21 @@ topology changes take effect at the next turn boundary:
    `exact` beating `*` field by field (`label`, then `project`, then `server`). Specificity
    therefore orders allows only, and never rescues a denied ref. V1 requires table-driven tests
    for exactly this function.
-3. Compose names at `Scope.ALL` (`label__[project__]server__tool`) so names are stable regardless
-   of what else is connected — an agent's prompt cache must not be invalidated because an
-   unrelated machine dialled in.
-4. Append the `switchboard.*` tools the agent is allowed to use (§5.5).
+3. Compose names by the agent's **naming mode**, which is a function of its *stored grants* only
+   (never of what is connected), so names stay stable regardless of what else dials in — an
+   agent's prompt cache must not be invalidated because an unrelated machine connected (T1):
+   - **Pinned** — every allowed grant names the same concrete client label. This is always the
+     case for a chat that has a client (A19). The client prefix is redundant
+     and is dropped: names are `[project__]server__tool`, and the first-party `harness` server
+     (§9), which every client carries, drops its server prefix as well, leaving bare tool names
+     such as `run_command`. Every other server keeps its prefix, so tools of different servers
+     cannot collide. A tool call resolves only against that one client's servers.
+   - **Unpinned** — wildcard or multi-client grants (agents made through the API, or with no grants): the fully
+     qualified `label__[project__]server__tool` of `Scope.ALL`.
+   A duplicate name within one agent's catalog is dropped with a warning, as before (I4).
+4. Append the `switchboard.*` tools the agent's capabilities allow (§5.5, M1). While the agent
+   references a profile those capabilities are the profile's current ones (A23). An agent without
+   grants (A19) gets these and nothing else.
 5. Drop names failing I4, and drop duplicates loudly.
 
 - **T1.** Tool-set churn is expensive: it invalidates provider prompt caches. The hub therefore
@@ -487,44 +704,74 @@ topology changes take effect at the next turn boundary:
 
 ### 5.5 Built-in `switchboard.*` tools
 
-Exposed **only at `/mcp/agent/{id}`**, where the hub knows which agent is calling (X8). They are
-never listed at `/mcp` or at the host/project/server scopes: those scopes have no principal, so
-"the caller's children", "the caller's grants" and "the caller's mailbox" have no referent there.
+Exposed **only at `/mcp/agent/{id}`** (the id is the calling chat's execution record), where the hub
+knows which chat is calling (X8). They are never listed at `/mcp` or at the host/project/server
+scopes: those scopes have no principal, so "the caller's child chats", "the caller's grants" and
+"the caller's mailbox" have no referent there.
 Whether external consumers should be able to attach to `/mcp/agent/{id}` at all is Q2, and until it
 is answered the scope is internal to the run loop. Every one of these is itself logged as a call.
 
+The tools speak of **chats**: arguments and results carry chat ids, which the hub translates to
+execution records internally (M4). The tool names of earlier revisions, which spoke of agents, are not offered.
+
 | Tool | Input | Output | Behaviour |
 |---|---|---|---|
-| `switchboard.agent.spawn` | `{name, description, model?, system_prompt, grants?, budget?}` | `{agent_id, chat_id}` | Creates a child of the calling agent. `model` defaults to the parent's. `grants` are intersected with the parent's (A12). Fails if the child's depth (`parent.depth + 1`) would exceed `AGENT_MAX_DEPTH`, or if the caller already has `AGENT_MAX_CHILDREN` live direct children. |
-| `switchboard.agent.send` | `{to_agent_id, message, wait?}` | `{message_id, reply?}` | Requires an `allowed` edge. Appends to the recipient's peer chat and enqueues a run. With `wait: true` (the default when a parent addresses its own child) the calling run goes `waiting` — releasing its concurrency slot, R7 — for up to `AGENT_REPLY_TIMEOUT` and receives the reply as the tool result; on timeout it resumes with a tool error and the reply, if it ever arrives, lands in the mailbox. With `wait: false` it returns immediately and the reply always arrives in the mailbox. |
-| `switchboard.agent.list` | `{scope?}` | `[{agent_id, name, description, status, depth}]` | Children by default; `scope: "reachable"` lists every agent with an allowed edge. Never reveals agents the caller cannot message. |
-| `switchboard.agent.stop` | `{agent_id}` | `{cancelled}` | Cancels a descendant's runs. Only on descendants. |
-| `switchboard.inbox.read` | `{wait?}` | `[{from_agent_id, message_id, message}]` | Drains the caller's mailbox (§5.6). `wait` up to 30 s. |
-| `switchboard.graph.set_edge` | `{from_agent_id, to_agent_id, allowed}` | `{ok}` | Only within the caller's own subtree. Applies immediately and publishes a change event. |
-| `switchboard.mcp.grant` | `{agent_id, label, project?, server, allowed}` | `{ok}` | Only on descendants, and only within the caller's own grants (A12). |
-| `switchboard.mcp.list_servers` | `{}` | `[{label, project, server, connected, tool_count}]` | The caller's own grants joined against the live registry, so an agent can see what it may use and what is currently reachable. |
+| `switchboard.chat.spawn` | `{title, system_prompt, model?, grants?, budget?, capabilities?, approval?, message?}` | `{chat_id}` | Creates a child chat of the calling chat (A29). `model`, `capabilities` and `approval` default to the caller's (M3). `grants` are intersected with the caller's (A12). Fails if the child's depth (`parent.depth + 1`) would exceed `AGENT_MAX_DEPTH`, or if the caller already has `AGENT_MAX_CHILDREN` live direct children. `message`, when given, is injected into the child as `sender.kind = "spawn"` and wakes it; its final answer returns to the caller's chat as a reply (B8). |
+| `switchboard.chat.send` | `{to_chat_id, message}` | `{message_id}` | Requires an `allowed` edge between the two chats (D14; never to itself). Inserts `message` into the recipient's **own** chat exactly as if the human had typed it there — a plain `user`-role turn, distinguished only by `sender` metadata (chat id, title and kind, B7) — and wakes it (B2). Always fire-and-forget: there is no `wait`, no synchronous reply, and no special routing back. If the recipient wants to answer, it calls `switchboard.chat.send` back to the sender, exactly like any other message — the edge is symmetric (D14), so it always can. The one exception is `switchboard.chat.spawn`'s own `message` (B8): a spawned child's *final* answer is still returned to the spawning chat automatically, because that is a property of spawning a task, not of `chat.send`. |
+| `switchboard.chat.list` | `{}` | `[{chat_id, title, status, relation, depth?}]` | Every chat the caller can currently message: its parent and children (`relation: "parent"` / `"child"`, with `depth`) plus every chat joined by an edge (`relation: "connected"`). One flat list, no scope parameter — this is deliberately the *only* way a chat discovers who it can talk to, so there is nothing to get wrong. Never reveals a chat the caller cannot message. |
+| `switchboard.chat.stop` | `{chat_id}` | `{cancelled}` | Cancels a descendant chat's runs. Only on descendants. |
+| `switchboard.inbox.read` | `{wait?}` | `[{from_chat_id, chat_id, message_id, message}]` | Drains the caller's mailbox (§5.6): messages other chats sent while it was not set to wake. `message` is the raw text; `from_chat_id` is the sender chat. `wait` up to 30 s. |
+| `switchboard.graph.set_edge` | `{chat_id, allowed}` | `{ok}` | Opens or closes a symmetric edge (D14) between the caller and `chat_id`, any chat the caller can name — not limited to its own subtree. The caller must be one of the two endpoints (X8): a chat can connect *itself* to anything, never wire up two other chats. Applies immediately and publishes a change event. |
+| `switchboard.mcp.grant` | `{chat_id, label, project?, server, allowed}` | `{ok}` | Only on descendant chats, and only within the caller's own grants (A12). |
+| `switchboard.mcp.list_servers` | `{}` | `[{label, project, server, connected, tool_count}]` | The caller's own grants joined against the live registry, so a chat can see what it may use and what is currently reachable. |
 
-- **M1.** `switchboard.agent.*` tools are only listed for an agent whose
-  `capabilities.can_spawn` / `can_message` flags are set. A leaf worker agent gets none of them,
-  which is both cheaper (fewer tokens) and safer.
-- **M2. Annotations.** `agent.list` and `mcp.list_servers` are `readOnlyHint: true`. Everything
+- **M1.** The `switchboard.chat.*`, `graph`, `mcp` and `inbox` tools are only listed for a chat whose
+  `capabilities.can_spawn` / `can_message` flags are set. A leaf worker chat gets none of them,
+  which is both cheaper (fewer tokens) and safer. While a chat references a profile the flags are
+  the profile's current ones (A23): editing the profile affects every chat using it, from its next
+  turn. Each tool's requirement (`canSpawn`, `canMessage`, `canSpawn or
+  canMessage`, or `always`) is derived from the same visibility predicate the catalog uses and
+  served by `GET /api/hub-tools` (A21). The capability flags keep their names; the console words
+  them in terms of chats.
+- **M2. Annotations.** `chat.list` and `mcp.list_servers` are `readOnlyHint: true`. Everything
   else changes state and is annotated honestly, so §5.8's approval gate can see it:
-  `agent.spawn` and `agent.send` are `destructiveHint: false, openWorldHint: true` (effects outside
-  the caller); `agent.stop`, `graph.set_edge` and `mcp.grant` are `destructiveHint: true,
+  `chat.spawn` and `chat.send` are `destructiveHint: false, openWorldHint: true` (effects outside
+  the caller); `chat.stop`, `graph.set_edge` and `mcp.grant` are `destructiveHint: true,
   openWorldHint: false` (they kill work or rewrite permissions); `inbox.read` is
   `readOnlyHint: false, idempotentHint: false` because it *drains* the mailbox — the same reasoning
   that makes the harness's `process_read` non-idempotent (§9.6).
 
+- **M3. Sub-chats inherit.** A child made by `switchboard.chat.spawn` inherits from its parent:
+  **the client restriction** (through A12: its grants are a subset of the parent's, so it can never
+  reach another client, whatever `grants` it is asked for), **`capabilities`**, **`approval`**,
+  **`model`** and **`profile_id`** (its record's `origin` is `spawn`, and it keeps the values it was
+  spawned with, A23). `capabilities` and `approval` may be given explicitly in the
+  call but only to *narrow*: a capability the parent lacks, or an approval mode laxer than the
+  parent's (`always` > `destructive` > `never`), is refused (A12 applied to M1 and W1). Depth and
+  child-count limits still apply. The child chat records the spawning chat's
+  `client_label` and `profile_id`, so the console can show which client a sub-chat belongs to.
+- **M4. Chat ids in, records inside.** Tool arguments and results name chats; the hub resolves a
+  chat id to its execution record and authorises by the **caller's own identity** (X8), exactly as
+  it authorised record ids before: an edge is checked between the two chats' records, "descendant"
+  means the record is below the caller's in the tree, `set_edge` needs the caller as one endpoint
+  (D14), and `grant` needs the target inside the caller's subtree. An unknown chat, or one whose
+  record is deleted, is not found; a chat outside the caller's reach is `denied`. A `/mcp/agent/{id}`
+  call with no run behind it acts in the record's most recently active human chat (created on demand
+  if it has none). Which chat stands for a record that has several (older data) is that same rule:
+  its most recently active human chat.
+
 ### 5.6 Mailbox, wake-up and termination
 
-The draft this replaces had no answer for *how a stopped agent receives a message*. MCP is
-request/response; an agent that is not running cannot be called. So:
+The draft this replaces had no answer for *how a stopped chat receives a message*. MCP is
+request/response; a chat that is not running cannot be called. So:
 
-- **B1. Every agent has a durable mailbox** (`inbox` table: `id, agent_id, from_agent_id,
-  chat_id, message_id, delivered_at`).
-- **B2. Delivery wakes the recipient.** `switchboard.agent.send` appends to the mailbox and
-  enqueues a run for the recipient's peer chat if one is not already queued. An agent with
-  `auto_wake = false` accumulates mail instead and shows a badge in the Graph view.
+- **B1. Every record has a durable mailbox** (`inbox` table: `id, agent_id, from_agent_id,
+  chat_id, message_id, delivered_at`); `chat_id` is the recipient chat and `message_id` the
+  injected message (B7), which already sits in that chat.
+- **B2. Delivery wakes the recipient.** `switchboard.chat.send` injects the message into the
+  recipient's own chat and enqueues a run for that chat, queued behind any run already on it (R4).
+  A record with `auto_wake = false` accumulates the message instead (it is in its chat, and in the
+  mailbox for `switchboard.inbox.read`, but no run starts) and shows a badge in the Graph view.
 - **B3. Delivery latency** is measured from the `send` call returning to the recipient's run
   starting, and is the `mcpsb_agent_message_delivery_seconds` histogram.
 - **B4. Budgets are the termination argument.** Two different things were conflated here in an
@@ -576,6 +823,29 @@ request/response; an agent that is not running cannot be called. So:
   `max_lifetime_cost_micros`; the spent total itself is never rewound) and continue from the same
   leaf.
 
+- **B7. Messages are injected into the recipient's own chat.** A `switchboard.chat.send` appends
+  a `user`-role message to the chat named by `to_chat_id` — under its active leaf, deferred by R4 —
+  with `sender = {chatId, chatTitle, kind: "message"}` (§5.2), then wakes it exactly like a human
+  message (trigger `agent_message`, `triggered_by_agent_id` = the sender's record). No chat is
+  created for a message: there are no peer or "conversation" chats, and the ones older data holds
+  are only read, never written. The console shows the message as "from <sender title>", linked to the
+  sender chat, and never as something the human typed.
+- **B8. Replies.** The recipient's final answer for a run woken by a message goes back to the
+  sender: inline as the tool result for `wait: true`, otherwise **injected into the sender's own
+  chat** with `sender.kind = "reply"`, waking it. A reply-triggered wake carries no reply route of
+  its own, so answering a reply does not send another reply: without that rule two chats would
+  ping-pong without either model choosing to (A9's cycle is otherwise still bounded only by B5).
+  A `spawn` message's answer returns the same way.
+- **B9. The model reads a preamble, the store keeps the raw text.** When a request is built, a
+  user message carrying `sender` is prefixed by one fixed line naming the sender chat — for a
+  `message`: `[Message from chat "<title>" (id <chat id>). Reply with switchboard.chat.send to that
+  id.]`, for a `reply`: `[Reply from chat "<title>" (id <chat id>).]`, for a `spawn`: `[Task from your
+  parent chat "<title>" (id <chat id>). Your final answer is delivered back to it.]` — then a blank
+  line and the text. The line is produced by one function and only in the provider-facing
+  conversion; `messages.content`, the search index, `inbox.read` and the console see the raw text.
+  Being a deterministic function of stored data it does not disturb the catalog (T1) or the
+  cached prefix, and token accounting is the provider's own usage figures, so it is unaffected.
+
 ### 5.7 Models and providers
 
 ```json
@@ -592,13 +862,17 @@ request/response; an agent that is not running cannot be called. So:
   `Complete(ctx, messages, tools, opts) (<-chan Delta, error)` — always streaming, because the
   console streams and a non-streaming path would be a second code path to keep correct.
 - **L2. Providers in this revision:** `anthropic`, `openai`, and `openai-compatible` (a base URL
-  plus a key — covers Ollama, vLLM, OpenRouter, LM Studio). Each is a file in `internal/llm/`.
+  plus an optional key — covers Ollama, vLLM, LiteLLM, OpenRouter, LM Studio; Ollama is spoken to
+  natively, L7). Each is a file in `internal/llm/`.
 - **L3. Credentials** come from `MCP_SWITCHBOARD_LLM_<PROVIDER>_API_KEY`, subject to the
   file-path substitution rule (P3), so sops/systemd credentials work with no new mechanism.
   A key is never returned by any API endpoint and never logged.
 - **L4. Model registry.** `GET /api/models` lists configured providers and their usable models,
   for the model picker. Models are declared in config (`MCP_SWITCHBOARD_LLM_MODELS`, a JSON file
-  path) rather than discovered, because pricing must be attached to them anyway.
+  path) because pricing must be attached to them; `openai` and `anthropic` list declared models
+  only. `openai-compatible` additionally discovers its models (L8). A model object is
+  `{provider, model, prices, contextWindow?, supportsTools?, discovered?}`. A models-file entry may
+  carry `context_window`, the per-model context override (L7).
 - **L5. Cost.** Prices are `{input_micros_per_mtok, output_micros_per_mtok, cache_read, cache_write}`
   per model in that same file. A model with no price entry records `cost_micros = 0` and is
   flagged `cost_unknown` in the UI rather than guessing. All money is integer micros; no floats.
@@ -609,8 +883,39 @@ request/response; an agent that is not running cannot be called. So:
 
 ### 5.8 Human-in-the-loop
 
+- **L7. Native Ollama and the per-request context window.** Ollama's `/v1/chat/completions`
+  always uses the server's default context (4096) because it cannot take a per-request `num_ctx`,
+  so a prompt full of tool definitions would be silently truncated. The `openai-compatible`
+  provider therefore detects Ollama lazily (strip a trailing `/v1` from the base URL to get the
+  root; `GET {root}/api/version` returning JSON with `version` means Ollama; cached per provider;
+  a network failure is not cached) or is forced with `MCP_SWITCHBOARD_LLM_OPENAI_COMPATIBLE_KIND`
+  = `auto` (default) | `ollama` | `generic`. Ollama is spoken to via streaming `POST {root}/api/chat`
+  (NDJSON) with `options: {num_ctx, temperature?, num_predict?}`: tool calls carry object
+  arguments, tool results are `role: tool` with `tool_name`, images go in `images`, `message.thinking`
+  becomes thinking deltas (and `think` is sent when the model reports the `thinking` capability),
+  `message.tool_calls` become complete tool-call deltas with generated ids when Ollama gives none,
+  and the final `done` chunk supplies the finish reason and `prompt_eval_count`/`eval_count`.
+  `num_ctx` is, in order: the models-file `context_window` of that model; `MCP_SWITCHBOARD_LLM_OLLAMA_NUM_CTX`
+  (int, default 0 = auto); else `min(model maximum from /api/show, 32768)` (`/api/show` cached per
+  model with a TTL). If the final `prompt_eval_count` is at least the window, the prompt filled it
+  and Ollama truncated: the hub logs a warning and sets `Usage.Truncated` (with `Usage.ContextWindow`)
+  so the run can show it. Non-Ollama endpoints stay on the `/v1` SSE path.
+- **L8. Model discovery.** For `openai-compatible` (never `openai` or `anthropic`) the hub
+  discovers models: Ollama via `GET {root}/api/tags` then `/api/show` per model (`contextWindow`
+  from `model_info`, `supportsTools` from the `tools` capability; embedding-only models are
+  skipped); other servers (LiteLLM, vLLM, LM Studio) via `GET {base}/models`. It is skipped when
+  the base URL host is `openrouter.ai` or `MCP_SWITCHBOARD_LLM_OPENAI_COMPATIBLE_DISCOVER=false`
+  (default `true`). The list is refreshed once at startup in the background (a down provider never
+  blocks or fails startup; the last good list is kept and the failure is logged once) and lazily
+  every 60 s; `GET /api/models` triggers the refresh but waits at most about 2 s, serving the cache
+  otherwise. Discovered models merge with declared ones: a declared entry wins for prices and the
+  context override (it still gains the discovered context window and tool support for display);
+  discovered-only models are usable immediately. Cost rule: models discovered on Ollama are local
+  and free, so they are priced at zero (not `cost_unknown`), as are declared Ollama models with no
+  price entry; discovered models on other servers stay unpriced (`cost_unknown`) unless declared.
 - **W1.** Every agent carries `approval: "never" | "destructive" | "always"` as a stored column
-  (§5.2). It defaults to `destructive` when the agent is *created* holding a grant that matches a
+  (§5.2). While an agent references a profile the mode is **the profile's** (A23), and a spawned
+  child inherits its parent's (M3). Otherwise it defaults to `destructive` when the agent is *created* holding a grant that matches a
   `harness` server, and to `never` otherwise; it is never re-derived afterwards, because a mode
   that silently changed when a grant was edited would be a surprising way to lose a safety prompt.
   Editing grants later leaves the mode alone, and the Graph view shows it next to the grant list.
@@ -631,7 +936,7 @@ request/response; an agent that is not running cannot be called. So:
 ### 6.1 The Store interface
 
 - **D1.** All persistence goes through one interface in `internal/store`, split into focused
-  sub-interfaces (`CallStore`, `AgentStore`, `ChatStore`, `GrantStore`, `RunStore`) so a caller
+  sub-interfaces (`CallStore`, `AgentStore`, `ChatStore`, `GrantStore`, `RunStore`, `ProfileStore`) so a caller
   depends only on what it uses. SQLite is the only implementation in this revision; the interface
   exists so a Postgres implementation can be added without touching call sites.
 - **D2.** Every method takes a `context.Context`. Every multi-row mutation runs in one
@@ -656,11 +961,31 @@ written once, run once and then maintained forever.
 - **D5.** A `schema_migrations` table records applied versions. Migrations are numbered, embedded
   `.sql` files, applied in a transaction at startup, forward-only. They are owned by
   `hub/internal/store/migrations/` and are the single source of the schema.
-- **D6. Migration 001 is the whole schema**, in one file: `calls` (including `agent_id`, `chat_id`,
+- **D6. Migration 001 is the original schema, and is frozen.** It was one file while no deployment
+  existed; once a development database at version 1 held real data it became immutable, and every
+  later change is a new numbered file (D12). 001 holds: `calls` (including `agent_id`, `chat_id`,
   `run_id`, and `denied` among the `status` values), the orchestrator tables (`agents`, `chats`,
   `messages`, `edges`, `grants`, `runs`, `inbox`) with their indexes including the partial unique
   index on agent names (§5.2), and the FTS5 virtual table and triggers backing the chat search of
-  U6. The sequence starts here; 002 onwards are real changes made after this revision ships.
+  U6.
+- **D12. Migration 002 (`002_profiles`) is the first real migration.** It adds the `profiles` table
+  with the partial unique index of A17, `chats.profile_id`, `chats.client_label` and
+  `agents.profile_id` (nullable, the two foreign keys `ON DELETE SET NULL`). It is additive, so it
+  applies both to an empty file and on top of a version-1 database with its data intact; nothing
+  is backfilled (legacy chats keep null `profile_id` / `client_label`). Migration 003
+  (`003_chat_drafts`) adds the `chat_drafts` table of N9 (`chat_id` primary key, `ON DELETE CASCADE`).
+  Migration 004 (`004_agent_origin_client`) adds `agents.origin` (`NOT NULL DEFAULT 'chat'`) and
+  `agents.client_label` (nullable) and backfills them on a live database: `origin = 'spawn'` where
+  `parent_id IS NOT NULL`, `chat` for the rest; `client_label` from the agent's oldest chat that
+  recorded one, else from its grants when they allow exactly one concrete label. Tests upgrade a
+  version-3 database holding data.
+- **D13. Migration 005 (`005_chats_as_unit`)** adds `chats.parent_chat_id` (nullable, no foreign
+  key) and `messages.sender` (nullable JSON), both additive, and an index on `parent_chat_id`. It
+  backfills best-effort on a live database: a legacy `kind = 'spawn'` chat with a `peer_agent_id`
+  gets, as its parent chat, the *oldest human chat of that peer agent*; every other chat keeps a
+  null parent. A trigger clears `parent_chat_id` on the children when a chat is deleted, so nothing
+  dangles. No existing row or table is dropped or rewritten, and the retired columns
+  (`peer_agent_id`, `kind`) stay as they were. Tests upgrade a version-4 database holding data.
 - **D7. A pre-migrations database is refused, not adopted.** If `calls` exists and
   `schema_migrations` does not, the hub exits with a message naming the file and saying to delete
   it. Silently adopting it would leave a database missing every column 001 declares, failing at
@@ -677,6 +1002,7 @@ Two retention policies now coexist, and conflating them was an inconsistency in 
 |---|---|---|
 | `calls` | pruned by age **and** row count | `RETENTION_DAYS` (30), `MAX_ROWS` (100 000) |
 | `agents`, `chats`, `messages`, `edges`, `grants` | never pruned automatically | — |
+| `push_subscriptions` (§8.7) | removed only when the push service reports it gone (404/410), or by hand | — |
 | `runs` | pruned by age, but only rows no surviving message references | `RETENTION_DAYS` |
 | `inbox` | delivered rows pruned after 7 days | `INBOX_RETENTION_DAYS` |
 
@@ -696,7 +1022,7 @@ Two retention policies now coexist, and conflating them was an inconsistency in 
 
 All under the private listener. JSON bodies, camelCase fields, RFC 3339 UTC timestamps with an
 explicit `+00:00` offset. The camelCase rule covers this REST/SSE surface only: **MCP tool
-arguments and results stay snake_case** (`to_agent_id`, `exit_code`), because they sit in the same
+arguments and results stay snake_case** (`to_chat_id`, `exit_code`), because they sit in the same
 namespace as tunnelled servers' tools and a model should not have to learn two conventions inside
 one catalog. The handler layer is the boundary, and it is the only place that translates.
 
@@ -721,21 +1047,47 @@ one catalog. The handler layer is the boundary, and it is the only place that tr
 
 | Method | Path | Notes |
 |---|---|---|
-| GET/POST | `/api/agents` | list / create |
-| GET/PATCH/DELETE | `/api/agents/{id}` | `DELETE` soft-deletes and cancels descendants |
+| GET/POST | `/api/agents` | list / create. Agent JSON carries `origin`, `clientLabel`, `profileId`. `POST` with a `clientLabel` key (even `null`) creates a `manual` record with no chat (A20) and takes `profileId?`; without it the legacy behaviour applies (A20). The console uses `/api/chats` instead (A26); these routes remain for the Graph view and API callers |
+| GET/PATCH/DELETE | `/api/agents/{id}` | `PATCH` also takes `profileId`, `clientLabel` (A24) and `name`; `DELETE` soft-deletes and cancels descendants |
 | GET | `/api/agents/{id}/grants` · PUT | grant set; `PUT` applies A14 propagation atomically |
 | GET | `/api/graph` | agents + edges + grants + live-connection join, in one response |
-| PUT | `/api/graph/edges/{from}/{to}` | `{allowed}` |
-| GET/POST | `/api/chats` | list (filter by `agentId`, `kind`, `tag`, `q`) / create |
-| GET/PATCH/DELETE | `/api/chats/{id}` | `PATCH` sets `title`, `tags`, `activeLeafId` |
-| GET | `/api/chats/{id}/messages` | `?leaf=` walks that leaf; `?tree=1` returns the whole DAG |
+| PUT | `/api/graph/edges/{a}/{b}` | `{allowed}`; symmetric (D14) — order of `a`/`b` does not matter and governs both directions. Unlike the `switchboard.graph.set_edge` tool, the console (a trusted human operator) may connect any two chats at all, not just itself to another |
+| GET/POST | `/api/chats` | list (filter by `agentId`, `kind`, `tag`, `q`; each Chat carries `parentChatId`) / create. `POST` takes the primary form `{title?, profileId?, systemPrompt?, clientLabel?, model?, parentChatId?}` that creates the chat and its record together (A26; 400 on a `*`/empty label, 404 on an unknown profile or parent), or, when `agentId` is present, the legacy attach form `{agentId, title?}` (A20), which takes precedence |
+| GET/PATCH/DELETE | `/api/chats/{id}` | `PATCH` sets `title`, `tags`, `archived`, `activeLeafId`, `selectMessageId` and rebinds `profileId`, `systemPrompt`, `clientLabel` (A27); `DELETE` is permanent and cascades to child chats and their records (A28), returning `200 {deletedChats}` |
+| GET | `/api/chats/{id}/tools` | `{clientLabel, clientConnected, tools[]}`: what the chat's agent can call right now (A21) |
+| GET | `/api/chats/{id}/system-prompt` | `{systemPrompt, source, profileId, profileName, model, toolCount}`: the exact system prompt the next turn sends (A25) |
+| GET/POST | `/api/profiles` | list (default first, then by name) / create (409 on a name clash) |
+| GET/PATCH/DELETE | `/api/profiles/{id}` | `PATCH` takes any subset, including `isDefault: true` (A17); `DELETE` is 409 for the default or the only profile |
+| GET | `/api/hub-tools` | every `switchboard.*` tool (the `switchboard.chat.*` names, M4) with its `requires` (M1, A21) |
+| GET | `/api/chats/{id}/messages` | `?leaf=` walks that leaf; `?tree=1` returns the whole DAG. Each message carries `sender` (B7), null unless another chat injected it |
 | POST | `/api/chats/{id}/messages` | append a user message and start a run; `Idempotency-Key` honoured (R5) |
 | POST | `/api/chats/{id}/branch` | `{fromMessageId, content?}` — creates a sibling and re-points the leaf |
+| GET/PUT | `/api/chats/{id}/draft` | unsent composer text, `{draft, updatedAt}`; empty `PUT` deletes (N9) |
 | GET | `/api/chats/{id}/stream` | **per-chat SSE**, see 7.4 |
 | GET | `/api/runs/{id}` · POST `/api/runs/{id}/cancel` | |
 | POST | `/api/runs/{id}/approvals/{callId}` | `{approved, reason?}` (W2) |
+| GET | `/api/approvals` | every approval pending in any run, oldest first (N10) |
 | GET | `/api/models` | configured providers, models and prices (never keys) |
 | GET | `/api/stats` | db size, row counts, active runs |
+
+The profile, hub-tools, chat-tools and system-prompt routes (and every chat route above) exist only
+with `AGENTS_ENABLED=true`, like the rest of the table (E7).
+
+- **N9. Chat drafts are server-side.** `PUT /api/chats/{id}/draft` `{draft}` stores the chat's
+  unsent composer text (`chat_drafts`, one row per chat; body capped at 256 KiB, else 413), an
+  empty or whitespace-only draft deletes the row, and `GET` returns `{draft: "", updatedAt: null}`
+  when there is none. A `PUT` publishes `{type: "chat", chatId}` so other tabs refetch. Sending a
+  message by a human (`POST .../messages`, the user-sibling form of `/branch`) deletes the draft in
+  the same transaction that persists the user message, and a failed delete never fails the send.
+  Deleting the chat cascades to its draft.
+
+- **N10. Pending approvals are listable for notification.** `GET /api/approvals` returns
+  `{approvals: [{runId, chatId, agentId, agentName, chatTitle, callId, tool, arguments, expiresAt}]}`
+  (oldest first, `[]` never null): every approval currently pending in any run, where `tool` is the
+  exposed name the agent sees, `arguments` the full object and `expiresAt` when W3 auto-denies. The
+  hub publishes `{type: "agent", agentId}` when an approval becomes pending and again when it is
+  resolved or times out (as the agent enters and leaves `blocked`), so a client that refetches the
+  list on `agent` events always sees the change promptly.
 
 ### 7.3 The global event bus is lossy on purpose
 
@@ -748,7 +1100,7 @@ subscriber falls behind**. That is correct for *change notifications* — a clie
   it. This is why 7.4 exists as a separate mechanism, and it is a hard rule, not a preference.
 - **N3.** Events on the global bus are therefore all *idempotent notifications*:
   `{type: "connections"}`, `{type: "call", call}`, `{type: "agent", agentId}`,
-  `{type: "graph"}`, `{type: "chat", chatId}`. None carries incremental content.
+  `{type: "graph"}`, `{type: "chat", chatId}`, `{type: "profile"}`. None carries incremental content.
 
 ### 7.4 Per-chat streaming
 
@@ -803,50 +1155,351 @@ serves hashed assets with long cache headers.
 - **U4. Theming.** Tailwind with CSS custom properties, dark mode by `prefers-color-scheme` with
   an explicit override, matching the existing console's palette.
 - **U5. Routes.** `/connections`, `/calls`, `/endpoints`, `/chat`, `/chat/:chatId`, `/graph`,
-  `/graph/:agentId`, `/settings`.
+  `/graph/:agentId`, `/prompts`, `/prompts/:profileId`. (`/graph/:agentId` is keyed by the chat's
+  execution record, the graph's own id space, and is never shown as such.) `/agents` and
+  `/agents/:profileId` redirect to their `/prompts` counterparts, so old links and bookmarks keep
+  working. `/` is not a page: it redirects to the last place visited (U25), else `/connections`.
+  Anything that identifies a resource is in the URL (U28), so every one of these is linkable and
+  survives a reload. (An earlier draft listed a `/settings` route; nothing implements it and the
+  hub's settings are environment-only, so it is not a route.)
 
 ### 8.1 Chat view
 
-- **U6. List pane.** All chats, newest activity first, grouped by agent, with badges: agent name,
-  model, kind (`human`/`agent`/`spawn`), token total, cost, status, tags. Search by title and
-  full-text over message content (SQLite FTS5). Multi-select for bulk archive/delete/export.
+- **U6. List pane.** All chats as a client -> chat -> child chat tree (U37), newest activity first,
+  one row per chat with badges: model, a "legacy" tag on old peer conversations, token total, cost,
+  status dot, tags. Search by title and full-text over message content (SQLite FTS5).
+  Multi-select for bulk archive/delete/export. The search text and archived toggle are remembered
+  by the browser (U26). There is no second list: a chat is one row and nothing under it expands
+  except its own child chats.
+- **U6a. Archive is quick, delete is not.** Hovering a row (or focusing anything inside it) shows
+  an **Archive** button; on `(hover: none)` screens it is always shown, with a ≥44 px target. It
+  issues `PATCH /api/chats/{id} {archived: true}` **without a confirmation**, removes the row
+  optimistically, refetches, and stays out of the way of the row's link (it never opens the chat).
+  Archiving hides a chat and is reversible, so it asks nothing. If the archived chat is the one
+  open, the console falls back to bare `/chat` and drops that tab's remembered location (U27). When
+  the list is showing archived chats the same button reads **Unarchive** (`archived: false`).
+  **Delete** is permanent and has its own, deliberately two-step control (U52); the two are not
+  merged, so "hide" never costs a confirm and "gone" always does.
 - **U7. Thread pane.** Messages rendered from `activeLeafId` (A5). Markdown with syntax
   highlighting; code blocks copyable. Assistant messages stream token-by-token.
 - **U8. Branch affordances.** Any message with siblings shows `‹ n/m ›`. Every assistant message
-  has **Regenerate**; every user message has **Edit** — both create a sibling (A4). A "branch
-  here" action on any message starts a new leaf from that point. Branching never leaves the chat.
+  has **Regenerate**; every message the human typed has **Edit** - both create a sibling (A4). A
+  message injected by another chat (U54) has neither: it is not the human's to edit and there is
+  nothing to regenerate. A "branch here" action on any message, injected ones included, starts a
+  new leaf from that point. Branching never leaves the chat.
 - **U9. Tool call inspection.** Each tool call renders as a collapsible card: name, resolved
   `label/project/server`, duration, status, and raw argument/result JSON with a copy button and a
   link to the corresponding row in Calls.
 - **U10. Approvals.** A blocked run renders an inline card with the full arguments, Approve /
   Deny, and the remaining time before auto-deny (W3).
+- **U34. Optimistic approval.** Approve and Deny remove the card at once: the approval leaves the run
+  query and the global approvals query before the POST is sent, and the buttons are disabled while
+  it is in flight. On success `["run", id]` and `["approvals"]` are invalidated; on a failure the
+  approval is restored and an error toast says why, except `409` (already decided or timed out),
+  where gone is the truth. A `tool_result` frame for the call, or a `run_done`, also drops the card.
+- **U35. Running-tool status.** While a run is active the thread shows "Running `<tool>`…" from
+  the `tool_call` frame until its `tool_result`, listing parallel calls ("Running run_command,
+  fetch__fetch…") and skipping calls that wait for approval. Names are the exposed names, in
+  monospace, as-is. The approval card headline is "Approve `<tool>`?" with the arguments, and a
+  tool card with no result yet shows a spinner beside its name.
+- **U36. Attention and notifications.** A chat needs the user when a run waits for approval
+  (`GET /api/approvals`, any chat), a run failed, or the chat finished its turn while it was not
+  the visible, focused one (a question from a chat is just its reply; a reply to a message another
+  chat injected counts the same). Old peer conversations never raise attention. The Chat tab carries a badge
+  with the count, list rows are marked "needs approval" / "run failed" / "new reply" until the chat is
+  opened, and the document title is prefixed `(N) `. Data comes from `approvals`, `chats` and `agents`
+  (the chats' run records) queries invalidated by the global feed's `agent` and `chat` events; a failing or missing
+  `/api/approvals` reads as none. "Last seen" per chat lives in `mcpsb.ui.v1` (`attention.seen`); the
+  first load is a silent baseline, so it never raises a storm. Notification text speaks of chats
+  ("wants to run <tool>", "replied", "the run failed") under the chat's title. Browser notifications are opt-in through
+  an explicit "Enable notifications" button (never on page load), raised only when the tab is hidden or the chat
+  is not the open one, with one `tag` per chat, focusing the tab and opening the chat on click, and
+  silently absent when unsupported or denied. The state machine is `lib/attention` (`AttentionTracker`).
+- **U37. Chat tree: client, chat, child chats.** The list is a tree. **Client groups** come first,
+  one per `clientLabel` that a listed chat carries (alphabetical), plus a **No client** group last
+  (`clientLabel: null`); a group header shows the client through the shared badge (U40: `label ·
+  project`, environment chips, greyed when the client is not connected right now), the number of
+  chats under it, a **+ chat** button that opens the New chat dialog with that client preselected
+  (U50), and, while collapsed, the count of chats that need the user (U36). Under a group are its
+  **root chats**, ordered by latest activity anywhere in their subtree; under a chat are its
+  **child chats** (`parentChatId`, U56), recursively, each a normal row. A chat whose parent is not
+  in the list (deleted, archived, or not matching a search) and every legacy peer chat
+  (`kind: agent`, or `spawn` with `peerAgentId`; tagged "legacy") is simply a root: there is no
+  "Older chats" node and no other special grouping. The tree never groups or labels by prompt or
+  profile. A row's status dot is its run record's status (idle, running, waiting, blocked, error).
+  A group or a chat with children collapses (remembered as `chat.tree.collapsed`, keyed by
+  `client:<label>`, `client-none` and chat ids); a collapsed chat shows how many sub-chats it
+  hides, its children are not rendered, and the open chat's ancestors are always open. While a
+  search is active everything is open so the matches are visible. Rows are at least 44 px and
+  indentation stops growing after three levels. Pure construction is `lib/chatTree`
+  (`buildChatTree`).
 - **U11. Composer.** Model override for the next turn, attachment of files (stored as content
   blocks), stop button while a run is active, and a visible budget meter (turns / tokens / cost
-  against the run's limits).
+  against the run's limits). The unsent text is a **server-side draft** (N9), not browser memory,
+  so it follows the chat to another device; U24 governs only what the browser itself remembers.
 - **U12. Export.** A chat exports as JSON (full DAG) or Markdown (the active path).
+- **U19. New chat.** The top **New chat** button, and **+ chat** on a client group (which
+  preselects that client), open the New chat dialog (U50). Creating issues one `POST /api/chats`
+  and opens the chat. Nothing else creates a chat in the console except a sub-chat spawned from the
+  Graph (U18). A chat with no client at all is simply a chat whose client is None (A19).
+- **U20. Chat header chips.** The header shows the chat's prompt ("prompt: <name>" for a profile,
+  "custom prompt", or "no prompt") and its client through the shared badge (U40; greyed when not
+  connected, from `clientConnected`), or "no client". A **Settings** button opens the chat settings
+  (U55).
+- **U21. Tools panel.** A chat has a panel listing what it can call right now, from
+  `GET /api/chats/{id}/tools`: MCP tools grouped by `label/project/server` and hub tools
+  (`switchboard.chat.*` and friends, named as the API returns them), each with
+  its description, schema and annotations. It refetches on `chat`, `agent` and `connections`
+  events, so a client dropping or reconnecting is visible.
+
+- **U50. New chat dialog.** One form, in a dialog (a bottom sheet below `md`): an optional
+  **title**, a **system prompt** source and an **MCP client**. The prompt is a saved prompt from the
+  Prompts tab, by live reference and preselecting the default one; **None**, no system prompt; or
+  **Custom...**, a textarea. The client is exactly one connected client, each shown with the shared
+  badge (U40) and whether it is connected, or **None**, no client tools. It issues `POST /api/chats`
+  with `clientLabel` always present (`null` for None) and, for a prompt, `profileId: <id>` (and no
+  `systemPrompt`); for None `profileId: null`; for Custom `profileId: null` and the text as
+  `systemPrompt` (docs/CHAT_MODEL_API.md: an omitted `profileId` would mean the default prompt, so
+  "no prompt" is always an explicit null). A hub error is shown inline and the dialog stays open.
+  The user never creates or names an agent; there is no such concept in the Chat panel.
+- **U51. System prompt viewer.** The chat header has a **System prompt** button opening a bottom
+  sheet below `md` and a right-hand drawer from `md` up, showing `GET /api/chats/{id}/system-prompt`
+  on every open: the exact text (monospace, whitespace preserved, never truncated) with a copy
+  button, the source ("from prompt X", "this chat's own prompt", or "none - no system prompt is
+  sent"), the model, the tool count, and, when the source is a saved prompt, a link to edit it
+  (`/prompts/:profileId`).
+- **U52. Easy delete.** Beside Archive (U6a) every chat row has a **Delete** button, shown on hover
+  and focus-within and always on touch. Pressing it arms the row in place: the button becomes
+  "Delete?" with a check mark and a cross (no modal), which disarms by itself after a few
+  seconds; a chat with sub-chats says so ("Delete + 2 sub-chats?") because deleting a chat deletes
+  its child chats too. The check mark deletes (`DELETE /api/chats/{id}`, the chat and its
+  sub-chats removed from the list at once, a toast reporting `deletedChats`, the open chat, or one
+  inside the deleted subtree, falling back to bare `/chat` and dropping that tab's remembered
+  location, U27). The chat header menu has **Delete chat...** with the same inline two-step, worded
+  "Delete this chat and its sub-chats?". Multi-select bulk delete keeps its confirm, which says
+  the same.
+- **U53. One hook per resource.** Run records (`agents`, one per chat: status and model) and
+  prompts (`profiles`) are read through one shared hook each (`api/resources`: `useAgents`,
+  `useProfiles`, `useAgent`) with one cached shape (a plain array), under the roots `["agents"]`
+  and `["profiles"]` so the global feed's prefix invalidation reaches them; chats have their own
+  single hook (`useChats`) shared by the Chat panel, attention and the Graph. No view builds its
+  own key or parses these responses; a Vitest case keeps every module's query keys distinct.
+
+- **U54. Injected messages.** A user-role message that carries `sender` (`{chatId, chatTitle,
+  kind}`, docs/CHAT_MODEL_API.md) was put into this chat by another chat, not typed by the human,
+  and renders as its own kind of block: left-aligned, tinted with an accent edge, headed "from
+  <chatTitle>" where the title is a chip linking to `/chat/<sender.chatId>`, plus a kind label
+  (`message`, `reply`, and `task` for a `spawn`). The model-facing preamble line the hub puts first
+  (`[Message from chat "..." ...]`) is not repeated in the block. It has no **Edit** and no
+  **Regenerate** (U8); **Branch here**, the `‹ n/m ›` arrows and copy remain. The stream reducer
+  keeps `sender` through `message_done` so a message injected while the chat is open renders the
+  same way, and a `chat` event refetches the open chat's messages so one injected while it is idle
+  appears without a reload.
+- **U55. Chat settings.** The header **Settings** button opens the same form as the New chat dialog
+  (U50, one component), filled with the chat's title, prompt and client, and saves with
+  `PATCH /api/chats/{id}` sending only what changed: `title`; `clientLabel` (an offline current
+  client stays selectable, greyed); and, when the prompt changed, `profileId` (a prompt id, or
+  `null`), plus `systemPrompt` (the text for Custom, empty for None) when it is `null`. A chat
+  with no profile opens on Custom (with its text) or None according to
+  `GET /api/chats/{id}/system-prompt`. Nothing changed means nothing is sent. The prompt viewer,
+  tools panel and chips refetch after a save.
+- **U56. Sub-chats.** A chat spawned by another (`switchboard.chat.spawn`, or **Spawn sub-chat** in
+  the Graph, U18) has `parentChatId` and is shown nested under its parent (U37) rather than in a
+  group of its own, inheriting the parent's client, capabilities, approval mode and prompt
+  reference (docs/CHAT_MODEL_API.md). Deleting a parent deletes them (U52).
 
 ### 8.2 Graph view
 
-- **U13. Canvas.** React Flow. Nodes are agents laid out as a tree (children below parents, via
-  ELK or dagre); edges are communication edges. Pan/zoom/fit, and on mobile a pinch-zoom canvas
+- **U13. Canvas.** React Flow. Nodes are the *visible* chats (U31) laid out as a tree (children
+  below parents, via ELK or dagre); a node exists for every run record that has a chat (the graph
+  data is still `/api/graph`, joined to `GET /api/chats` by `agentId`, one chat per record); edges
+  are communication edges, drawn only when both ends are visible. Pan/zoom/fit, and on mobile a pinch-zoom canvas
   with the detail panel as a bottom sheet.
-- **U14. Node content.** Name, model chip, status dot (`idle`/`running`/`waiting`/`blocked`/
-  `done`/`error`), last activity age, live token/cost counters, unread mailbox badge, and a
-  depth indicator. A running agent pulses; the node of a currently-streaming run shows its latest
-  tool call.
-- **U15. Edge editing.** Click an edge to toggle `allowed`; drag between nodes to create one. The
-  parent→child structural edge is drawn distinctly from communication edges and cannot be deleted
-  (deleting it would orphan an agent — delete the agent instead).
-- **U16. Permissions panel.** Selecting an agent opens a panel listing every `ServerRef` it may
+- **U14. Node content.** The chat's title, model chip, status dot (`idle`/`running`/`waiting`/
+  `blocked`/`done`/`error`), last activity age, live token/cost counters, unread mailbox badge, and
+  a depth indicator. A running chat pulses; the node of a currently-streaming run shows its latest
+  tool call. Selecting a node opens its panel, whose **Open chat** action links to `/chat/<id>`.
+- **U15. Edge editing.** Click an edge to toggle `allowed`; drag between **any** two nodes to
+  connect them — not just parent to child (D14) — which is how two unrelated chats end up able to
+  talk directly. The parent-to-child structural edge is drawn distinctly from communication edges
+  and, being immutable (D14), is not editable or deletable from the graph at all (delete the
+  sub-chat instead, which cascades, D13).
+- **U16. Permissions panel.** Selecting a chat opens a panel listing every `ServerRef` it may
   use, joined against the live registry so offline ones are greyed with a "not connected" note
   (I3, A15). Toggles write through `PUT /api/agents/{id}/grants` and show the inherited/explicit/
-  human source (A13). A toggle that would widen beyond the parent warns before applying.
+  human source (A13). A toggle that would widen beyond the parent warns before applying. The panel
+  also edits the chat's run settings (model, budget, "can create sub-chats", "can message other
+  chats", auto-wake, approval), sending only what changed; its title, prompt and client are the
+  chat's own settings (U55). **Delete chat...** confirms, names how many sub-chats go with it, and
+  deletes through `DELETE /api/chats/{id}`.
 - **U17. Real time without polling.** The view subscribes to the global feed (7.3) and refetches
-  `/api/graph` on `agent`/`graph` events. There is **no TTL cache**: the earlier draft's 5-second
+  `/api/graph` on `agent`/`graph` events, so conversations appear and disappear (U31) as runs
+  start and finish; the viewport is refit only on first data, when the canvas goes from empty to
+  non-empty, and when the filter is toggled, never on every status change. There is **no TTL cache**: the earlier draft's 5-second
   cache would add staleness to a system that already has push invalidation. If `/api/graph`
   becomes expensive, it is memoised in-process and invalidated on write — never expired by time.
-- **U18. Spawn dialog.** Creating a child pre-fills the parent's model and grants, shows what will
-  be inherited, and refuses (client-side, and again server-side) a grant the parent lacks.
+- **U18. Spawn sub-chat dialog.** **Spawn sub-chat** on a chat's panel creates a child through
+  `POST /api/chats` with `parentChatId`: a title, a model (the parent's, preselected) and an
+  optional prompt of its own (empty follows the parent's). The hub gives it the parent's client
+  and grants (A16-A22); the dialog no longer lists grants, since nothing in the request can widen
+  them. The Graph has no control that creates a root chat; that is the Chat panel's job (U50).
+
+- **U31. Running only by default.** A *conversation* is a chat tree (a root chat and all its
+  sub-chats). By default the graph shows only trees in which at least one live chat is
+  `running`, `waiting` or `blocked`; idle/done/error trees and their edges are hidden, and
+  deleted chats never count. The pure rule is `visibleAgents(nodes, selectedId, runningOnly)`.
+- **U32. Toggle and persistence.** The toolbar has a "Running only" / "All chats" switch, on by
+  default and remembered in localStorage (`mcpsb.ui.v1`, key `graph.runningOnly`). Next to it a
+  count reads "N running · M hidden". When nothing runs, the canvas says "No chats are
+  running. Show all chats to browse older ones." with a button that switches to "All chats".
+- **U33. Selected-tree exception.** The tree of the chat selected via `/graph/:agentId` stays
+  visible even when idle, so a deep link or selection never vanishes, and is marked "not
+  running". Deselecting lets it be filtered out again.
+
+### 8.3 Prompts tab
+
+- **U22. Prompts.** The `/prompts` route lists saved prompts (profiles on the wire; default first;
+  the selected one is `/prompts/:profileId`, U28) and creates, edits, deletes
+  and re-defaults them through `/api/profiles*`, refetching on `profile` events. The editor has
+  name, description, system prompt, model, the two hub-tool capabilities (`canSpawn`, `canMessage`,
+  worded "Can create sub-chats" and "Can message other chats"), approval mode and budget; it has
+  **no MCP client, server or grant controls**, because a prompt has none (A16). Chats follow their
+  prompt live, so editing one changes them. Deleting the default or the only prompt is disabled
+  with the reason shown.
+- **U23. Hub tools.** The Connections view has a "Hub tools" section listing the `switchboard.*`
+  tools from `GET /api/hub-tools` (`switchboard.chat.*` and the rest, named by the API) with the
+  capability each requires, so an operator can see what ticking "Can create sub-chats" or "Can
+  message other chats" on a prompt actually grants (M1). These are not a client and
+  are never listed under one (I7).
+- **U29. Model pickers show what the hub knows.** Every model picker (prompt form, chat run settings,
+  sub-chat dialog, chat composer) labels each option `provider/model · 32k ctx` when the model's
+  `contextWindow` is known (32768 -> `32k`, 1048576 -> `1M`) and appends `no tool support` when
+  `supportsTools === false`; such a model stays selectable but a line under the picker says "this
+  model does not advertise tool calling". Models with `discovered: true` are grouped under a
+  "Discovered" heading when declared ones are also listed. All fields are optional and absent ones
+  render nothing.
+- **U30. Truncation is visible.** When a run's usage says `truncated: true` (the prompt filled the
+  model's context window), the chat shows a non-modal warning in the thread, with the window size
+  when `contextWindow` is present, advising a larger context or fewer tools. Usage lacking these
+  fields never breaks the budget meter.
+
+### 8.4 Remembering where you were
+
+The requirement is that clicking away from the chat to inspect a connection or a tool, and back,
+reopens the same chat, and likewise in every other panel. It is met **in the browser only**: the
+hub stores nothing for it and there is no API. (Composer drafts are the one server-side exception,
+N9, because they are user content rather than navigation.)
+
+- **U24. Browser storage, versioned, never required.** UI memory lives in `localStorage` under the
+  namespace `mcpsb.ui.v1.*`; each value is `{v: 1, d: …}` JSON. Every access is wrapped: a missing
+  or throwing `localStorage` (private windows, blocked site data), corrupt JSON, a different `v`,
+  or a value that fails validation each read as "nothing remembered", and a failed write is
+  ignored. The console behaves identically without it, and nothing is ever remembered on the
+  server. Changing a stored shape bumps `v1`, orphaning old data rather than migrating it.
+- **U25. Per-tab route memory.** For each top-level tab (`/connections`, `/calls`, `/endpoints`,
+  `/chat`, `/graph`, `/prompts`) the console remembers the last full location visited under it
+  (path and query, minus one-shot `args`). A tab's nav link goes to its remembered location, so
+  *Chat* reopens `/chat/<lastChatId>` and *Graph* `/graph/<lastAgentId>`; **clicking the tab you
+  are already on goes to its bare root**, which is how you deselect (and is then what is
+  remembered). A remembered location that is not under its own tab is ignored. `/` redirects to
+  the most recent remembered location, defaulting to `/connections`, so reloading the bare origin
+  puts you back; a **deep link typed into the URL bar always wins** and is never rewritten from
+  memory. Memory written when the tab was still called Agents (`/agents`, `/agents/<id>`, as a tab
+  key, a location or `last`) is read as the same place under `/prompts`, so an upgrade loses
+  nothing.
+- **U26. UI-only state is remembered per view.** Connections' filter text, the chat list's
+  search text and archived toggle, and which chat-list nodes are collapsed (U37) are stored under
+  their own keys. State that is merely visual has no memory (scroll and the graph's pan and
+  zoom are not restored; the graph refits on load).
+- **U27. Dead ids fall back cleanly.** A remembered or linked chat that answers `404`, or a chat
+  or prompt absent from the first list the view loads, sends the view to its bare tab with
+  `replace` and drops that tab's memory (and `/` memory that pointed into it). The check lives in
+  the views' own queries: the shell makes **no request** to validate memory. An id created moments
+  ago is never checked against a list that predates it.
+- **U28. The URL is the source of truth for what identifies a resource.** Open chat
+  (`/chat/:chatId`), selected graph chat (`/graph/:agentId`), selected prompt
+  (`/prompts/:profileId`; only the unsaved "new prompt" form is local state), the Connections tool
+  (`?connection=&server=&tool=`) and the Calls filters and selected row (`?label=&…&call=`) are
+  all in the URL, which makes the route memory of U25 sufficient for them and keeps every state
+  linkable. `localStorage` holds only what the URL cannot.
+
+### 8.5 Clients and their environment
+
+- **U40. The client badge.** Wherever the console shows an MCP client it uses one shared
+  component: `label · project` (project muted; no separator when the client reported none) and one
+  small chip per detected environment kind (`devcontainer`, `container`, `direnv`, `nix-shell`
+  with `(pure)`/`(impure)` when reported, `venv`), each with its own subtle tint. Its tooltip
+  carries the workspace path and the small `details`; its `aria-label` summarises client, project
+  and kinds. Long names truncate rather than overflow, so it holds at 375 px. The point is that a
+  client in the wrong place (a dev container instead of the host, the wrong direnv or devshell)
+  is visible before it is picked.
+- **U41. Connections shows it everywhere.** Every machine in the Connections tree carries the
+  badge, and the tool detail header shows it with the workspace path. The filter also matches
+  the project, the workspace and the environment kinds (typing `devcontainer` or a project name
+  narrows the tree). A client that reports no `environment` (an older client) shows no chips and
+  a subtle "environment not reported", never a warning.
+- **U42. Picking a client uses the same badge.** Every place a client is chosen or its chats are
+  grouped (the New chat dialog and chat settings' client picker, the Chat panel's client groups)
+  shows the same badge, fed from `GET /api/connections`; a client that is not currently connected
+  shows its label only.
+
+### 8.6 Installability (PWA)
+
+The console is installable as a Progressive Web App — most relevantly to a phone home screen,
+where it should open full-screen, survive a browser restart, and be reachable without hunting for
+a tab.
+
+- **U60. Web app manifest.** `GET /manifest.webmanifest` (served by the console's static host, not
+  the API) declares `name`/`short_name`, `start_url: "/"`, `display: "standalone"`,
+  `theme_color`/`background_color` matching the console's dark/light defaults, and an icon set
+  (192px and 512px, plus a maskable variant) so Android and iOS both offer "Add to Home Screen"
+  with a proper icon.
+- **U61. Service worker.** A minimal service worker is registered on load and does **not** attempt
+  offline use of live data (chats, the graph, calls are all realtime and meaningless stale) — no
+  app-shell caching strategy beyond the static JS/CSS bundle, so the installed app always shows
+  current data the moment it has a connection. Its other job is push (§8.7). Registration failure
+  (unsupported browser, denied) degrades silently to the ordinary web app; installability is a
+  bonus, never a requirement.
+- **U62. Install prompt.** The console listens for `beforeinstallprompt` on Chromium and surfaces a
+  small, dismissible "Install app" affordance (not a modal) rather than the bare browser default;
+  iOS Safari has no such event, so there the same affordance instead shows the manual "Share → Add
+  to Home Screen" steps when the UA looks like iOS Safari and the app is not already installed
+  (`navigator.standalone`).
+
+### 8.7 Push notifications
+
+The two events worth interrupting the user for on a phone they are not looking at: **a run
+finished** (so they can read the answer) and **a run needs human approval** (§5.8, it is otherwise
+just sitting `blocked`). Everything else stays in-app.
+
+- **Web Push, standard and self-hosted.** No third-party push service beyond the browser
+  vendor's own (FCM/APNs/Mozilla push endpoints, reached only by the browser, never by the hub
+  directly) — the hub holds its own VAPID key pair (`PUSH_VAPID_PUBLIC_KEY`,
+  `PUSH_VAPID_PRIVATE_KEY`, generated once and kept in the deployment's secrets, §12) and speaks
+  the Web Push protocol directly. No accounts, no external SaaS.
+- **`push_subscriptions`** (new table, §6.1): `id`, `endpoint` (unique), `p256dh`, `auth` (the
+  subscription's keys), `created_at`, `last_seen_at`, and an optional `label` (browser/device,
+  read from `navigator.userAgent` at subscribe time, shown in Settings so a stale phone can be
+  removed). Not scoped to an agent or chat — this is a single-operator system (§10.1) and every
+  subscription gets every notification.
+- **Routes:** `POST /api/push/subscribe` `{subscription, label?}` → `{id}` (upsert on `endpoint`);
+  `DELETE /api/push/subscriptions/{id}`; `GET /api/push/vapid-public-key` (so the console never
+  needs the key build-time-baked). All 404 when push is not configured (no VAPID keys set).
+- **Trigger points.** The hub sends a push, fire-and-forget (a delivery failure or an expired
+  subscription — HTTP 404/410 from the push service — just removes that subscription, logged, never
+  retried or surfaced as an error) on exactly two transitions: a run reaching `done`/`error` for a
+  **top-level human chat** (not on every descendant's completion — a spawned sub-chat finishing is
+  not interrupt-worthy, its parent chat is what the human is watching) and a run entering `blocked`
+  on approval (§5.8). Payload: `{title: chatTitle, body: preview, chatId, kind: "done" | "error" |
+  "approval"}`, kept under the ~4 KB push payload budget.
+- **Service worker `push` handler.** Shows a `Notification` from the payload; `notificationclick`
+  focuses an existing console tab/window if one is open (`clients.matchAll` +
+  `client.navigate`/`focus`) and otherwise opens `/chat/<chatId>`, so tapping the notification
+  always lands on the chat in question.
+- **Subscribing.** A Settings toggle ("Notify me on this device") requests
+  `Notification.requestPermission()` and, on grant, `pushManager.subscribe` with the VAPID public
+  key, then posts it to the hub. Denial or an unsupported browser hides the toggle behind a note,
+  never a broken control.
 
 ## 9. Harness server
 
@@ -1058,15 +1711,22 @@ access to every machine running a default client.**
   names an existing regular file is replaced by its contents, so sops-nix and systemd
   `LoadCredential` need no special support. Keys are never returned by any endpoint, never
   written to the call log, and redacted from Loki payloads.
-- **X8. Agent-supplied identifiers are never trusted.** `agent_id` in a `switchboard.*` call is
-  authorised against the *calling* agent's identity, which the hub knows from the session's scope
+- **X8. Model-supplied identifiers are never trusted.** A chat id (`to_chat_id`, `chat_id`, …) in a
+  `switchboard.*` call is authorised against the *calling* chat's identity, which the hub knows from the session's scope
   (`/mcp/agent/{id}`), not from the arguments. A tool call cannot assert who it is *in its
   arguments* — but the scope URL does assert it, and that is the whole of the authentication. An
-  `agent_id` is therefore a **capability**: anyone who can reach the private listener and knows (or
+  agent (record) id is therefore a **capability**: anyone who can reach the private listener and knows (or
   guesses, though uuidv7 makes that impractical) an id can act as that agent, including one holding
   `(*, *, *)`. This is why `/mcp/agent/{id}` is internal to the run loop (§5.5) and why X6's
   "keep the private listener on loopback" is not optional advice once agents are enabled. If Q2 is
   ever answered yes, `PRIVATE_TOKEN` must become mandatory under `AGENTS_ENABLED=true`.
+- **X9. One client per chat narrows the blast radius by construction.** X2's advice — do not give
+  an agent that reads untrusted input the harness of a machine it should not touch — used to depend
+  on the operator assembling grants correctly. A chat holds
+  `(client, *, *)` for the one client chosen for it, or nothing, (A19), and every
+  sub-chat it spawns holds a subset (A12, M3). Prompt injection in its chats can therefore reach
+  the servers of one machine, not the whole fleet. This is still coarse — every server of that
+  client, harness included — and approvals remain advisory (X3); pick the client accordingly.
 
 ## 11. Observability
 
@@ -1162,14 +1822,14 @@ New:
   are unchanged; the `hub (py…)` job is removed and the end-to-end job builds the Go binary first.
 - **E6. Config additions** (all `MCP_SWITCHBOARD_*`): `AGENTS_ENABLED` (default `false` — the hub
   is a gateway first and must keep working with no LLM configured), `LLM_MODELS`,
-  `LLM_<PROVIDER>_API_KEY`, `LLM_<PROVIDER>_BASE_URL`, `AGENT_MAX_DEPTH`, `AGENT_MAX_CHILDREN`,
+  `LLM_<PROVIDER>_API_KEY`, `LLM_<PROVIDER>_BASE_URL`, `LLM_OPENAI_COMPATIBLE_KIND`, `LLM_OPENAI_COMPATIBLE_DISCOVER`, `LLM_OLLAMA_NUM_CTX`, `AGENT_MAX_DEPTH`, `AGENT_MAX_CHILDREN`,
   `AGENT_MAX_CONCURRENT_RUNS`, `AGENT_MAX_PARALLEL_TOOL_CALLS`, `AGENT_DEFAULT_BUDGET` (including
   `max_lifetime_cost_micros`, B4), `AGENT_DEFAULT_GRANTS`, `AGENT_REPLY_TIMEOUT`,
   `APPROVAL_TIMEOUT`, `INBOX_RETENTION_DAYS`, `SHUTDOWN_GRACE`. These are the only names for these
   limits; §5 refers to them exactly as spelled here.
 - **E7.** With `AGENTS_ENABLED=false` the hub behaves exactly as it does today: no `switchboard.*`
-  tools, no `/mcp/agent/*` scope, no Chat or Graph views in the console, no LLM dependency at
-  runtime.
+  tools, no `/mcp/agent/*` scope, no profile routes, no Chat, Graph or
+  Agents views in the console, no LLM dependency at runtime.
 
 ## 13. Non-goals
 
@@ -1201,7 +1861,11 @@ Added for this revision:
 - **V5. Store tests** run against a temp SQLite file: migrations apply to an empty file and are
   idempotent on a second open, a database carrying a `calls` table with no `schema_migrations` is
   refused with D7's message, and an FTS5 query asserts the driver of E1 supports the chat search of
-  U6.
+  U6. Migration 002 is tested twice over: it applies to an empty file (the version assertion is
+  now 2), and a database migrated only to 001 and holding an agent and a chat upgrades to 002 with
+  both rows intact and the new columns null. Profile tests cover the single-default invariant
+  (the schema itself refuses a second default), atomic default moves, name clashes, and deletion
+  nulling `profile_id` on chats and agents.
 - **V6. Orchestrator tests** use a scripted fake provider (a deterministic `llm.Provider` that
   replays a canned sequence of deltas and tool calls), so run-loop, budget, cancellation, approval
   and mailbox behaviour are tested with no network and no cost. Two cases are named explicitly
@@ -1209,10 +1873,22 @@ Added for this revision:
   symmetric allowed edge, each answering the other, terminate on the lifetime cost ceiling (B5) in
   bounded time — the A9 regression test; **(b)** a tree of `AGENT_MAX_CONCURRENT_RUNS + 4` agents
   all blocked in `send` with `wait: true` still makes progress, proving waiting runs hold no slot
-  (R7).
+  (R7). Profile tests add: the default `Assistant` is seeded exactly once; a manual (or legacy
+  profile-created) agent holds exactly `(client, *, *)` even when `AGENT_DEFAULT_GRANTS` is `(*, *, *)` (A19); a
+  spawned child inherits capabilities, approval, model and profile and records the parent chat's
+  client, may only narrow capabilities and approval, and **can never reach another client even when
+  asked for `(other, *, *)` or `(*, *, *)`** (A12, M3); and `ChatTools` returns exactly the run
+  loop's catalog (A21). API tests run the profile routes against a fake `Service` for error mapping
+  and against the real Manager and SQLite end to end.
 - **V7. Console tests:** Vitest for hooks (branch navigation over the message DAG, stream
   assembly and resume-by-`seq`), Playwright for one end-to-end chat flow against a hub with the
   fake provider, run at a mobile viewport as well as desktop.
+  The browser memory of 8.4 has Vitest cases for the storage wrapper (corrupt JSON, throwing
+  storage, version mismatch, unknown ids) and the pure `nextLocationForTab`, and a Playwright spec
+  (desktop and mobile) for chat/tool memory across tabs, restore on `/`, a deleted chat, and the
+  hover archive of U6a. Chat-panel specs (desktop and mobile) cover creating an agent (profile and
+  client; None and None), a chat under it, the client -> agent tree, easy delete (U52) and the
+  system prompt viewer (U51), with `page.route` mocks where the hub build may lag.
 - **V8. NixOS VM test** extended to assert the console is served and `/api/agents` answers.
 
 ## 15. Migration plan
@@ -1226,20 +1902,21 @@ Ordered so that the tree is working at every step and nothing is rewritten twice
    add it to `.gitignore`'s siblings check so it cannot come back as a shadow of `servers/`.
 3. **Go hub at parity**, no agents: tunnel, registry, sessions, all five non-agent scopes, calls,
    API, metrics, Loki. Starts with `git mv hub legacy/hub` so the Go tree can occupy the `hub/`
-   paths this document uses throughout (§4.2); `legacy/hub` stays importable and testable until
-   step 10 deletes it. Gate: the existing end-to-end suite passes against the Go binary
+   paths this document uses throughout (§4.2); `legacy/hub` stayed importable and testable until
+   step 10 deleted it. Gate: the existing end-to-end suite passes against the Go binary
    unmodified.
 4. **Console rewrite at parity**: Connections, Calls, Endpoints in React, mobile-ready. Gate: a
    Playwright run covering what the old console did.
 5. **Store** for the new entities (§6), with no orchestrator behind them yet. Migration 001 is
-   written once, at step 3, and grows until this revision ships — there is no deployed database to
-   keep compatible with (D6), so the schema stays one file until the first change after release.
+   written once, at step 3 and grew until a development database at version 1 held real data; it
+   is frozen now (D6), and the profile change (§5.2a) is `002_profiles`, the agent origin and client `004` (D12), chats as the unit `005` (D13).
 6. **Orchestrator core**: agents, grants, run loop, fake provider, `/mcp/agent/{id}`. Gate: V6.
 7. **Chat view** with streaming and branching (§8.1, §7.4).
-8. **Graph view** with edges and permission editing (§8.2), plus `switchboard.agent.*` tools.
+8. **Graph view** with edges and permission editing (§8.2), plus the `switchboard.chat.*` tools.
 9. **Real providers**, cost table, budgets, approvals.
-10. **Cut over** deployment: Dockerfile, flake, NixOS module, CI (§12). Retire `legacy/hub`, and
-    delete any existing `calls.db` rather than migrating it (D7).
+10. **Cut over** deployment: Dockerfile, flake, NixOS module, CI (§12). Retire `legacy/hub` (done), and
+    delete any existing `calls.db` rather than migrating it: the Go hub refuses a pre-migrations
+    database with D7's message.
 
 Steps 1–2 are worth doing now regardless of whether the rest proceeds.
 

@@ -17,7 +17,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AkosPapp/mcp-switchboard/hub/internal/agents"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/calls"
+	"github.com/AkosPapp/mcp-switchboard/hub/internal/chatstream"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/config"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/events"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/protocol"
@@ -47,6 +49,13 @@ type CallReader interface {
 	Stats(ctx context.Context) (store.Stats, error)
 }
 
+// PushStore is the slice of the store the push endpoints use (spec.md 8.7).
+type PushStore interface {
+	UpsertPushSubscription(ctx context.Context, sub store.PushSubscription) (store.PushSubscription, error)
+	ListPushSubscriptions(ctx context.Context) ([]store.PushSubscription, error)
+	DeletePushSubscription(ctx context.Context, id string) error
+}
+
 // Options are the components the handlers serve from. Only Settings has a
 // meaningful zero value; the rest are supplied by the hub's wiring.
 type Options struct {
@@ -56,6 +65,19 @@ type Options struct {
 	Dispatcher Dispatcher
 	Bus        *events.Bus
 	Logger     *slog.Logger
+
+	// Agents is the orchestrator. Nil (AGENTS_ENABLED=false) means none of the
+	// 7.2 routes are registered, so they 404 (E7).
+	Agents agents.Service
+	// Streams serves the per-chat SSE stream (7.4). Nil leaves that route off.
+	Streams *chatstream.Hub
+	// Reader serves the orchestrator's reads. When nil, Store is used if it
+	// implements OrchestratorReader (the SQLite store does).
+	Reader OrchestratorReader
+
+	// PushStore backs the /api/push/* routes (spec.md 8.7). Nil is fine when
+	// push is disabled - those routes are not even registered in that case.
+	PushStore PushStore
 
 	// Keepalive overrides the SSE comment interval. It exists so a test does
 	// not have to wait fifteen real seconds to see one; production leaves it
@@ -69,6 +91,7 @@ type Handler struct {
 	opts Options
 	mux  *http.ServeMux
 	log  *slog.Logger
+	rd   OrchestratorReader
 }
 
 // New builds the routing table. The patterns use net/http's own method and
@@ -82,7 +105,12 @@ func New(opts Options) *Handler {
 		opts.Keepalive = KeepaliveInterval
 	}
 
-	h := &Handler{opts: opts, mux: http.NewServeMux(), log: opts.Logger}
+	h := &Handler{opts: opts, mux: http.NewServeMux(), log: opts.Logger, rd: opts.Reader}
+	if h.rd == nil {
+		if rd, ok := opts.Store.(OrchestratorReader); ok {
+			h.rd = rd
+		}
+	}
 
 	h.mux.HandleFunc("GET /api/connections", h.connections)
 	h.mux.HandleFunc("GET /api/endpoints", h.endpoints)
@@ -93,10 +121,18 @@ func New(opts Options) *Handler {
 	h.mux.HandleFunc("GET /api/events", h.events)
 	h.mux.HandleFunc("GET /api/stats", h.stats)
 
-	// Seam: the orchestrator surface of spec.md 7.2 - /api/agents, /api/chats,
-	// /api/runs, /api/graph, /api/models and the per-chat stream of 7.4 -
-	// registers here, on this same mux. Per-chat streaming is deliberately not
-	// the /api/events mechanism below; see N2.
+	// The orchestrator surface of spec.md 7.2 - 7.4. Per-chat streaming is
+	// deliberately not the /api/events mechanism; see N2.
+	h.registerOrchestrator()
+
+	// spec.md 8.7: when the hub has no VAPID keys, push is simply disabled -
+	// these routes 404 rather than existing and failing, which is why they
+	// are only registered here, not answered with a "disabled" body above.
+	if opts.Settings.PushEnabled() {
+		h.mux.HandleFunc("GET /api/push/vapid-public-key", h.pushVAPIDPublicKey)
+		h.mux.HandleFunc("POST /api/push/subscribe", h.pushSubscribe)
+		h.mux.HandleFunc("DELETE /api/push/subscriptions/{id}", h.pushUnsubscribe)
+	}
 
 	return h
 }
@@ -319,7 +355,24 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not read stats")
 		return
 	}
-	writeJSON(w, http.StatusOK, stats)
+	body := statsBody{Stats: stats}
+	if h.opts.Agents != nil {
+		n := h.opts.Agents.ActiveRuns()
+		body.ActiveRuns = &n
+		if h.opts.Streams != nil {
+			c := h.opts.Streams.Subscribers()
+			body.ChatStreamClients = &c
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// statsBody is store.Stats (whose Tables already count the orchestrator's
+// tables) plus the live orchestrator counters, present only when it is enabled.
+type statsBody struct {
+	store.Stats
+	ActiveRuns        *int `json:"activeRuns,omitempty"`
+	ChatStreamClients *int `json:"chatStreamClients,omitempty"`
 }
 
 // --------------------------------------------------------------------------

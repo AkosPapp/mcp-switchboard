@@ -65,6 +65,9 @@ type Options struct {
 	Logger     *slog.Logger
 }
 
+// legacyProtocolVersion is the newest MCP revision that starts with initialize.
+const legacyProtocolVersion = "2025-11-25"
+
 const (
 	defaultToolsTimeout = 30 * time.Second
 	defaultStopWait     = 5 * time.Second
@@ -545,7 +548,15 @@ func (c *clientConn) openSession(
 	// aborts it at any point, which is what stops a server that went away
 	// mid-handshake from holding the channel for the full timeout.
 	initCtx, cancelInit := context.WithTimeout(ctx, c.opts.ToolsTimeout)
-	session, err := client.Connect(initCtx, transport, nil)
+	// Pinned below 2026-07-28 on purpose: from that version the SDK first sends
+	// a stateless server/discover probe, which every current stdio server
+	// rejects (each rejection is a validation-error stack in that server's
+	// stderr, forwarded to the client's log) before the SDK falls back to
+	// initialize anyway. These are long-lived stateful stdio sessions, so the
+	// probe buys nothing.
+	session, err := client.Connect(initCtx, transport, &mcp.ClientSessionOptions{
+		ProtocolVersion: legacyProtocolVersion,
+	})
 	cancelInit()
 	if err != nil {
 		return nil, err
@@ -579,12 +590,20 @@ func (c *clientConn) refreshTools(ctx context.Context, channel *registry.ServerC
 			Title:       tool.Title,
 			Description: tool.Description,
 			InputSchema: asSchemaMap(tool.InputSchema),
+			Annotations: annotationsOf(tool.Annotations),
 		})
 	}
 	channel.SetTools(tools)
 	if c.opts.Metrics != nil {
 		c.opts.Metrics.SetTools(channel.Label, channel.Name, len(tools))
 	}
+}
+
+func annotationsOf(a *mcp.ToolAnnotations) *registry.ToolAnnotations {
+	if a == nil {
+		return nil
+	}
+	return &registry.ToolAnnotations{ReadOnly: a.ReadOnlyHint, Destructive: a.DestructiveHint, OpenWorld: a.OpenWorldHint}
 }
 
 // asSchemaMap normalises a tool's input schema to the generic map the registry

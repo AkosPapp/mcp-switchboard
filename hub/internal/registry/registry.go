@@ -139,6 +139,17 @@ type ToolInfo struct {
 	Title       string
 	Description string
 	InputSchema map[string]any
+	// Annotations are the upstream's MCP hints, advisory only (spec.md W4).
+	// Nil when the server declared none.
+	Annotations *ToolAnnotations
+}
+
+// ToolAnnotations is the subset of MCP tool annotations the approval gate
+// (spec.md 5.8, W1) reads. A nil pointer means the server did not say.
+type ToolAnnotations struct {
+	ReadOnly    bool
+	Destructive *bool
+	OpenWorld   *bool
 }
 
 // ServerChannel is one local MCP server, reached through one connection.

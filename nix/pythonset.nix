@@ -46,9 +46,7 @@ in
 {
   inherit workspace pythonSet python;
 
-  # No hub here: it is Go now and is built by ../nix/hub.nix. The Python hub
-  # under legacy/ stays a workspace member so its tests still run, but nothing
-  # packages or ships it.
+  # No hub here: it is Go and is built by ../nix/hub.nix.
   client = pythonSet.mkVirtualEnv "mcp-switchboard-client-env" {
     mcp-switchboard-client = [ ];
   };

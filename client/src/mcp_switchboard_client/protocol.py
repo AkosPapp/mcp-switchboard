@@ -49,11 +49,15 @@ def hello(
     instance: str,
     label: str,
     servers: List[Dict[str, Any]],
+    environment: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    client: Dict[str, Any] = {"name": client_name, "version": version, "instance": instance, "label": label}
+    if environment is not None:
+        client["environment"] = environment
     return {
         "type": HELLO,
         "protocol": PROTOCOL_VERSION,
-        "client": {"name": client_name, "version": version, "instance": instance, "label": label},
+        "client": client,
         "servers": servers,
     }
 

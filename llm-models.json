@@ -1,0 +1,6 @@
+{"models":[
+  {"provider":"openai-compatible","model":"qwen3.5:latest"},
+  {"provider":"openai-compatible","model":"gpt-oss:20b"},
+  {"provider":"openai-compatible","model":"qwen3:4b-instruct-2507-q4_K_M"},
+  {"provider":"openai-compatible","model":"qwen2.5-coder:7b"}
+]}

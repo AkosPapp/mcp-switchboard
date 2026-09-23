@@ -16,9 +16,9 @@ import socket
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
-from . import envconf, protocol
+from . import envconf, environment, protocol
 from .config import ConfigError as McpConfigError
 from .config import HARNESS_NAME, ServerSpec, harness_spec, load_config
 from .envconf import ConfigError
@@ -52,6 +52,8 @@ class Settings:
     max_retries: int = DEFAULT_MAX_RETRIES
     log_level: str = DEFAULT_LOG_LEVEL
     harness: bool = True
+    project_name: Optional[str] = None
+    environment: Optional[Dict[str, Any]] = None  # detected at load_settings
 
     def tunnel_settings(self) -> TunnelSettings:
         return TunnelSettings(
@@ -60,6 +62,7 @@ class Settings:
             label=self.label,
             reconnect_delay=self.reconnect_delay,
             max_retries=self.max_retries,
+            environment=self.environment,
         )
 
 
@@ -92,6 +95,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             f"Name this machine is tagged with in the hub, default the hostname "
             f"(or {envconf.PREFIX}LABEL)"
+        ),
+    )
+    parser.add_argument(
+        "--project-name",
+        default=None,
+        help=(
+            "Project name shown next to this client in the hub; default is detected "
+            f"(devcontainer name, git root, or directory name) (or {envconf.PREFIX}PROJECT_NAME)"
         ),
     )
     parser.add_argument(
@@ -178,6 +189,8 @@ def load_settings(args: argparse.Namespace) -> Settings:
     except protocol.ProtocolError as e:
         raise ConfigError(str(e)) from e
 
+    project_name = (args.project_name or envconf.get("PROJECT_NAME") or "").strip() or None
+
     # The config path is resolved strictly against the current directory;
     # there is no upward search for an mcp.json.
     explicit_config = args.config or envconf.get("CONFIG")
@@ -216,6 +229,8 @@ def load_settings(args: argparse.Namespace) -> Settings:
         max_retries=max_retries,
         log_level=log_level,
         harness=not args.no_harness and envconf.get_bool("HARNESS", True),
+        project_name=project_name,
+        environment=environment.detect(project_override=project_name),
     )
 
 
@@ -280,6 +295,8 @@ async def _run(settings: Settings, specs: List[ServerSpec]) -> None:
         settings.label,
         ", ".join(spec.name for spec in specs),
     )
+    if settings.environment is not None:
+        LOGGER.info("%s", environment.summarize(settings.environment))
     await connection.run()
     LOGGER.info("shutdown complete")
 

@@ -1,9 +1,14 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { useConnections } from "../api/queries";
 import type { ConnectionInfo, ServerInfo, ToolInfo } from "../api/types";
+import ClientBadge, { environmentSearchText } from "../components/ClientBadge";
 import { ServerStateDot } from "../components/Status";
+import { useOrchestratorEnabled } from "../hooks/useOrchestratorEnabled";
+import { useStoredState } from "../hooks/useStoredState";
+import { isString } from "../lib/uiMemory";
+import HubTools from "./HubTools";
 import ToolPanel from "./ToolPanel";
 
 /**
@@ -49,7 +54,12 @@ function filterTree(connections: ConnectionInfo[], needle: string): Filtered[] {
 
   const out: Filtered[] = [];
   for (const connection of connections) {
-    const machineMatches = matches(needle, connection.label, connection.client.name);
+    const machineMatches = matches(
+      needle,
+      connection.label,
+      connection.client.name,
+      ...environmentSearchText(connection.client.environment),
+    );
     const servers: Filtered["servers"] = [];
 
     for (const server of connection.servers) {
@@ -154,7 +164,10 @@ function ServerGroup({
 
 export default function Connections() {
   const { data, isLoading, error, refetch, isFetching } = useConnections();
-  const [filter, setFilter] = useState("");
+  const orchestrator = useOrchestratorEnabled();
+  // The selection is in the URL (and so in the tab's remembered location); the
+  // filter text is UI-only, so the browser remembers it.
+  const [filter, setFilter] = useStoredState("connections.filter", "", isString);
   const [params, setParams] = useSearchParams();
 
   // The selection lives in the URL so a tool is linkable and survives a reload.
@@ -263,10 +276,18 @@ export default function Connections() {
 
           {tree.map(({ connection, servers }) => (
             <div key={connection.id} className="mb-2">
-              <div className="flex items-baseline gap-2 px-2 py-1">
-                <span className="truncate text-sm font-semibold">{connection.label}</span>
+              <div className="flex flex-col gap-0.5 px-2 py-1">
+                <div className="text-sm">
+                  <ClientBadge
+                    label={connection.label}
+                    environment={connection.client.environment}
+                  />
+                </div>
                 <span className="truncate font-mono text-[10px] text-muted">
                   {connection.client.name} {connection.client.version}
+                  {connection.client.environment == null && (
+                    <span className="font-sans"> · environment not reported</span>
+                  )}
                 </span>
               </div>
               {servers.map(({ server, tools }) => (
@@ -282,6 +303,8 @@ export default function Connections() {
             </div>
           ))}
         </div>
+
+        <HubTools enabled={orchestrator} />
 
         <div className="border-t border-border px-3 py-1.5 text-xs text-muted">
           {totals.machines} machine{totals.machines === 1 ? "" : "s"} · {totals.servers} server

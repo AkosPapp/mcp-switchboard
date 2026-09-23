@@ -10,8 +10,10 @@ import type {
   CallList,
   CallRecord,
   Endpoints,
+  PushSubscriptionRecord,
   Snapshot,
   Stats,
+  VapidPublicKey,
 } from "./types";
 
 /** Thrown for a request the hub refused. `status` is the HTTP status. */
@@ -32,7 +34,7 @@ export class ApiError extends Error {
  */
 export const API_BASE = "api";
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}/${path}`, {
     headers: { "Content-Type": "application/json" },
     ...init,
@@ -45,6 +47,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     try {
       const body = await response.json();
       if (body && typeof body.detail === "string") detail = body.detail;
+      else if (body && typeof body.error === "string") detail = body.error;
     } catch {
       // Not JSON. The status line is all there is.
     }
@@ -127,4 +130,34 @@ export function restartServer(connectionId: string, server: string): Promise<voi
     `connections/${encodeURIComponent(connectionId)}` +
     `/servers/${encodeURIComponent(server)}/restart`;
   return request<void>(path, { method: "POST" });
+}
+
+// --------------------------------------------------------------------------
+// Web Push (spec.md 8.7)
+// --------------------------------------------------------------------------
+
+/** Throws ApiError(404) when the hub has no VAPID keys configured - the
+ * Settings toggle treats that the same as "unsupported browser". */
+export function getVapidPublicKey(): Promise<VapidPublicKey> {
+  return request<VapidPublicKey>("push/vapid-public-key");
+}
+
+export function subscribePush(
+  subscription: PushSubscriptionJSON,
+  label?: string,
+): Promise<PushSubscriptionRecord> {
+  return request<PushSubscriptionRecord>("push/subscribe", {
+    method: "POST",
+    body: JSON.stringify({
+      endpoint: subscription.endpoint,
+      keys: subscription.keys,
+      label: label ?? null,
+    }),
+  });
+}
+
+export function unsubscribePush(id: string): Promise<void> {
+  return request<void>(`push/subscriptions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }

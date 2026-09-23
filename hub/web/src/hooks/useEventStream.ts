@@ -44,6 +44,11 @@ export function useEventStream(): StreamState {
       }
 
       const cache = clientRef.current;
+      // What a chat can call depends on all of these.
+      if (["connections", "agent", "graph", "profile"].includes(event.type)) {
+        cache.invalidateQueries({ queryKey: ["chatTools"] });
+        cache.invalidateQueries({ queryKey: ["chatSystemPrompt"] });
+      }
       switch (event.type) {
         case "connections":
           // The endpoint list is derived from what is connected, so it moves
@@ -55,9 +60,33 @@ export function useEventStream(): StreamState {
           cache.invalidateQueries({ queryKey: ["calls"] });
           cache.invalidateQueries({ queryKey: ["stats"] });
           break;
+        case "agent":
+        case "graph":
+          // Approvals and the "new reply" signal follow the run's status (U33).
+          if (event.type === "agent") {
+            cache.invalidateQueries({ queryKey: ["approvals"] });
+            cache.invalidateQueries({ queryKey: ["chats"] });
+          }
+          // The graph view refetches /api/graph; there is no TTL cache (U17).
+          cache.invalidateQueries({ queryKey: ["graph"] });
+          cache.invalidateQueries({ queryKey: ["agents"] });
+          break;
+        case "chat":
+          // A draft may have changed in another tab; the composer decides
+          // whether it is safe to show.
+          if (event.chatId) {
+            cache.invalidateQueries({ queryKey: ["chatDraft", event.chatId] });
+            // Another chat may have injected a message into this one.
+            cache.invalidateQueries({ queryKey: ["chatMessages", event.chatId] });
+            cache.invalidateQueries({ queryKey: ["chat", event.chatId] });
+          }
+          cache.invalidateQueries({ queryKey: ["approvals"] });
+          cache.invalidateQueries({ queryKey: ["chats"] });
+          break;
+        case "profile":
+          cache.invalidateQueries({ queryKey: ["profiles"] });
+          break;
         default:
-          // agent/graph/chat belong to the orchestrator, which this console
-          // does not show yet.
           break;
       }
     };
