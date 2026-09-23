@@ -57,6 +57,11 @@ export const getMessages = async (id: string): Promise<MessageList> => {
   const list = await request<MessageList>(`chats/${encodeURIComponent(id)}/messages`);
   return { ...list, messages: (list.messages ?? []).map(normalizeMessage) };
 };
+/** The whole message DAG, not just the active path (spec: ?tree=1). */
+export const getMessageTree = async (id: string): Promise<MessageList> => {
+  const list = await request<MessageList>(`chats/${encodeURIComponent(id)}/messages?tree=1`);
+  return { ...list, messages: (list.messages ?? []).map(normalizeMessage) };
+};
 export const getRun = (id: string) => request<Run>(`runs/${encodeURIComponent(id)}`);
 
 export const getSystemPrompt = (id: string) =>
@@ -161,6 +166,14 @@ export const decideApproval = (
     body: JSON.stringify({ approved, reason }),
   });
 
+/** One answer per question, in order: the chosen option labels and/or the user's own words. */
+export const answerQuestion = (runId: string, callId: string, answers: string[][]) =>
+  request<void>(`runs/${encodeURIComponent(runId)}/questions/${encodeURIComponent(callId)}`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ answers: answers.map((a) => ({ answers: a })) }),
+  });
+
 export function exportUrl(chatId: string, format: "json" | "markdown"): string {
   return `api/chats/${encodeURIComponent(chatId)}/export?format=${format}`;
 }
@@ -190,6 +203,15 @@ export function useMessages(id: string | null) {
   return useQuery({
     queryKey: chatKeys.messages(id ?? ""),
     queryFn: () => getMessages(id as string),
+    enabled: id !== null,
+  });
+}
+
+/** Keyed under the chat's messages, so every chat invalidation refreshes it too. */
+export function useMessageTree(id: string | null) {
+  return useQuery({
+    queryKey: [...chatKeys.messages(id ?? ""), "tree"],
+    queryFn: () => getMessageTree(id as string),
     enabled: id !== null,
   });
 }
@@ -275,8 +297,8 @@ export function useDecideApproval() {
       return next;
     });
 
-  const decide = useCallback(
-    async (a: { runId: string; callId: string }, approved: boolean) => {
+  const resolve = useCallback(
+    async (a: { runId: string; callId: string }, send: () => Promise<void>) => {
       if (inflight.has(a.callId)) return;
       const runKey = chatKeys.run(a.runId);
       const before = { run: client.getQueryData<Run>(runKey), approvals: client.getQueryData<ApprovalItem[]>(chatKeys.approvals) };
@@ -287,7 +309,7 @@ export function useDecideApproval() {
       );
       client.setQueryData<ApprovalItem[]>(chatKeys.approvals, (l) => l?.filter((p) => p.callId !== a.callId));
       try {
-        await decideApproval(a.runId, a.callId, approved);
+        await send();
       } catch (error) {
         if (!(error instanceof ApiError && error.status === 409)) {
           // Restore: the decision did not go through, so the card must come back.
@@ -304,5 +326,13 @@ export function useDecideApproval() {
     },
     [client, toast, inflight],
   );
-  return { decide, dismissed, inflight };
+  const decide = useCallback(
+    (a: { runId: string; callId: string }, approved: boolean) => resolve(a, () => decideApproval(a.runId, a.callId, approved)),
+    [resolve],
+  );
+  const answer = useCallback(
+    (a: { runId: string; callId: string }, answers: string[][]) => resolve(a, () => answerQuestion(a.runId, a.callId, answers)),
+    [resolve],
+  );
+  return { decide, answer, dismissed, inflight };
 }

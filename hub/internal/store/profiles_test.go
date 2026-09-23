@@ -42,8 +42,8 @@ func TestUpgradeFromVersion1PreservesData(t *testing.T) {
 
 	s := openStore(t, path)
 	var version int
-	if err := s.read.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil || version != 8 {
-		t.Fatalf("version = %d (%v), want 8", version, err)
+	if err := s.read.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil || version != 9 {
+		t.Fatalf("version = %d (%v), want 9", version, err)
 	}
 	a, err := s.GetAgent(ctx, "a1")
 	if err != nil || a == nil || a.Name != "old" || a.ProfileID != nil {

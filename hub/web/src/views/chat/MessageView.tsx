@@ -4,10 +4,11 @@ import { Link } from "react-router-dom";
 
 import CopyButton from "../../components/CopyButton";
 import { siblingTarget } from "../../lib/dag";
-import { draftText, type Draft } from "../../lib/streamAssembly";
-import { formatCost, formatTokens, messageText, modelLabel } from "./format";
+import { draftText, draftThinking, type Draft } from "../../lib/streamAssembly";
+import { formatCost, formatTokens, messageText } from "./format";
 import ToolCard, { type ToolCardData } from "./ToolCard";
-import type { ContentBlock, Message, MessageSender } from "./types";
+import type { ContentBlock, Message, MessageSender, ModelInfo } from "./types";
+import { ModelPicker, modelKey } from "../../lib/models";
 
 // The markdown and highlighter are the bulk of the chat's bundle; the thread
 // shows plain text for the instant it takes to load.
@@ -18,6 +19,9 @@ export interface MessageActions {
   regenerate: (message: Message) => void;
   edit: (message: Message, content: string) => void;
   branchHere: (message: Message) => void;
+  /** Regenerate an assistant message with a chosen model, as a new sibling. */
+  regenerateWith: (message: Message, model: ModelInfo) => void;
+  models: ModelInfo[];
   busy: boolean;
 }
 
@@ -90,8 +94,8 @@ function Blocks({ blocks, markdown }: { blocks: ContentBlock[]; markdown: boolea
         if (b.type === "thinking") {
           return (
             <details key={i} className="my-1 text-xs text-muted">
-              <summary className="cursor-pointer">thinking</summary>
-              <p className="whitespace-pre-wrap">{b.text}</p>
+              <summary className="cursor-pointer select-none">thought</summary>
+              <p className="mt-1 whitespace-pre-wrap border-l-2 border-border pl-2 italic">{b.text}</p>
             </details>
           );
         }
@@ -178,6 +182,27 @@ export default function MessageView(props: Props) {
   );
 }
 
+/**
+ * The model that wrote a reply, as a picker: choosing one regenerates the reply
+ * with it, next to the original (a new version, not a replacement).
+ */
+function ReplyModel({ message, actions }: { message: Message; actions: MessageActions }) {
+  const current = { provider: message.model?.provider ?? "", model: message.model?.model ?? "" };
+  return (
+    <ModelPicker
+      models={actions.models}
+      value={modelKey(current)}
+      ariaLabel="regenerate with another model"
+      disabled={actions.busy}
+      onChange={(key) => {
+        const picked = actions.models.find((m) => modelKey(m) === key);
+        if (picked) actions.regenerateWith(message, picked);
+      }}
+      className="flex max-w-[14rem] items-center gap-1 rounded px-1 py-1 text-xs text-muted hover:bg-raised hover:text-text disabled:opacity-40"
+    />
+  );
+}
+
 function HumanOrAssistantMessage({ message, tools, actions }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -260,10 +285,10 @@ function HumanOrAssistantMessage({ message, tools, actions }: Props) {
           Branch here
         </button>
         {text ? <CopyButton value={text} className="border-0" /> : null}
+        {!isUser && message.model?.model ? <ReplyModel message={message} actions={actions} /> : null}
         {!isUser && (message.tokenOutput || message.tokenInput) ? (
           <span className="px-1">
-            {modelLabel(message.model)} · {formatTokens(message.tokenInput)}→
-            {formatTokens(message.tokenOutput)} · {formatCost(message.costMicros)}
+            {formatTokens(message.tokenInput)}→{formatTokens(message.tokenOutput)} · {formatCost(message.costMicros)}
           </span>
         ) : null}
       </div>
@@ -274,13 +299,32 @@ function HumanOrAssistantMessage({ message, tools, actions }: Props) {
 /** An assistant message still assembling from deltas. */
 export function DraftView({ draft }: { draft: Draft }) {
   const text = draftText(draft);
+  const thinking = draftThinking(draft);
+  // Until the answer starts, the reasoning is all there is: label it, so it is
+  // not mistaken for the reply.
+  const answering = text !== "";
   return (
     <article className="flex flex-col items-start" data-testid="message-streaming">
       <div className="max-w-full rounded-lg border border-border bg-surface px-3 py-2 sm:max-w-[85%]">
-        <Suspense fallback={<p className="whitespace-pre-wrap text-sm">{text}</p>}>
-          <Markdown text={text} />
-        </Suspense>
-        <span className="inline-block h-3 w-1.5 animate-pulse bg-muted align-middle" aria-hidden="true" />
+        {thinking ? (
+          <details open={!answering} className="mb-2 text-xs text-muted" data-testid="draft-thinking">
+            <summary className="cursor-pointer select-none">
+              {answering ? "thought" : "thinking…"}
+              {!answering ? (
+                <span className="ml-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent align-middle" aria-hidden="true" />
+              ) : null}
+            </summary>
+            <p className="mt-1 whitespace-pre-wrap border-l-2 border-border pl-2 italic">{thinking}</p>
+          </details>
+        ) : null}
+        {answering ? (
+          <Suspense fallback={<p className="whitespace-pre-wrap text-sm">{text}</p>}>
+            <Markdown text={text} />
+          </Suspense>
+        ) : null}
+        {answering || !thinking ? (
+          <span className="inline-block h-3 w-1.5 animate-pulse bg-muted align-middle" aria-hidden="true" />
+        ) : null}
       </div>
     </article>
   );

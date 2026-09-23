@@ -37,7 +37,7 @@ export function InstallPrompt() {
         <div className="flex justify-end">
           <button
             type="button"
-            className="rounded bg-accent px-2.5 py-1.5 font-medium text-white hover:opacity-90"
+            className="rounded bg-accent px-2.5 py-1.5 font-medium text-on-accent hover:opacity-90"
             onClick={() => void install.promptInstall()}
           >
             Install app
@@ -51,7 +51,7 @@ export function InstallPrompt() {
             <div className="flex justify-end">
               <button
                 type="button"
-                className="rounded bg-accent px-2.5 py-1.5 font-medium text-white hover:opacity-90"
+                className="rounded bg-accent px-2.5 py-1.5 font-medium text-on-accent hover:opacity-90"
                 onClick={() => setShowIosSteps(true)}
               >
                 How?

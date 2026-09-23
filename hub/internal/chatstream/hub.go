@@ -325,6 +325,40 @@ func (h *Hub) Subscribe(chatID, lastEventID string) *Subscription {
 	return s
 }
 
+// SubscribeActive attaches to a chat's stream at the point a late reader needs:
+// every run of the chat still in flight is replayed from its first frame, then
+// the stream goes live. A tab opened (or reloaded) mid-reply thereby rebuilds
+// the message from its start instead of showing only what follows. A run whose
+// beginning has already been evicted from its ring is skipped, not replayed
+// with a hole: the reader then gets the persisted messages and the live edge.
+func (h *Hub) SubscribeActive(chatID string) *Subscription {
+	s := &Subscription{
+		hub: h, chatID: chatID,
+		budget: h.opts.SubscriberBudget,
+		notify: make(chan struct{}, 1),
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		s.closed = true
+		return s
+	}
+	c := h.chat(chatID)
+	for _, id := range c.runOrder {
+		r := c.runs[id]
+		if r == nil || r.ended || len(r.ring) == 0 || r.ring[0].Seq != 1 {
+			continue
+		}
+		for _, f := range r.ring {
+			s.offer(f)
+		}
+	}
+	c.subs[s] = struct{}{}
+	h.subscribers.Add(1)
+	s.attached = true
+	return s
+}
+
 // replay queues the backlog after lastEventID; it returns an overflow reason
 // when the position cannot be resumed.
 func (h *Hub) replay(c *chatState, s *Subscription, lastEventID string) string {

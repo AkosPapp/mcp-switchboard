@@ -23,8 +23,9 @@ import (
 // "orchestrator").
 
 type callCtx struct {
-	agent *store.Agent
-	rs    *runState // nil when called through /mcp/agent/{id}
+	agent  *store.Agent
+	rs     *runState // nil when called through /mcp/agent/{id}
+	callID string    // the model's tool call id, when there is one
 }
 
 type sbTool struct {
@@ -96,6 +97,19 @@ func init() {
 			schema:  obj([]string{"chat_id"}, map[string]any{"chat_id": typ("string", "descendant chat id")}),
 			ann:     write,
 			visible: canSpawn, run: (*Manager).toolStop},
+		{name: "switchboard.user.ask",
+			desc: "Ask the user one to four questions and wait for the answers, e.g. to choose between approaches or settle a detail you cannot decide alone. Give each question short options when it has clear choices (the user can always type their own answer instead). Prefer this to guessing on something that matters; do not use it for things you can find out yourself. The answers are returned to you.",
+			schema: obj([]string{"questions"}, map[string]any{
+				"questions": map[string]any{"type": "array", "minItems": 1, "maxItems": maxQuestions, "items": obj([]string{"question"}, map[string]any{
+					"question": typ("string", "the full question"),
+					"header":   typ("string", "a very short label for it (a word or two)"),
+					"options": map[string]any{"type": "array", "maxItems": maxOptions, "description": "the choices; omit for a free-text answer",
+						"items": obj([]string{"label"}, map[string]any{
+							"label": typ("string", "the choice, a few words"), "description": typ("string", "what picking it means")})},
+					"multi_select": typ("boolean", "the user may pick several options"),
+				})}}),
+			ann:     &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: bp(false)},
+			visible: func(store.Capabilities) bool { return true }, run: (*Manager).toolAsk},
 		{name: "switchboard.mcp.list_tools",
 			desc:    "List the tools you may call right now, grouped by MCP server, with each server's connection state.",
 			schema:  obj(nil, map[string]any{}),

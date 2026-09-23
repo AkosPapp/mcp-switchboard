@@ -609,6 +609,26 @@ Primary key `(agent_id, label, project, server)`.
 | `error` | text, null | |
 | `started_at`, `finished_at` | timestamptz | |
 
+### 5.2b Skills
+
+A **skill** (`skills` table, migration 009) is a named block of instructions: `name` (a slug,
+`[a-z0-9][a-z0-9_-]*`, unique), `description`, `body` and `auto` (default true). Skills are global,
+not per chat or profile. They have two entrances:
+
+- **S1. `/name` runs a skill.** A user message whose text is `/name` or `/name arguments`, with
+  `name` a known skill, is sent to the model as `<skill name="…">body</skill>` followed by the
+  arguments. Only the model's copy changes: the stored message, and so the thread, keep exactly
+  what was typed, and editing a skill later changes how old `/name` messages read to the model on
+  later turns. An unknown `/word` (a path, say) is left alone. The console's composer offers a
+  menu of skills while the message is a bare `/prefix`.
+- **S2. The model may load `auto` skills itself.** While at least one skill is `auto`, the system
+  prompt gets a listing appended (`name: description`, one line each, and how to load one) and the
+  chat's tool list gains `switchboard.skill.load {name}`, which returns the body. Only that short
+  listing costs tokens on every turn; a body is read on demand and, like any tool result, then
+  stays in the transcript. `switchboard.skill.load` needs no capability, is read-only, and is not
+  in `GET /api/hub-tools`. With no `auto` skill neither the listing nor the tool exists, and the
+  system prompt is exactly the chat's own (A25). A skill with `auto` off is reachable by `/name` only.
+
 ### 5.3 The run loop
 
 ```
@@ -727,8 +747,18 @@ trusted to use it without a human in the loop for every call.
 | `switchboard.chat.send` | `{to, message}` | `{message_id}` | `to` is a **name**, as returned by `chat.list`'s `name` field — not a chat id (M4a). Resolved against the same set `chat.list` shows: the caller's parent, a child, or a chat joined to it by an allowed edge (D14; never itself). Inserts `message` into the recipient's **own** (most recently active) chat exactly as if the human had typed it there — a plain `user`-role turn, distinguished only by `sender` metadata (chat id, title and kind, B7) — and wakes it (B2). Always fire-and-forget: there is no `wait`, no synchronous reply, and no special routing back. If the recipient wants to answer, it calls `switchboard.chat.send` back to the sender, exactly like any other message — the edge is symmetric (D14), so it always can. The one exception is `switchboard.chat.spawn`'s own `message` (B8): a spawned child's *final* answer is still returned to the spawning chat automatically, because that is a property of spawning a task, not of `chat.send`. |
 | `switchboard.chat.list` | `{}` | `[{name, chat_id, title, status, relation, depth?}]` | Every chat the caller can currently message: its parent and children (`relation: "parent"` / `"child"`, with `depth`) plus every chat joined by an edge (`relation: "connected"`). One flat list, no scope parameter — this is deliberately the *only* way a chat discovers who it can talk to, so there is nothing to get wrong. Never reveals a chat the caller cannot message. `name` is what `chat.send`'s `to` takes. |
 | `switchboard.chat.stop` | `{chat_id}` | `{cancelled}` | Cancels a descendant chat's runs. Only on descendants. |
+| `switchboard.user.ask` | `{questions: [{question, header?, options?: [{label, description?}], multi_select?}]}` (1–4 questions, at most 6 options each) | `{answers: [{question, answers: [string]}]}` | Asks the user and waits (see M6). Each answer is the chosen option labels and/or the user's own words. Errors if the user skips, if nobody answers within `APPROVAL_TIMEOUT`, or when there is no run to pause (through `/mcp/agent/{id}`). |
 | `switchboard.mcp.list_tools` | `{}` | `[{label, project, server, connected, tools: [{name, description}]}]` | The caller's own grants joined against the live registry: which servers it may use, whether each is connected right now, and — for a connected one — every tool on it, named exactly as the caller would call it (naming.go's client-pinning rule applies here too, so a single-client chat sees the same short names it would actually use). |
 
+- **M6. Asking the user.** `switchboard.user.ask` runs on the approval machinery (W1–W3): the run
+  leaves its slot and reads as `blocked`, an `approval_required` frame carrying `questions` is
+  streamed, the question is listed in `GET /api/approvals` and `GET /api/runs/{id}` (a
+  `PendingApproval` with `questions` set), and a push notification (kind `question`, body
+  `asks: <first question>`) goes to a top-level human chat's subscribers. It is answered by
+  `POST /api/runs/{id}/questions/{callId}` with `{answers: [{answers: [string]}]}`, one entry per
+  question, none empty (400 otherwise; 409 once answered or gone). `POST …/approvals/{callId}` with
+  `approved: false` skips it. Unlike the other switchboard tools it needs no capability
+  (an exception to M1): any chat may ask its user.
 - **M1.** The `switchboard.chat.*` and `mcp.list_tools` tools are only listed for a chat whose
   `capabilities.can_spawn` / `can_message` flags are set. A leaf worker chat gets none of them,
   which is both cheaper (fewer tokens) and safer. While a chat references a profile the flags are
@@ -1050,6 +1080,7 @@ one catalog. The handler layer is the boundary, and it is the only place that tr
 | GET | `/api/calls` | filters: `label`, `server`, `tool`, `status`, plus new `agentId`, `chatId`, `source`; `limit` clamped to 1000 |
 | GET | `/api/calls/{id}` | |
 | GET | `/api/events` | global SSE change feed |
+| GET | `/api/ws` | the console's live connection: the change feed and chat streams over one WebSocket (N9) |
 | GET | `/metrics` | Prometheus |
 
 - **N1.** A tool that answers with an MCP error is a **successful call that returned an error**:
@@ -1070,6 +1101,8 @@ one catalog. The handler layer is the boundary, and it is the only place that tr
 | GET | `/api/chats/{id}/tools` | `{clientLabel, clientConnected, tools[]}`: what the chat's agent can call right now (A21) |
 | GET | `/api/chats/{id}/system-prompt` | `{systemPrompt, source, profileId, profileName, model, toolCount}`: the exact system prompt the next turn sends (A25) |
 | GET/POST | `/api/profiles` | list (default first, then by name) / create (409 on a name clash) |
+| GET/POST | `/api/skills` | list by name / create (`{name, description?, body, auto?}`; `name` is a slug; 400 on a bad one, 409 on a clash) |
+| PATCH/DELETE | `/api/skills/{id}` | any subset of `name`, `description`, `body`, `auto` / delete |
 | GET/PATCH/DELETE | `/api/profiles/{id}` | `PATCH` takes any subset, including `isDefault: true` (A17); `DELETE` is 409 for the default or the only profile |
 | GET | `/api/hub-tools` | every `switchboard.*` tool (the `switchboard.chat.*` names, M4) with its `requires` (M1, A21) |
 | GET | `/api/chats/{id}/messages` | `?leaf=` walks that leaf; `?tree=1` returns the whole DAG. Each message carries `sender` (B7), null unless another chat injected it |
@@ -1079,6 +1112,7 @@ one catalog. The handler layer is the boundary, and it is the only place that tr
 | GET | `/api/chats/{id}/stream` | **per-chat SSE**, see 7.4 |
 | GET | `/api/runs/{id}` · POST `/api/runs/{id}/cancel` | |
 | POST | `/api/runs/{id}/approvals/{callId}` | `{approved, reason?}` (W2) |
+| POST | `/api/runs/{id}/questions/{callId}` | `{answers: [{answers: [string]}]}` (M6) |
 | GET | `/api/approvals` | every approval pending in any run, oldest first (N10) |
 | GET | `/api/models` | configured providers, models and prices (never keys) |
 | GET | `/api/stats` | db size, row counts, active runs |
@@ -1143,6 +1177,19 @@ React 18 + TypeScript + Vite + Tailwind, built to `hub/web/dist` and embedded wi
 The hub serves `index.html` for any unmatched non-`/api` path so client-side routing works, and
 serves hashed assets with long cache headers.
 
+- **N9. One WebSocket per tab.** Browsers allow about six HTTP/1.1 connections per host and an SSE
+  stream never ends, so two streams per tab starved the pool after a few tabs (history that would
+  not load, reloads that hung). The console therefore carries both feeds over `GET /api/ws` (same
+  origin only), which the pool does not count. Messages are JSON: `{"op":"sub","chat","last"?}` and
+  `{"op":"unsub","chat"}` from the client; `hello`, `event` (change feed), `frame` (`chat`, `name`,
+  `id`, `data`), `overflow` (`chat`, `reason`) and `hb` (every 15 s) from the hub. The feeds keep
+  their contracts (N2): the change feed is lossy, a chat subscription is lossless or ends in
+  `overflow`. A `sub` with no `last` replays every run of that chat still in flight from its first
+  frame (skipping one whose start was evicted), so a tab opened mid-reply shows the whole reply. The
+  client reconnects with backoff, treats 45 s of silence as a dead link, resubscribes from each
+  chat's last frame, and refetches everything after a reconnect. A saved composer draft is its own
+  change-feed event (`draft`), so other tabs update it without refetching the chat. The SSE routes
+  remain for other clients.
 - **U1. Single artifact.** `go build` produces one binary containing the console. Nothing is
   fetched at runtime; the loopback-only-box constraint that made the old console build-free is
   satisfied by building ahead of time instead of not building at all.
@@ -1167,8 +1214,11 @@ serves hashed assets with long cache headers.
 - **U3. Data layer.** TanStack Query for fetch/cache; the global SSE feed (7.3) invalidates
   queries by key rather than patching cache entries by hand. Per-chat streams (7.4) are consumed
   by a dedicated hook that keeps deltas in component state and commits on `message_done`.
-- **U4. Theming.** Tailwind with CSS custom properties, dark mode by `prefers-color-scheme` with
-  an explicit override, matching the existing console's palette.
+- **U4. Theming.** Tailwind with CSS custom properties. The console is Dracula by default,
+  regardless of `prefers-color-scheme`; Alucard (Dracula's light variant) is an explicit opt-in
+  via `data-theme="light"`. The look is deliberately minimal and compact: a 14 px monospace base
+  (15 px on touch devices), 2 px corner radii, flat surfaces with hairline borders, and a slim
+  header.
 - **U5. Routes.** `/connections`, `/calls`, `/endpoints`, `/chat`, `/chat/:chatId`, `/graph`,
   `/graph/:agentId`, `/prompts`, `/prompts/:profileId`. (`/graph/:agentId` is keyed by the chat's
   execution record, the graph's own id space, and is never shown as such.) `/agents` and
@@ -1201,7 +1251,26 @@ serves hashed assets with long cache headers.
   has **Regenerate**; every message the human typed has **Edit** - both create a sibling (A4). A
   message injected by another chat (U54) has neither: it is not the human's to edit and there is
   nothing to regenerate. A "branch here" action on any message, injected ones included, starts a
-  new leaf from that point. Branching never leaves the chat.
+  new leaf from that point. Branching never leaves the chat. The model named under an assistant
+  message is a picker: choosing one regenerates that reply with it (`POST /branch` with `model`),
+  as a new sibling.
+- **U8c. Questions.** A pending `switchboard.user.ask` renders in the thread as a card: each
+  question with its options (radio, or checkboxes when `multiSelect`) and an always-present box for
+  the user's own answer, **Send answers** and **Skip**. Its chat is marked "has a question" in the
+  list and raises the browser notification with the question as its body (U33).
+- **U8d. Model pickers.** Every model choice is a searchable list, not a `<select>`: click to open,
+  type to fuzzy-filter (subsequence match, consecutive runs and word starts score higher), arrows
+  and Enter to pick, Esc to close. The composer's "default" choice names the chat's model:
+  `gpt-oss (chat default)`.
+- **U8b. Skills.** The Prompts tab lists skills under the prompts (`/prompts/skills/:skillId`,
+  U5) with a form for name, description, instructions and "let the model use it" (§5.2b). In a
+  chat's composer a message that is a bare `/prefix` opens a menu of skills (arrows, Tab or Enter
+  to complete, Esc to close, tap on a phone).
+- **U8a. Overview.** An **Overview** toggle in the thread header opens the whole message tree
+  (`?tree=1`) as a node graph in a right-hand panel, like a member list: a column from `md` up,
+  a slide-over below it, remembered in `mcpsb.ui.v1.chat.overview`. Only user and assistant turns
+  are nodes (tool results fold away); the path the thread shows is highlighted, and clicking a
+  turn selects it (`selectMessageId`, A5), switching the thread to that branch.
 - **U9. Tool call inspection.** Each tool call renders as a collapsible card: name, resolved
   `label/project/server`, duration, status, and raw argument/result JSON with a copy button and a
   link to the corresponding row in Calls.

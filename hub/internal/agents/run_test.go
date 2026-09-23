@@ -57,7 +57,7 @@ func TestRunHappyPathWithRealToolCall(t *testing.T) {
 	}
 	// Second request saw the tool result, and the tool list was sent.
 	calls := prov.Calls()
-	if len(calls) != 2 || len(calls[0].Tools) != 1 || calls[0].Tools[0].Name != "box__demo__echo" {
+	if len(calls) != 2 || len(calls[0].Tools) != 2 || calls[0].Tools[0].Name != "box__demo__echo" {
 		t.Fatalf("provider calls: %+v", calls)
 	}
 	last := calls[1].Messages[len(calls[1].Messages)-1]
@@ -131,7 +131,7 @@ func TestCatalogIsGrantsIntersectLiveAndStable(t *testing.T) {
 	for _, tl := range cat.tools {
 		names = append(names, tl.Name)
 	}
-	if strings.Join(names, ",") != "box__demo__a,box__demo__b" {
+	if strings.Join(names, ",") != "box__demo__a,box__demo__b,switchboard.user.ask" {
 		t.Fatalf("catalog = %v", names)
 	}
 }
@@ -149,15 +149,16 @@ func TestSwitchboardToolVisibilityFollowsCapabilities(t *testing.T) {
 		}
 		return out
 	}
-	if got := names(e.agent("leaf", caps(false, false))); len(got) != 0 {
+	// switchboard.user.ask needs no capability: any chat may ask its user.
+	if got := strings.Join(names(e.agent("leaf", caps(false, false))), ","); got != "switchboard.user.ask" {
 		t.Errorf("leaf sees %v", got)
 	}
 	if got := strings.Join(names(e.agent("boss", caps(true, false))), ","); got !=
-		"switchboard.chat.list,switchboard.chat.spawn,switchboard.chat.stop,switchboard.mcp.list_tools" {
+		"switchboard.chat.list,switchboard.chat.spawn,switchboard.chat.stop,switchboard.mcp.list_tools,switchboard.user.ask" {
 		t.Errorf("spawner sees %s", got)
 	}
 	if got := strings.Join(names(e.agent("talker", caps(false, true))), ","); got !=
-		"switchboard.chat.list,switchboard.chat.send,switchboard.mcp.list_tools" {
+		"switchboard.chat.list,switchboard.chat.send,switchboard.mcp.list_tools,switchboard.user.ask" {
 		t.Errorf("messenger sees %s", got)
 	}
 	// The catalog offered to the model uses provider-safe names.
@@ -585,7 +586,7 @@ func TestPinnedAgentSeesShortToolNamesAndCanCallThem(t *testing.T) {
 	for _, tl := range prov.Calls()[0].Tools {
 		names = append(names, tl.Name)
 	}
-	if got := strings.Join(names, ","); got != "fetch__fetch,run_command" {
+	if got := strings.Join(names, ","); got != "fetch__fetch,run_command,switchboard_user_ask" {
 		t.Errorf("tool names offered = %s", got)
 	}
 	rows := e.callRows(store.CallFilter{Source: store.SourceAgent})

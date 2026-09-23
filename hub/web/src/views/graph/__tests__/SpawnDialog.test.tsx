@@ -17,7 +17,7 @@ describe("SpawnDialog", () => {
     const created = vi.fn();
     renderView(<SpawnDialog parent={parent} onClose={() => {}} onCreated={created} />);
 
-    expect((screen.getByLabelText(/Model/) as HTMLSelectElement).value).toBe("anthropic/sonnet");
+    expect(screen.getByLabelText("Model").textContent).toContain("sonnet");
     await userEvent.type(screen.getByLabelText("Title"), "kid");
     await userEvent.click(screen.getByRole("button", { name: "Create" }));
 

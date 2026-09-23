@@ -99,7 +99,14 @@ func (m *Manager) planTurn(ctx context.Context, eff *store.Agent, prof *store.Pr
 	if err != nil {
 		return nil, err
 	}
-	return &turnPlan{agent: eff, profile: prof, cat: cat, system: systemPromptFor(eff)}, nil
+	system := systemPromptFor(eff)
+	if listing := skillsPrompt(m.autoSkills(ctx)); listing != "" {
+		if system != "" {
+			system += "\n\n"
+		}
+		system += listing
+	}
+	return &turnPlan{agent: eff, profile: prof, cat: cat, system: system}, nil
 }
 
 // systemPromptFor is THE function that produces the system prompt sent to the

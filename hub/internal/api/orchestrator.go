@@ -96,6 +96,7 @@ func (h *Handler) registerOrchestrator() {
 	m.HandleFunc("GET /api/runs/{id}", h.getRun)
 	m.HandleFunc("POST /api/runs/{id}/cancel", h.cancelRun)
 	m.HandleFunc("POST /api/runs/{id}/approvals/{callId}", h.approve)
+	m.HandleFunc("POST /api/runs/{id}/questions/{callId}", h.answerQuestion)
 	m.HandleFunc("GET /api/approvals", h.listApprovals)
 	m.HandleFunc("GET /api/models", h.models)
 
@@ -104,6 +105,10 @@ func (h *Handler) registerOrchestrator() {
 	m.HandleFunc("GET /api/profiles/{id}", h.getProfile)
 	m.HandleFunc("PATCH /api/profiles/{id}", h.patchProfile)
 	m.HandleFunc("DELETE /api/profiles/{id}", h.deleteProfile)
+	m.HandleFunc("GET /api/skills", h.listSkills)
+	m.HandleFunc("POST /api/skills", h.createSkill)
+	m.HandleFunc("PATCH /api/skills/{id}", h.patchSkill)
+	m.HandleFunc("DELETE /api/skills/{id}", h.deleteSkill)
 	m.HandleFunc("GET /api/hub-tools", h.hubTools)
 	m.HandleFunc("GET /api/chats/{id}/tools", h.chatTools)
 	m.HandleFunc("GET /api/chats/{id}/system-prompt", h.chatSystemPrompt)
@@ -1074,6 +1079,20 @@ func (h *Handler) approve(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *Handler) answerQuestion(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Answers []agents.QuestionAnswer `json:"answers"`
+	}
+	if !h.readBody(w, r, &b) {
+		return
+	}
+	if err := h.opts.Agents.Answer(r.Context(), r.PathValue("id"), r.PathValue("callId"), b.Answers); err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	// Lazy discovery refresh, but never wait on a slow provider for long: serve
 	// the cached list and let the refresh finish in the background.
@@ -1178,6 +1197,66 @@ func (h *Handler) deleteProfile(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *Handler) listSkills(w http.ResponseWriter, r *http.Request) {
+	ks, err := h.opts.Agents.ListSkills(r.Context())
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	if ks == nil {
+		ks = []store.Skill{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"skills": ks})
+}
+
+func (h *Handler) createSkill(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Body        string `json:"body"`
+		Auto        *bool  `json:"auto"` // omitted: on
+	}
+	if !h.readBody(w, r, &b) {
+		return
+	}
+	k, err := h.opts.Agents.CreateSkill(r.Context(), agents.SkillInput{
+		Name: b.Name, Description: b.Description, Body: b.Body, Auto: b.Auto == nil || *b.Auto,
+	})
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, k)
+}
+
+func (h *Handler) patchSkill(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Name        *string `json:"name"`
+		Description *string `json:"description"`
+		Body        *string `json:"body"`
+		Auto        *bool   `json:"auto"`
+	}
+	if !h.readBody(w, r, &b) {
+		return
+	}
+	k, err := h.opts.Agents.UpdateSkill(r.Context(), r.PathValue("id"), agents.SkillUpdate{
+		Name: b.Name, Description: b.Description, Body: b.Body, Auto: b.Auto,
+	})
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, k)
+}
+
+func (h *Handler) deleteSkill(w http.ResponseWriter, r *http.Request) {
+	if err := h.opts.Agents.DeleteSkill(r.Context(), r.PathValue("id")); err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *Handler) hubTools(w http.ResponseWriter, r *http.Request) {
 	tools := h.opts.Agents.HubTools()
 	if tools == nil {
@@ -1270,6 +1349,8 @@ func (h *Handler) putDraft(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, err)
 		return
 	}
-	h.opts.Bus.Publish(events.Event{Type: events.TypeChat, ChatID: c.ID})
+	// Its own event type: every keystroke-save must not make other tabs refetch
+	// the chat and its messages, only the draft.
+	h.opts.Bus.Publish(events.Event{Type: events.TypeDraft, ChatID: c.ID})
 	writeJSON(w, http.StatusOK, draftView(d))
 }

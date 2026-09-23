@@ -35,7 +35,7 @@ buildNpmPackage {
   # whenever package-lock.json changes (see AGENTS.md's pre-commit checks -
   # the same "recompute with lib.fakeHash, rebuild, paste the real hash in"
   # dance as hub.nix's vendorHash).
-  npmDepsHash = "sha256-Sm9/SXSwo0vViIQOVA1lmEUnxcUkt5QczvDjfElbuKg=";
+  npmDepsHash = "sha256-KvJld2QtzvHpskLgmI1xgjgvqM1S5Jee3JfMF6n4ncM=";
 
   npmBuildScript = "build";
 

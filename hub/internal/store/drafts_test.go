@@ -117,7 +117,7 @@ func TestUpgradeFromVersion2PreservesData(t *testing.T) {
 
 	s := openStore(t, path)
 	var version int
-	if err := s.read.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil || version != 8 {
+	if err := s.read.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil || version != 9 {
 		t.Fatalf("version = %d (%v)", version, err)
 	}
 	if c, err := s.GetChat(ctx, "c1"); err != nil || c == nil || c.Title != "legacy" {

@@ -119,6 +119,7 @@ func New(opts Options) *Handler {
 	h.mux.HandleFunc("GET /api/calls", h.listCalls)
 	h.mux.HandleFunc("GET /api/calls/{id}", h.getCall)
 	h.mux.HandleFunc("GET /api/events", h.events)
+	h.mux.HandleFunc("GET /api/ws", h.ws)
 	h.mux.HandleFunc("GET /api/stats", h.stats)
 
 	// The orchestrator surface of spec.md 7.2 - 7.4. Per-chat streaming is

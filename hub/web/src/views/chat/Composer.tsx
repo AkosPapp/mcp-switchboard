@@ -3,8 +3,11 @@ import { useRef, useState, type FormEvent } from "react";
 import { useToast } from "../../components/Toast";
 import { useDraft } from "./useDraft";
 import { formatCost, formatTokens } from "./format";
-import { ModelOptions, NoToolsWarning } from "../../lib/models";
+import { ModelPicker, NoToolsWarning } from "../../lib/models";
+import { modelLabel } from "./format";
 import type { ContentBlock, ModelInfo } from "./types";
+import { useSkills } from "../prompts/skills";
+import SlashMenu, { matchSkills } from "./SlashMenu";
 
 export interface Attachment {
   name: string;
@@ -40,27 +43,21 @@ export function buildContent(text: string, attachments: Attachment[]): string | 
   return blocks;
 }
 
+/** One quiet figure; it only takes a colour once the limit is close. */
 function Meter({ label, used, max, format }: { label: string; used: number; max: number; format: (n: number) => string }) {
-  const ratio = max > 0 ? Math.min(1, used / max) : 0;
-  const colour = ratio > 0.9 ? "bg-danger" : ratio > 0.7 ? "bg-warn" : "bg-accent";
+  const ratio = max > 0 ? used / max : 0;
+  const colour = ratio > 0.9 ? "text-danger" : ratio > 0.7 ? "text-warn" : "";
   return (
-    <div className="min-w-0 flex-1" title={`${label}: ${format(used)} of ${format(max)}`}>
-      <div className="flex justify-between text-[10px] text-muted">
-        <span>{label}</span>
-        <span>
-          {format(used)}/{format(max)}
-        </span>
-      </div>
-      <div
-        role="meter"
-        aria-label={label}
-        aria-valuenow={used}
-        aria-valuemax={max}
-        className="h-1 overflow-hidden rounded bg-raised"
-      >
-        <div className={`h-full ${colour}`} style={{ width: `${ratio * 100}%` }} />
-      </div>
-    </div>
+    <span
+      role="meter"
+      aria-label={label}
+      aria-valuenow={used}
+      aria-valuemax={max}
+      title={`${label}: ${format(used)} of ${format(max)}`}
+      className={colour}
+    >
+      {label} {format(used)}/{format(max)}
+    </span>
   );
 }
 
@@ -80,7 +77,7 @@ export function BudgetMeter({
   if (!turns && !tokens && !cost) return null;
   const usedTokens = num(usage.tokens) || num(usage.input_tokens) + num(usage.output_tokens);
   return (
-    <div className="flex gap-3 px-1 pb-1" data-testid="budget-meter">
+    <div className="flex flex-wrap gap-x-3 px-1 pb-1 text-[11px] text-muted" data-testid="budget-meter">
       {turns ? <Meter label="turns" used={num(usage.turns)} max={turns} format={String} /> : null}
       {tokens ? <Meter label="tokens" used={usedTokens} max={tokens} format={formatTokens} /> : null}
       {cost ? <Meter label="cost" used={num(usage.cost_micros)} max={cost} format={formatCost} /> : null}
@@ -119,6 +116,8 @@ interface Props {
   /** Opens the mobile chat-list drawer; the "Chats" button lives in this row
    * on mobile instead of floating over it (there is no room for both). */
   onOpenList?: () => void;
+  /** The model the chat uses when none is picked, named on the "default" choice. */
+  defaultModel?: { provider?: string; model?: string } | null;
 }
 
 export default function Composer({
@@ -131,6 +130,7 @@ export default function Composer({
   onSend,
   onStop,
   onOpenList,
+  defaultModel,
 }: Props) {
   const toast = useToast();
   const draft = useDraft(chatId);
@@ -139,6 +139,16 @@ export default function Composer({
   const [modelKey, setModelKey] = useState("");
   const [sending, setSending] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  // "/" at the start opens the skills menu (Prompts tab -> Skills).
+  const skills = useSkills();
+  const [slashActive, setSlashActive] = useState(0);
+  const [dismissedFor, setDismissedFor] = useState<string | null>(null);
+  const slashMatches = dismissedFor === text ? [] : matchSkills(skills.data ?? [], text);
+  const slashOpen = slashMatches.length > 0;
+  const pickSkill = (name: string) => {
+    setText(`/${name} `);
+    setSlashActive(0);
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -200,17 +210,43 @@ export default function Composer({
         </ul>
       ) : null}
 
-      <div className="flex items-end gap-2">
+      <div className="relative flex items-end gap-2">
+        {slashOpen ? (
+          <SlashMenu skills={slashMatches} active={Math.min(slashActive, slashMatches.length - 1)} onPick={(k) => pickSkill(k.name)} onHover={setSlashActive} />
+        ) : null}
         <textarea
           aria-label="message"
           value={text}
           rows={2}
           disabled={disabled}
           placeholder="Message"
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value);
+            setSlashActive(0);
+          }}
           onFocus={draft.onFocus}
           onBlur={draft.onBlur}
           onKeyDown={(e) => {
+            if (slashOpen) {
+              const at = Math.min(slashActive, slashMatches.length - 1);
+              const exact = text === `/${slashMatches[at].name}`;
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                const n = slashMatches.length;
+                setSlashActive((at + (e.key === "ArrowDown" ? 1 : n - 1)) % n);
+                return;
+              }
+              if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !exact)) {
+                e.preventDefault();
+                pickSkill(slashMatches[at].name);
+                return;
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setDismissedFor(text);
+                return;
+              }
+            }
             // Enter sends on a keyboard; on a phone Enter is a newline.
             if (e.key === "Enter" && !e.shiftKey && !window.matchMedia("(pointer: coarse)").matches) {
               e.preventDefault();
@@ -265,15 +301,14 @@ export default function Composer({
         >
           Attach
         </button>
-        <select
-          aria-label="model for the next turn"
+        <ModelPicker
+          models={models}
           value={modelKey}
-          onChange={(e) => setModelKey(e.target.value)}
-          className="min-w-0 rounded border border-border bg-surface px-1 py-1 text-xs"
-        >
-          <option value="">chat default</option>
-          <ModelOptions models={models} />
-        </select>
+          onChange={setModelKey}
+          emptyLabel={defaultModel?.model ? `${modelLabel(defaultModel)} (chat default)` : "chat default"}
+          ariaLabel="model for the next turn"
+          className="flex min-w-0 max-w-[16rem] items-center gap-1 rounded border border-border bg-surface px-2 py-1 text-xs hover:bg-raised"
+        />
         {/* Always rendered so the row never changes height. */}
         <span
           role="status"

@@ -21,9 +21,6 @@ const COLLAPSED_KEY = "chat.tree.collapsed";
 const validCollapsed: Validate<string[]> = (v) =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined;
 
-const SMALL_BTN =
-  "flex h-11 min-w-[44px] shrink-0 items-center justify-center rounded border border-border bg-surface px-2 text-xs font-medium normal-case text-text hover:bg-raised md:h-7 md:min-w-0";
-
 interface TreeCtx {
   collapsed: ReadonlySet<string>;
   /** while searching, every node with a match is open so the match is visible */
@@ -69,38 +66,39 @@ function GroupBranch({
   const needy = group.chatIds.filter((id) => ctx.marks[id]).length;
   return (
     <li role="none" data-testid="client-group" data-client={group.label ?? ""}>
-      <div className="sticky top-0 z-[2] flex min-h-[44px] items-start gap-1 border-b border-border bg-surface pr-2">
+      <div className="group/h sticky top-0 z-[2] flex min-h-[44px] items-center border-y border-border bg-surface pr-1 md:min-h-0">
         <button
           type="button"
           aria-expanded={open}
           onClick={() => ctx.toggle(group.id)}
-          className="flex min-h-[44px] min-w-0 flex-1 items-start gap-2 px-3 py-1.5 text-left text-sm"
+          className="flex min-h-[44px] min-w-0 flex-1 items-center gap-1.5 px-1.5 py-1 text-left text-xs md:min-h-0"
         >
-          <span aria-hidden="true" className="w-3 shrink-0 pt-0.5 text-muted">
+          <span aria-hidden="true" className="w-3 shrink-0 text-center text-[10px] text-muted">
             {open ? "▾" : "▸"}
           </span>
-          <span className="min-w-0 flex-1 self-center">
+          <span className="min-w-0 flex-1 uppercase tracking-wide">
             {group.label === null ? (
               <span className="font-semibold">No client</span>
             ) : (
               <span className={connected === false ? "opacity-60" : ""} title={connected === false ? "offline" : undefined}>
-                {/* wrap: this row is the badge's own line in the header, so the
-                    client's name is shown in full (wrapping if needed) rather
-                    than clipped to a few characters (spec.md truncation bug). */}
-                <ClientBadge label={group.label} environment={environment} connected={connected} compact wrap />
+                <ClientBadge label={group.label} environment={environment} connected={connected} compact wrap bare />
               </span>
             )}
           </span>
           {!open && needy > 0 ? (
             <span
               data-testid="group-attention"
-              className="shrink-0 self-center rounded-full bg-warn px-1.5 py-0.5 text-[11px] leading-none text-bg"
+              className="shrink-0 rounded-full bg-warn px-1.5 py-0.5 text-[10px] leading-none text-bg"
             >
               {needy}
             </span>
           ) : null}
-          <span className="shrink-0 self-center text-xs text-muted" data-testid="group-count">
-            {group.chatIds.length} chat{group.chatIds.length === 1 ? "" : "s"}
+          <span
+            className="shrink-0 text-[11px] text-muted"
+            data-testid="group-count"
+            title={`${group.chatIds.length} chat${group.chatIds.length === 1 ? "" : "s"}`}
+          >
+            {group.chatIds.length}
           </span>
         </button>
         <button
@@ -108,13 +106,13 @@ function GroupBranch({
           aria-label={`new chat for ${group.label ?? "no client"}`}
           title="New chat in this group"
           onClick={onNewChat}
-          className={SMALL_BTN}
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded text-sm text-muted hover:bg-raised hover:text-text md:h-5 md:w-5 md:opacity-0 md:focus:opacity-100 md:group-hover/h:opacity-100 [@media(hover:none)]:md:opacity-100"
         >
-          + chat
+          +
         </button>
       </div>
       {open ? (
-        <ul className="ml-3 divide-y divide-border border-l border-border">
+        <ul className="pb-1">
           {group.roots.map((node) => (
             <ChatBranch key={node.chat.id} node={node} ctx={ctx} />
           ))}
@@ -280,7 +278,7 @@ export default function ChatList({
   };
 
   const field =
-    "min-h-[44px] w-full rounded border border-border bg-surface px-2 py-1.5 text-sm placeholder:text-muted focus:border-accent md:min-h-0";
+    "min-h-[44px] min-w-0 flex-1 rounded border border-border bg-bg px-2 py-1 text-sm placeholder:text-muted focus:border-accent md:min-h-0";
 
   const ctx: TreeCtx = {
     collapsed: new Set([...collapsed].filter((id) => !openPath.has(id))),
@@ -304,12 +302,20 @@ export default function ChatList({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface">
-      <div className="space-y-2 border-b border-border p-3">
-        <div className="flex items-center gap-2">
+      <div className="space-y-1.5 border-b border-border p-2">
+        <div className="flex items-center gap-1.5">
+          <input
+            type="search"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="search"
+            aria-label="search chats"
+            className={field}
+          />
           <button
             type="button"
             onClick={() => onNewChat(null)}
-            className="min-h-[44px] flex-1 rounded bg-accent px-3 py-1.5 text-sm font-medium text-bg md:min-h-0"
+            className="min-h-[44px] shrink-0 rounded bg-accent px-2.5 py-1 text-sm font-medium text-on-accent md:min-h-0"
           >
             New chat
           </button>
@@ -317,7 +323,7 @@ export default function ChatList({
             <span
               data-testid="chat-attention-badge"
               aria-label={`${attention.count} chat${attention.count === 1 ? "" : "s"} need you`}
-              className="shrink-0 rounded-full bg-warn px-2 py-1 text-xs font-semibold leading-none text-bg"
+              className="shrink-0 rounded-full bg-warn px-1.5 py-0.5 text-[11px] font-semibold leading-none text-bg"
             >
               {attention.count}
             </span>
@@ -327,22 +333,13 @@ export default function ChatList({
           <button
             type="button"
             onClick={() => void attention.enableNotifications()}
-            className="min-h-[44px] w-full rounded border border-border px-3 py-1.5 text-left text-xs text-muted hover:text-text md:min-h-0"
+            className="min-h-[44px] w-full text-left text-[11px] text-muted hover:text-text md:min-h-0"
           >
             Enable notifications for approvals and replies
           </button>
         ) : null}
-
-        <input
-          type="search"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="search titles and messages"
-          aria-label="search chats"
-          className={field}
-        />
-        <div className="flex items-center gap-2">
-          <label className="flex min-h-[44px] flex-1 items-center gap-1 text-xs text-muted md:min-h-0">
+        <div className="flex items-center gap-3 text-[11px] text-muted">
+          <label className="flex min-h-[44px] items-center gap-1 md:min-h-0">
             <input type="checkbox" checked={archived} onChange={(e) => setArchived(e.target.checked)} />
             archived
           </label>
@@ -353,30 +350,29 @@ export default function ChatList({
               setSelecting((v) => !v);
               setPicked(new Set());
             }}
-            className="min-h-[44px] shrink-0 rounded border border-border px-3 py-1.5 text-sm md:min-h-0"
+            className={`min-h-[44px] md:min-h-0 ${selecting ? "text-accent" : "hover:text-text"}`}
           >
             {selecting ? "Done" : "Select"}
           </button>
+          {selecting ? (
+            <>
+              <span>{picked.size} selected</span>
+              {(["archive", "export", "delete"] as const).map((what) => (
+                <button
+                  key={what}
+                  type="button"
+                  disabled={picked.size === 0}
+                  onClick={() => void bulk(what)}
+                  className={`min-h-[44px] capitalize disabled:opacity-40 md:min-h-0 ${
+                    what === "delete" ? "text-danger" : "hover:text-text"
+                  }`}
+                >
+                  {what}
+                </button>
+              ))}
+            </>
+          ) : null}
         </div>
-
-        {selecting ? (
-          <div className="flex items-center gap-1 text-sm">
-            <span className="text-xs text-muted">{picked.size} selected</span>
-            {(["archive", "export", "delete"] as const).map((what) => (
-              <button
-                key={what}
-                type="button"
-                disabled={picked.size === 0}
-                onClick={() => void bulk(what)}
-                className={`min-h-[44px] rounded border px-2 py-1 text-xs capitalize disabled:opacity-40 md:min-h-0 ${
-                  what === "delete" ? "border-danger text-danger" : "border-border"
-                }`}
-              >
-                {what}
-              </button>
-            ))}
-          </div>
-        ) : null}
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto" data-testid="chat-list">

@@ -239,7 +239,7 @@ func (m *Manager) turn(rs *runState, agent *store.Agent) (turnResult, error) {
 	if err != nil {
 		return turnResult{}, err
 	}
-	msgs := toLLMMessages(path)
+	msgs := expandSlashSkills(toLLMMessages(path), func() []store.Skill { k, _ := m.st.ListSkills(ctx); return k }())
 
 	mc, err := parseModel(agent.Model)
 	if err != nil {

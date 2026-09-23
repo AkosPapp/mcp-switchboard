@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 
 import type { ApprovalMode } from "../../api/types";
-import { ModelOptions, NoToolsWarning } from "../../lib/models";
+import { ModelPicker, NoToolsWarning } from "../../lib/models";
 import { fieldClass, buttonClass } from "../graph/ui";
 import { useProfileModels, type Profile, type ProfileInput } from "./api";
 import { APPROVALS, initialValues, toInput, type FormErrors, type FormValues } from "./form";
@@ -28,9 +28,6 @@ export default function ProfileForm({
     setValues((v) => ({ ...v, [key]: value }));
 
   const options = models.data ?? [];
-  const known =
-    values.modelKey === "" ||
-    options.some((m) => `${m.provider}/${m.model}` === values.modelKey);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -84,19 +81,18 @@ export default function ProfileForm({
         {errors.systemPrompt && <span className="text-xs text-danger">{errors.systemPrompt}</span>}
       </label>
 
-      <label className="block text-sm">
-        Default model
-        <select
-          className={`${fieldClass()} min-h-[44px] md:min-h-0`}
+      <div className="text-sm">
+        <span id="default-model-label">Default model</span>
+        <ModelPicker
+          models={options}
           value={values.modelKey}
-          onChange={(e) => set("modelKey", e.target.value)}
-        >
-          <option value="">hub default</option>
-          {!known && <option value={values.modelKey}>{values.modelKey}</option>}
-          <ModelOptions models={options} />
-        </select>
+          onChange={(key) => set("modelKey", key)}
+          emptyLabel="hub default"
+          ariaLabel="Default model"
+          className={`${fieldClass()} flex min-h-[44px] items-center justify-between gap-2 text-left md:min-h-0`}
+        />
         <NoToolsWarning models={options} value={values.modelKey} />
-      </label>
+      </div>
 
       <fieldset className="space-y-1 text-sm">
         <legend>Hub tools</legend>

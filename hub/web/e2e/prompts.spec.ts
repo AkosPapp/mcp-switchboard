@@ -87,11 +87,14 @@ test("model picker shows context window, tool support and discovered grouping", 
   await page.goto("/prompts");
   await page.getByText("Assistant").first().click();
   const form = page.getByRole("form", { name: "Prompt" });
-  const select = form.getByLabel("Default model");
-  await expect(select.locator("option", { hasText: "ollama/gpt-oss:20b · 32k ctx" })).toHaveCount(1);
-  await expect(select.locator("option", { hasText: "ollama/tiny · 128k ctx · no tool support" })).toHaveCount(1);
-  await expect(select.locator("optgroup[label=Discovered] option")).toHaveCount(2);
+  await form.getByLabel("Default model").click();
+  const picker = page.getByRole("dialog", { name: "Pick a model" });
+  await expect(picker.getByRole("option", { name: /gpt-oss:20b.*ollama.*32k ctx/ })).toHaveCount(1);
+  await expect(picker.getByRole("option", { name: /tiny.*ollama.*128k ctx.*no tools/ })).toHaveCount(1);
   await expect(form.getByTestId("no-tools-warning")).toHaveCount(0);
-  await select.selectOption("ollama/tiny");
+  // Fuzzy: "tny" finds "tiny".
+  await picker.getByRole("combobox").fill("tny");
+  await expect(picker.getByRole("option")).toHaveCount(1);
+  await picker.getByRole("combobox").press("Enter");
   await expect(form.getByText("this model does not advertise tool calling")).toBeVisible();
 });

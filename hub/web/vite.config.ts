@@ -24,7 +24,14 @@ export default defineConfig({
     // `npm run dev` proxies to a hub on its default private port, so the
     // console can be developed against a real one.
     proxy: {
-      "/api": "http://127.0.0.1:8099",
+      // ws: the console's live connection is a WebSocket at /api/ws. The hub
+      // checks the upgrade's Origin against its Host, so the dev origin is
+      // rewritten to the hub's own.
+      "/api": {
+        target: "http://127.0.0.1:8099",
+        ws: true,
+        headers: { Origin: "http://127.0.0.1:8099" },
+      },
       "/mcp": "http://127.0.0.1:8099",
     },
   },

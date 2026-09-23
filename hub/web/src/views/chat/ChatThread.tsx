@@ -11,6 +11,7 @@ import { useChatStream } from "../../hooks/useChatStream";
 import { overlayThread } from "../../lib/streamAssembly";
 import { runningLabel, runningToolNames } from "../../lib/runningTools";
 import ApprovalCard from "./ApprovalCard";
+import QuestionCard from "./QuestionCard";
 import {
   branchChat,
   cancelRun,
@@ -34,7 +35,13 @@ import MessageView, { DraftView, type MessageActions } from "./MessageView";
 import SystemPromptPanel from "./SystemPromptPanel";
 import ToolsPanel from "./ToolsPanel";
 import ToolCard, { type ToolCardData } from "./ToolCard";
-import { ACTIVE_RUN, type ContentBlock, type Message, type ModelInfo } from "./types";
+import { ACTIVE_RUN, type ContentBlock, type Message, type ModelInfo, type Question } from "./types";
+
+/** The editable text of a queued message (attachments are kept as they are). */
+function queuedText(content: string | ContentBlock[]): string {
+  if (typeof content === "string") return content;
+  return content.map((b) => (b.type === "text" ? (b.text ?? "") : "")).filter(Boolean).join("\n");
+}
 
 /** A short one-line preview of a queued message's content, for the queue strip. */
 function previewContent(content: string | ContentBlock[]): string {
@@ -63,9 +70,13 @@ function resultsByCall(messages: Message[]) {
 export default function ChatThread({
   chatId,
   onOpenList,
+  overviewOpen = false,
+  onToggleOverview,
 }: {
   chatId: string;
   onOpenList: () => void;
+  overviewOpen?: boolean;
+  onToggleOverview?: () => void;
 }) {
   const toast = useToast();
   const invalidate = useInvalidateChat();
@@ -116,7 +127,7 @@ export default function ChatThread({
       error: t.error,
     }));
 
-  const approvals = new Map<string, { runId: string; callId: string; tool: string; arguments: unknown; expiresAt: string }>();
+  const approvals = new Map<string, { runId: string; callId: string; tool: string; arguments: unknown; expiresAt: string; questions?: Question[] }>();
   for (const a of state.approvals) approvals.set(a.callId, a);
   if (run.data && run.data.status === "waiting") {
     for (const a of run.data.pendingApprovals ?? []) {
@@ -125,7 +136,7 @@ export default function ChatThread({
   }
 
   // The call ran, or the user decided: no card (U31).
-  const { decide, dismissed, inflight } = useDecideApproval();
+  const { decide, answer, dismissed, inflight } = useDecideApproval();
   for (const id of [...approvals.keys()]) {
     if (dismissed.has(id) || results.has(id) || state.tools.some((t) => t.callId === id && t.done)) approvals.delete(id);
   }
@@ -153,6 +164,11 @@ export default function ChatThread({
 
   const actions: MessageActions = {
     busy: runActive,
+    models: models.data?.models ?? [],
+    regenerateWith: (m, model) => {
+      stick.current = true;
+      branchChat(chatId, { fromMessageId: m.id, model: { provider: model.provider, model: model.model } }).then(refresh, fail);
+    },
     select: (id) => {
       patchChat(chatId, { selectMessageId: id }).then(refresh, fail);
     },
@@ -218,6 +234,20 @@ export default function ChatThread({
     // runActive and queue length should retrigger the drain.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runActive, queue]);
+  const [editingQueued, setEditingQueued] = useState<string | null>(null);
+  const editQueued = (id: string, text: string) => {
+    setEditingQueued(null);
+    setQueue((q) =>
+      q.flatMap((m) => {
+        if (m.id !== id) return [m];
+        if (typeof m.content === "string") return text.trim() ? [{ ...m, content: text }] : [];
+        // Keep attachments; the edit replaces the text block.
+        const rest = m.content.filter((b) => b.type !== "text");
+        const blocks = text.trim() ? [{ type: "text" as const, text }, ...rest] : rest;
+        return blocks.length ? [{ ...m, content: blocks }] : [];
+      }),
+    );
+  };
   const removeQueued = (id: string) => setQueue((q) => q.filter((m) => m.id !== id));
 
   const title = chat.data?.title || "Untitled chat";
@@ -241,20 +271,25 @@ export default function ChatThread({
       fail(error);
     }
   };
-  const chip = "rounded border border-border px-1.5 py-0.5 text-[11px] leading-none text-muted";
 
   return (
     <div className="relative flex h-full min-h-0 flex-col">
-      <header className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1.5">
+      <header className="flex items-center gap-2 border-b border-border px-3 py-1">
         <div className="min-w-0 flex-1">
-          <h1 className="truncate text-sm font-medium">{title}</h1>
-          <p className="truncate text-xs text-muted">
-            {agent.data ? modelLabel(agent.data.model) : ""}
-            {connection !== "live" ? `${agent.data ? " · " : ""}stream ${connection}` : ""}
-          </p>
+          <div className="flex items-baseline gap-2">
+            <h1 className="truncate text-sm font-medium">{title}</h1>
+            <span className="hidden shrink-0 truncate text-xs text-muted sm:inline">
+              {agent.data ? modelLabel(agent.data.model) : ""}
+              {connection !== "live" ? `${agent.data ? " · " : ""}stream ${connection}` : ""}
+            </span>
+          </div>
           {chat.data ? (
-            <div className="mt-0.5 flex flex-wrap items-center gap-1" data-testid="chat-chips">
-              <span className={chip}>{promptChip}</span>
+            <div
+              className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-[11px] text-muted"
+              data-testid="chat-chips"
+            >
+              <span>{promptChip}</span>
+              <span aria-hidden="true">·</span>
               {clientLabel ? (
                 <span className={clientConn || !connections.data ? "" : "opacity-60"}>
                   <ClientBadge
@@ -262,10 +297,11 @@ export default function ChatThread({
                     environment={clientConn?.client.environment}
                     connected={connections.data ? clientConn !== undefined : undefined}
                     compact
+                    bare
                   />
                 </span>
               ) : (
-                <span className={chip}>no client</span>
+                <span>no client</span>
               )}
             </div>
           ) : null}
@@ -277,24 +313,36 @@ export default function ChatThread({
           type="button"
           onClick={() => setSettingsOpen(true)}
           disabled={!chat.data}
-          className="hidden rounded border border-border px-2 py-1 text-sm md:block"
+          className="hidden rounded px-2 py-1 text-xs text-muted hover:bg-raised hover:text-text disabled:opacity-40 md:block"
         >
           Settings
         </button>
         <button
           type="button"
           onClick={() => setPromptOpen(true)}
-          className="hidden rounded border border-border px-2 py-1 text-sm md:block"
+          className="hidden rounded px-2 py-1 text-xs text-muted hover:bg-raised hover:text-text disabled:opacity-40 md:block"
         >
           System prompt
         </button>
         <button
           type="button"
           onClick={() => setToolsOpen(true)}
-          className="hidden rounded border border-border px-2 py-1 text-sm md:block"
+          className="hidden rounded px-2 py-1 text-xs text-muted hover:bg-raised hover:text-text disabled:opacity-40 md:block"
         >
           Tools
         </button>
+        {onToggleOverview ? (
+          <button
+            type="button"
+            aria-label="overview"
+            aria-pressed={overviewOpen}
+            title="Overview of the conversation's branches"
+            onClick={onToggleOverview}
+            className={`rounded px-2 py-1 text-xs hover:bg-raised hover:text-text ${overviewOpen ? "text-accent" : "text-muted"}`}
+          >
+            Overview
+          </button>
+        ) : null}
         <div className="relative">
           <button
             type="button"
@@ -305,7 +353,7 @@ export default function ChatThread({
               setMenuOpen((v) => !v);
               setConfirmDelete(false);
             }}
-            className="rounded border border-border px-2 py-1 text-sm"
+            className="rounded px-2 py-1 text-sm text-muted hover:bg-raised hover:text-text"
           >
             <span aria-hidden="true">⋯</span>
           </button>
@@ -444,14 +492,25 @@ export default function ChatThread({
         {liveTools.map((t) => (
           <ToolCard key={t.callId} tool={t} />
         ))}
-        {[...approvals.values()].map((a) => (
+        {[...approvals.values()].map((a) =>
+          a.questions?.length ? (
+            <QuestionCard
+              key={a.callId}
+              questions={a.questions}
+              expiresAt={a.expiresAt}
+              busy={inflight.has(a.callId)}
+              onAnswer={(answers) => answer(a, answers)}
+              onSkip={() => decide(a, false)}
+            />
+          ) : (
           <ApprovalCard
             key={a.callId}
             {...a}
             busy={inflight.has(a.callId)}
             onDecide={(approved) => decide(a, approved)}
           />
-        ))}
+          ),
+        )}
         {running.length > 0 ? (
           <p
             role="status"
@@ -493,10 +552,36 @@ export default function ChatThread({
           {queue.map((q, i) => (
             <li
               key={q.id}
-              className="flex items-center gap-2 rounded border border-border bg-raised px-2 py-1 text-xs text-muted"
+              className="flex items-center gap-2 rounded border border-border bg-raised px-2 py-1 text-sm text-muted"
             >
-              <span className="shrink-0 text-[10px] text-muted">#{i + 1} queued</span>
-              <span className="min-w-0 flex-1 truncate">{previewContent(q.content)}</span>
+              <span className="shrink-0 text-[11px] text-muted">#{i + 1} queued</span>
+              {editingQueued === q.id ? (
+                <textarea
+                  autoFocus
+                  aria-label="edit queued message"
+                  defaultValue={queuedText(q.content)}
+                  rows={Math.min(6, queuedText(q.content).split("\n").length)}
+                  className="min-w-0 flex-1 resize-none rounded border border-accent bg-bg px-1 py-0.5 text-sm text-text"
+                  onFocus={(e) => e.currentTarget.setSelectionRange(e.currentTarget.value.length, e.currentTarget.value.length)}
+                  onBlur={(e) => editQueued(q.id, e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setEditingQueued(null);
+                    else if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      editQueued(q.id, e.currentTarget.value);
+                    }
+                  }}
+                />
+              ) : (
+                <button
+                  type="button"
+                  title="Click to edit"
+                  onClick={() => setEditingQueued(q.id)}
+                  className="min-w-0 flex-1 truncate text-left hover:text-text"
+                >
+                  {previewContent(q.content)}
+                </button>
+              )}
               <button
                 type="button"
                 aria-label="remove queued message"
@@ -517,6 +602,7 @@ export default function ChatThread({
         budget={run.data?.budgetSnapshot ?? agent.data?.budget}
         usage={run.data?.usage ?? {}}
         onSend={send}
+        defaultModel={agent.data?.model}
         onStop={() => {
           if (lastRunId) cancelRun(lastRunId).then(refresh, fail);
         }}

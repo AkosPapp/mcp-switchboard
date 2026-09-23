@@ -168,11 +168,21 @@ export type RunStatus =
   | "interrupted"
   | "error";
 
+/** A question the model asked the user with switchboard.user.ask. */
+export interface Question {
+  question: string;
+  header?: string;
+  options?: { label: string; description?: string }[];
+  multiSelect?: boolean;
+}
+
 export interface PendingApproval {
   callId: string;
   tool: string;
   arguments: unknown;
   expiresAt: Ts;
+  /** Set when the run waits for answers rather than an approval. */
+  questions?: Question[];
 }
 
 export interface Run {
@@ -202,4 +212,5 @@ export interface ApprovalItem {
   tool: string;
   arguments: unknown;
   expiresAt: Ts;
+  questions?: Question[];
 }

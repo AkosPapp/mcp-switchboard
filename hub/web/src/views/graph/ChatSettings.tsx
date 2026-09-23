@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 
 import type { ApprovalMode, PatchAgentInput } from "../../api/types";
-import { ModelOptions, NoToolsWarning } from "../../lib/models";
+import { ModelPicker, NoToolsWarning } from "../../lib/models";
 import { useToast } from "../../components/Toast";
 import { messageOf, useModels, usePatchAgent } from "./hooks";
 import type { GraphChat } from "./chatNodes";
@@ -25,7 +25,6 @@ export default function ChatSettings({ agent }: { agent: GraphChat }) {
 
   const currentKey = `${agent.model.provider ?? ""}/${agent.model.model ?? ""}`;
   const options = models.data ?? [];
-  const known = options.some((m) => `${m.provider}/${m.model}` === currentKey);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -68,14 +67,17 @@ export default function ChatSettings({ agent }: { agent: GraphChat }) {
       <h3 id="settings-heading" className="text-sm font-semibold">
         Settings
       </h3>
-      <label className="block text-xs text-muted">
+      <div className="text-xs text-muted">
         Model
-        <select className={fieldClass()} value={modelKey} onChange={(e) => setModelKey(e.target.value)}>
-          {!known && <option value={currentKey}>{currentKey}</option>}
-          <ModelOptions models={options} />
-        </select>
+        <ModelPicker
+          models={options}
+          value={modelKey}
+          onChange={setModelKey}
+          ariaLabel="Model"
+          className={`${fieldClass()} flex min-h-[44px] items-center justify-between gap-2 text-left text-sm text-text md:min-h-0`}
+        />
         <NoToolsWarning models={options} value={modelKey} />
-      </label>
+      </div>
       <label className="block text-xs text-muted">
         Budget (JSON)
         <textarea

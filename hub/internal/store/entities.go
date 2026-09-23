@@ -783,3 +783,52 @@ type DraftStore interface {
 	// rolls back the message.
 	AppendMessageClearingDraft(ctx context.Context, m Message) (Message, error)
 }
+
+// Skill is a named block of instructions the user runs with /name and, when
+// Auto is set, the model may load on its own (agents/skills.go).
+type Skill struct {
+	ID          string
+	Name        string // a slug: what follows the slash
+	Description string // what the model sees when deciding whether to load it
+	Body        string // the instructions themselves
+	Auto        bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type skillJSON struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Body        string `json:"body"`
+	Auto        bool   `json:"auto"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
+}
+
+func (k Skill) MarshalJSON() ([]byte, error) {
+	return json.Marshal(skillJSON{
+		ID: k.ID, Name: k.Name, Description: k.Description, Body: k.Body, Auto: k.Auto,
+		CreatedAt: FormatTime(k.CreatedAt), UpdatedAt: FormatTime(k.UpdatedAt),
+	})
+}
+
+// SkillPatch changes a skill. Nil fields are left alone.
+type SkillPatch struct {
+	Name        *string
+	Description *string
+	Body        *string
+	Auto        *bool
+}
+
+// SkillStore persists skills.
+type SkillStore interface {
+	// CreateSkill: ErrNameTaken on a duplicate name.
+	CreateSkill(ctx context.Context, k Skill) (Skill, error)
+	// GetSkill returns nil, nil when absent.
+	GetSkill(ctx context.Context, id string) (*Skill, error)
+	// ListSkills returns every skill by name.
+	ListSkills(ctx context.Context) ([]Skill, error)
+	UpdateSkill(ctx context.Context, id string, p SkillPatch) (Skill, error)
+	DeleteSkill(ctx context.Context, id string) error
+}

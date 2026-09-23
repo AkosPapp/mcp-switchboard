@@ -16,7 +16,7 @@ import type { Agent, ApprovalItem, Chat } from "../views/chat/types";
 import { isLegacy } from "./chatTree";
 import { readMemory, writeMemory, type Validate } from "./uiMemory";
 
-export type Reason = "approval" | "error" | "reply";
+export type Reason = "approval" | "question" | "error" | "reply";
 
 export interface Mark {
   reason: Reason;
@@ -43,6 +43,7 @@ export interface AttentionOutput {
 
 export const REASON_LABEL: Record<Reason, string> = {
   approval: "needs approval",
+  question: "has a question",
   error: "run failed",
   reply: "new reply",
 };
@@ -88,13 +89,15 @@ export class AttentionTracker {
     }
     for (const [chatId, list] of byChat) {
       if (watching(chatId)) continue; // the card is on screen
-      const first = list[0];
+      // A question is more urgent to read than an approval is to click: it leads.
+      const first = list.find((a) => a.questions?.length) ?? list[0];
+      const asking = first.questions?.length ? first.questions[0].question : null;
       marks[chatId] = {
-        reason: "approval",
+        reason: asking !== null ? "question" : "approval",
         key: `approval:${list.map((a) => a.callId).sort().join(",")}`,
         chatId,
         title: first.chatTitle || "Untitled chat",
-        body: `wants to run ${first.tool}${list.length > 1 ? ` (+${list.length - 1} more)` : ""}`,
+        body: asking ?? `wants to run ${first.tool}${list.length > 1 ? ` (+${list.length - 1} more)` : ""}`,
       };
     }
     for (const c of chats) {

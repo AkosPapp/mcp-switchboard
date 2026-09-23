@@ -59,7 +59,7 @@ describe("ChatList tree", () => {
     const groups = screen.getAllByTestId("client-group");
     expect(groups.map((g) => g.getAttribute("data-client"))).toEqual(["box", ""]);
     await waitFor(() => expect(within(groups[0]).getByText("proj")).toBeTruthy());
-    expect(within(groups[0]).getByText("devcontainer")).toBeTruthy();
+    expect(within(groups[0]).queryByText("devcontainer")).toBeNull(); // chips stay in the tooltip
     expect(within(groups[1]).getByText("No client")).toBeTruthy();
     expect(within(groups[1]).getByText("chat-solo")).toBeTruthy();
     // depth: root 0 > kid 1 > grandkid 2, all inside the root's item
@@ -74,7 +74,7 @@ describe("ChatList tree", () => {
     expect(within(row("old")).getByText("legacy")).toBeTruthy();
     expect(screen.queryByText(/Older chats/)).toBeNull();
     expect(screen.queryByText(/agent/i)).toBeNull();
-    expect(within(groups[0]).getByTestId("group-count").textContent).toBe("5 chats");
+    expect(within(groups[0]).getByTestId("group-count").textContent).toBe("5");
   });
 
   it("shows a long client label in full in the group header, not clipped to a few characters", async () => {
@@ -109,7 +109,7 @@ describe("ChatList tree", () => {
     fireEvent.click(screen.getByRole("button", { name: "collapse sub-chats of chat-root" }));
     expect(screen.queryByText("chat-kid")).toBeNull();
     expect(screen.queryByText("chat-grandkid")).toBeNull();
-    expect(within(row("root")).getByTestId("child-count").textContent).toBe("2 sub-chats");
+    expect(within(row("root")).getByTestId("child-count").textContent).toBe("2");
     expect(JSON.parse(localStorage.getItem("mcpsb.ui.v1.chat.tree.collapsed")!).d).toEqual(["root"]);
     fireEvent.click(screen.getByRole("button", { name: "expand sub-chats of chat-root" }));
     expect(screen.getByText("chat-grandkid")).toBeTruthy();
@@ -137,7 +137,7 @@ describe("ChatList tree", () => {
     );
     const box = (await screen.findAllByTestId("client-group"))[0];
     expect(within(box).getByTestId("group-attention").textContent).toBe("1");
-    expect(within(box).getByTestId("group-count").textContent).toBe("5 chats");
+    expect(within(box).getByTestId("group-count").textContent).toBe("5");
   });
 
   it("a search opens every collapsed chat so the match is visible", async () => {

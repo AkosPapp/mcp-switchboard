@@ -107,19 +107,22 @@ test("chat list nests sub-chats, collapses, and flags a chat that needs approval
   await expect(page.getByTestId("attention-marker")).toHaveText("needs approval");
   await expect(page.getByTestId("chat-attention-badge")).toHaveText("1");
 
-  for (const row of await page.getByTestId("chat-row").all()) {
-    expect((await row.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  // Rows are compact with a mouse, and 44px tap targets on touch (spec.md U2).
+  if (await page.evaluate(() => matchMedia("(pointer: coarse)").matches)) {
+    for (const row of await page.getByTestId("chat-row").all()) {
+      expect((await row.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    }
   }
   await page.getByRole("button", { name: "collapse sub-chats of chat-c2" }).click();
   await expect(page.getByText("chat-c3")).toBeHidden();
   await expect(page.getByText("chat-c2")).toBeVisible();
-  await expect(page.getByTestId("child-count")).toHaveText("1 sub-chat");
+  await expect(page.getByTestId("child-count")).toHaveText("1");
   await page.reload();
   await expect(page.getByText("chat-c3")).toBeHidden();
   // A collapsed client group carries its attention count, and how many chats it holds.
   await page.getByTestId("client-group").getByRole("button", { name: /box/, expanded: true }).first().click();
   await expect(page.getByTestId("group-attention")).toHaveText("1");
-  await expect(page.getByTestId("group-count")).toHaveText("3 chats");
+  await expect(page.getByTestId("group-count")).toHaveText("3");
   await page.getByTestId("client-group").getByRole("button", { expanded: false }).first().click();
   // Nothing scrolls sideways however deep the tree is.
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

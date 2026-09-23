@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 
-import { ModelOptions, NoToolsWarning } from "../../lib/models";
+import { ModelPicker, NoToolsWarning } from "../../lib/models";
 import { useToast } from "../../components/Toast";
 import { createChat, useInvalidateChat } from "../chat/api";
 import type { GraphChat } from "./chatNodes";
@@ -90,16 +90,17 @@ export default function SpawnDialog({
             Title
             <input className={fieldClass()} value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
           </label>
-          <label className="block text-xs text-muted">
+          <div className="text-xs text-muted">
             Model (the parent&apos;s)
-            <select className={fieldClass()} value={modelKey} onChange={(e) => setModelKey(e.target.value)}>
-              {modelKey !== "" && !modelOptions.some((m) => `${m.provider}/${m.model}` === modelKey) && (
-                <option value={modelKey}>{modelKey}</option>
-              )}
-              <ModelOptions models={modelOptions} />
-            </select>
+            <ModelPicker
+              models={modelOptions}
+              value={modelKey}
+              onChange={setModelKey}
+              ariaLabel="Model"
+              className={`${fieldClass()} flex min-h-[44px] items-center justify-between gap-2 text-left text-sm text-text md:min-h-0`}
+            />
             <NoToolsWarning models={modelOptions} value={modelKey} />
-          </label>
+          </div>
           <label className="block text-xs text-muted">
             System prompt (optional)
             <textarea

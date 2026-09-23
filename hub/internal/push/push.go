@@ -26,6 +26,8 @@ const (
 	KindRunDone          = "run_done"
 	KindRunError         = "run_error"
 	KindApprovalRequired = "approval_required"
+	// KindQuestion: the model asked the user something and waits (switchboard.user.ask).
+	KindQuestion = "question"
 )
 
 // Payload is the JSON body of every push message, exactly the shape spec.md

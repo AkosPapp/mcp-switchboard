@@ -7,7 +7,7 @@
  */
 
 import { applyToPath } from "./dag";
-import type { Message, PendingApproval } from "../views/chat/types";
+import type { Message, PendingApproval, Question } from "../views/chat/types";
 
 /** The hub sends `content: null` for a message that is only tool calls. */
 export function normalizeMessage(m: Message): Message {
@@ -27,6 +27,8 @@ export interface Draft {
   runId: string;
   /** assembled text by content index */
   blocks: Record<number, string>;
+  /** content indexes whose deltas were the model's reasoning, not its answer */
+  thinking?: Record<number, true>;
 }
 
 export interface LiveTool {
@@ -85,13 +87,18 @@ export type StreamAction =
   /** The fetched path now contains these ids: their local copies are redundant. */
   | { type: "synced"; ids: string[] };
 
+/** A frame from already-parsed data; null for anything that is not one. */
+export function toFrame(eventName: string, data: unknown): FrameBase | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const frame = data as FrameBase;
+  if (typeof frame.type !== "string") frame.type = eventName;
+  return frame;
+}
+
 /** Parse an SSE event's data; null for anything that is not a frame. */
 export function parseFrame(eventName: string, data: string): FrameBase | null {
   try {
-    const frame = JSON.parse(data) as FrameBase;
-    if (!frame || typeof frame !== "object") return null;
-    if (typeof frame.type !== "string") frame.type = eventName;
-    return frame;
+    return toFrame(eventName, JSON.parse(data));
   } catch {
     return null;
   }
@@ -118,13 +125,18 @@ function applyFrame(state: StreamState, frame: FrameBase): StreamState {
       if (state.committed.some((m) => m.id === messageId)) return state;
       const index = Number(frame.contentIndex ?? 0);
       const text = String(frame.text ?? "");
+      const isThinking = frame.kind === "thinking";
       const i = state.drafts.findIndex((d) => d.messageId === messageId);
       const drafts = state.drafts.slice();
       if (i < 0) {
-        drafts.push({ messageId, runId: frame.runId, blocks: { [index]: text } });
+        drafts.push({ messageId, runId: frame.runId, blocks: { [index]: text }, ...(isThinking ? { thinking: { [index]: true as const } } : {}) });
       } else {
         const d = drafts[i];
-        drafts[i] = { ...d, blocks: { ...d.blocks, [index]: (d.blocks[index] ?? "") + text } };
+        drafts[i] = {
+          ...d,
+          blocks: { ...d.blocks, [index]: (d.blocks[index] ?? "") + text },
+          ...(isThinking ? { thinking: { ...d.thinking, [index]: true as const } } : {}),
+        };
       }
       return { ...state, drafts };
     }
@@ -153,9 +165,10 @@ function applyFrame(state: StreamState, frame: FrameBase): StreamState {
       const approval: Approval = {
         runId: frame.runId,
         callId,
-        tool: String(frame.tool ?? ""),
+        tool: String(frame.tool ?? frame.name ?? ""),
         arguments: frame.arguments,
         expiresAt: String(frame.expiresAt ?? ""),
+        ...(Array.isArray(frame.questions) ? { questions: frame.questions as Question[] } : {}),
       };
       return {
         ...state,
@@ -223,12 +236,23 @@ export function streamReducer(state: StreamState, action: StreamAction): StreamS
   }
 }
 
-export function draftText(draft: Draft): string {
+function draftParts(draft: Draft, thinking: boolean): string {
   return Object.keys(draft.blocks)
     .map(Number)
+    .filter((i) => Boolean(draft.thinking?.[i]) === thinking)
     .sort((a, b) => a - b)
     .map((i) => draft.blocks[i])
     .join("\n\n");
+}
+
+/** The answer assembled so far, without the model's reasoning. */
+export function draftText(draft: Draft): string {
+  return draftParts(draft, false);
+}
+
+/** The reasoning assembled so far. */
+export function draftThinking(draft: Draft): string {
+  return draftParts(draft, true);
 }
 
 /**

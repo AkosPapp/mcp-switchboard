@@ -110,6 +110,10 @@ func (m *Manager) buildCatalog(ctx context.Context, agent *store.Agent) (*catalo
 			add(&catalogTool{Name: sb.name, Desc: sb.desc, Schema: sb.schema, Ann: regAnnotations(sb.ann), AnnMCP: sb.ann, sb: sb})
 		}
 	}
+	if len(m.autoSkills(ctx)) > 0 {
+		t := skillLoadTool
+		add(&catalogTool{Name: t.name, Desc: t.desc, Schema: t.schema, Ann: regAnnotations(t.ann), AnnMCP: t.ann, sb: t})
+	}
 	sort.Slice(cat.tools, func(i, j int) bool { return cat.tools[i].Name < cat.tools[j].Name })
 	return cat, nil
 }
@@ -204,6 +208,9 @@ func (m *Manager) execTool(ctx context.Context, agent *store.Agent, rs *runState
 
 	if strings.HasPrefix(name, "switchboard.") {
 		sb := sbByName[name]
+		if name == skillLoadName {
+			sb = skillLoadTool
+		}
 		if sb == nil || !sb.visible(agent.Capabilities) {
 			return toolErr(fmt.Sprintf("unknown tool %q", name))
 		}
@@ -217,7 +224,7 @@ func (m *Manager) execTool(ctx context.Context, agent *store.Agent, rs *runState
 			if gateErr != nil {
 				return nil, gateErr
 			}
-			return sb.run(m, ctx, &callCtx{agent: agent, rs: rs}, args)
+			return sb.run(m, ctx, &callCtx{agent: agent, rs: rs, callID: toolCallID}, args)
 		})
 		return outcomeFromResult(res)
 	}
@@ -263,6 +270,7 @@ func (m *Manager) execTool(ctx context.Context, agent *store.Agent, rs *runState
 type approvalDecision struct {
 	approved bool
 	reason   string
+	answers  []QuestionAnswer // set when a question was answered (questions.go)
 }
 
 type pendingApproval struct {
@@ -271,6 +279,10 @@ type pendingApproval struct {
 	expiresAt time.Time
 	createdAt time.Time
 	ch        chan approvalDecision
+	// questions is set when this entry is switchboard.user.ask waiting for the
+	// user rather than a call waiting for approval; it rides the same plumbing
+	// (pending list, stream frame, waiting run status) and differs in the reply.
+	questions []Question
 }
 
 // needsApproval is W1: never / always, or for "destructive" any tool whose
@@ -381,7 +393,7 @@ func (m *Manager) PendingApprovals(runID string) []PendingApproval {
 	}
 	out := make([]PendingApproval, 0, len(rs.approvals))
 	for id, pa := range rs.approvals {
-		out = append(out, PendingApproval{CallID: id, Tool: pa.tool, Arguments: pa.arguments, ExpiresAt: store.FormatTime(pa.expiresAt)})
+		out = append(out, pa.view(id))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CallID < out[j].CallID })
 	return out
@@ -400,7 +412,7 @@ func (m *Manager) AllPendingApprovals(ctx context.Context) ([]PendingApprovalDet
 		for id, pa := range rs.approvals {
 			rows = append(rows, row{PendingApprovalDetail{
 				RunID: rs.id, ChatID: rs.chatID, AgentID: rs.agentID,
-				PendingApproval: PendingApproval{CallID: id, Tool: pa.tool, Arguments: pa.arguments, ExpiresAt: store.FormatTime(pa.expiresAt)},
+				PendingApproval: pa.view(id),
 			}, pa.createdAt})
 		}
 	}

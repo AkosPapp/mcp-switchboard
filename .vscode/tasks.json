@@ -7,12 +7,14 @@
       // --env-file is spelled out because the task runs from hub/ (where the Go
       // module is) while .env lives at the repo root; the hub's own default is
       // ./.env relative to its working directory.
-      "command": "go run ./cmd/mcp-switchboard-hub --env-file ${workspaceFolder}/.env",
+      // The console is rebuilt first because the hub embeds hub/web/dist (go:embed);
+      // `go run` then recompiles the backend, so one task restarts both.
+      "command": "(cd web && npm run build) && go run ./cmd/mcp-switchboard-hub --env-file ${workspaceFolder}/.env",
       "options": { "cwd": "${workspaceFolder}/hub" },
       "isBackground": true,
       "problemMatcher": [],
-      "presentation": { "panel": "dedicated", "group": "switchboard" },
-      "detail": "Hub: tunnel on 127.0.0.1:8097, console + /mcp on http://127.0.0.1:8099 (settings from the repo's .env)"
+      "presentation": { "panel": "dedicated" },
+      "detail": "Rebuilds the console and the backend, then runs the hub: tunnel on 127.0.0.1:8097, console + /mcp on http://127.0.0.1:8099 (settings from the repo's .env)"
     },
     {
       "label": "Switchboard: client",
@@ -20,11 +22,13 @@
       "command": "uv run mcp-switchboard-client --hub-url ws://127.0.0.1:8097",
       "isBackground": true,
       "problemMatcher": [],
-      "presentation": { "panel": "dedicated", "group": "switchboard" },
+      "presentation": { "panel": "dedicated" },
       "detail": "Client: tunnels servers from ./mcp.json to the local hub (token from .env)"
     },
     {
       "label": "Switchboard: hub + client",
+      // Hub and client have no presentation group, so VS Code gives each its own
+      // terminal tab instead of splitting them side by side.
       "dependsOn": ["Switchboard: hub", "Switchboard: client"],
       "dependsOrder": "parallel",
       "problemMatcher": []
@@ -46,7 +50,7 @@
       "options": { "cwd": "${workspaceFolder}/hub/web" },
       "problemMatcher": ["$tsc"],
       "presentation": { "panel": "dedicated", "group": "switchboard" },
-      "detail": "Rebuild hub/web/dist, which the hub binary embeds. Commit the result - CI fails if it is stale."
+      "detail": "Rebuild hub/web/dist, which the hub binary embeds (not committed; the Nix build makes its own)."
     },
     {
       "label": "Test: hub (go)",

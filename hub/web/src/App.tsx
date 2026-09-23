@@ -63,7 +63,7 @@ function LiveDot({ state }: { state: StreamState }) {
 
 const linkClass = ({ isActive }: { isActive: boolean }) =>
   [
-    "flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1.5 text-sm transition-colors",
+    "flex shrink-0 items-center gap-1.5 rounded px-2 py-1 text-sm transition-colors",
     isActive ? "bg-raised font-medium text-text" : "text-muted hover:bg-raised hover:text-text",
   ].join(" ");
 
@@ -107,7 +107,7 @@ export default function App() {
             indicator is pushed past the right edge and the whole page scrolls
             sideways (spec.md U2). Below sm, tab labels collapse to icons and a
             menu button opens the full list as a vertical drawer instead. */}
-        <header className="flex items-center gap-2 border-b border-border bg-surface px-3 py-2 sm:gap-3 sm:px-4">
+        <header className="flex items-center gap-2 border-b border-border bg-surface px-2 py-1 sm:gap-3 sm:px-3">
           <button
             type="button"
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-text sm:hidden"
@@ -119,7 +119,7 @@ export default function App() {
           </button>
 
           <div className="hidden shrink-0 items-center gap-2 sm:flex">
-            <span className="h-4 w-4 rounded-sm bg-accent" aria-hidden="true" />
+            <span className="h-3 w-3 rounded-sm bg-accent" aria-hidden="true" />
             <span className="text-sm font-semibold tracking-tight">mcp-switchboard</span>
           </div>
 
@@ -178,6 +178,7 @@ export default function App() {
             <Route path="/graph" element={orchestratorOnly(<GraphView />)} />
             <Route path="/graph/:agentId" element={orchestratorOnly(<GraphView />)} />
             <Route path="/prompts" element={orchestratorOnly(<PromptsView />)} />
+            <Route path="/prompts/skills/:skillId" element={orchestratorOnly(<PromptsView />)} />
             <Route path="/prompts/:profileId" element={orchestratorOnly(<PromptsView />)} />
             {/* The Agents tab became Prompts; old links and bookmarks still work. */}
             <Route path="/agents" element={<Navigate to="/prompts" replace />} />

@@ -80,6 +80,7 @@ export default function ClientBadge({
   connected,
   compact = false,
   wrap = false,
+  bare = false,
 }: {
   label: string;
   environment?: ClientEnvironment | null;
@@ -87,9 +88,11 @@ export default function ClientBadge({
   compact?: boolean;
   /** Full-width, wrapping layout with an untruncated label; see above. */
   wrap?: boolean;
+  /** Label and project only: no environment chips (they stay in the tooltip). */
+  bare?: boolean;
 }) {
   const project = environment?.project;
-  const kinds = environment?.kinds ?? [];
+  const kinds = bare ? [] : (environment?.kinds ?? []);
   return (
     <span
       className={[

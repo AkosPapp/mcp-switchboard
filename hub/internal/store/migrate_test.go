@@ -32,8 +32,8 @@ func TestMigrationsApplyToEmptyFileAndAreIdempotent(t *testing.T) {
 	if err := s.read.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatalf("reading version: %v", err)
 	}
-	if version != 8 {
-		t.Fatalf("version = %d, want 8", version)
+	if version != 9 {
+		t.Fatalf("version = %d, want 9", version)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -45,8 +45,8 @@ func TestMigrationsApplyToEmptyFileAndAreIdempotent(t *testing.T) {
 	if err := again.read.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&rows); err != nil {
 		t.Fatalf("counting migrations: %v", err)
 	}
-	if rows != 8 {
-		t.Fatalf("schema_migrations has %d rows after reopen, want 8", rows)
+	if rows != 9 {
+		t.Fatalf("schema_migrations has %d rows after reopen, want 9", rows)
 	}
 	if _, err := again.ListCalls(context.Background(), CallFilter{}); err != nil {
 		t.Fatalf("store unusable after reopen: %v", err)

@@ -218,9 +218,11 @@ describe("ChatList", () => {
     expect(screen.queryByRole("button", { name: "helper" })).toBeNull();
     expect(screen.getByTestId("client-group").getAttribute("data-client")).toBe("laptop");
     expect(screen.getAllByTestId("chat-row")).toHaveLength(2);
-    expect(screen.getByText("#x")).toBeTruthy();
-    expect(screen.getAllByText("$0.02").length).toBe(2);
-    expect(screen.getAllByText("1.5k tok").length).toBe(2);
+    // Tokens, cost and tags live in the row's tooltip, not as badges.
+    const tip = screen.getAllByTestId("chat-row")[0].querySelector("a")!.getAttribute("title")!;
+    expect(tip).toContain("1.5k tok");
+    expect(tip).toContain("$0.02");
+    expect(tip).toContain("#x");
   });
 });
 

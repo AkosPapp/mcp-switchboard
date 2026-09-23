@@ -461,7 +461,7 @@ func TestHubToolsSpeakOfChatsOnly(t *testing.T) {
 	e := newEnv(t)
 	want := map[string]bool{
 		"switchboard.chat.spawn": true, "switchboard.chat.send": true, "switchboard.chat.list": true, "switchboard.chat.stop": true,
-		"switchboard.mcp.list_tools": true,
+		"switchboard.mcp.list_tools": true, "switchboard.user.ask": true,
 	}
 	for _, ht := range e.m.HubTools() {
 		if !want[ht.Name] {

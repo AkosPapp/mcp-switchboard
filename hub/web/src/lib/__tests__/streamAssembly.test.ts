@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   draftText,
+  draftThinking,
   initialStream,
   overlayThread,
   parseFrame,
@@ -41,6 +42,17 @@ const msg = (id: string, parentId: string | null, role: Message["role"] = "assis
 });
 
 describe("streamAssembly", () => {
+  it("keeps reasoning apart from the answer", () => {
+    const s = feed([
+      frame("run_started", 1),
+      frame("delta", 2, { messageId: "m1", contentIndex: 0, text: "hmm ", kind: "thinking" }),
+      frame("delta", 3, { messageId: "m1", contentIndex: 0, text: "ok", kind: "thinking" }),
+      frame("delta", 4, { messageId: "m1", contentIndex: 1, text: "Answer" }),
+    ]);
+    expect(draftThinking(s.drafts[0])).toBe("hmm ok");
+    expect(draftText(s.drafts[0])).toBe("Answer");
+  });
+
   it("assembles deltas by messageId and content index", () => {
     const s = feed([
       frame("run_started", 1),

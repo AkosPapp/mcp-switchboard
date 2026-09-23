@@ -51,7 +51,7 @@ func TestDraftRoutes(t *testing.T) {
 	}
 	select {
 	case ev := <-ch:
-		if ev.Type != events.TypeChat || ev.ChatID != c.ID {
+		if ev.Type != events.TypeDraft || ev.ChatID != c.ID {
 			t.Fatalf("event = %+v", ev)
 		}
 	case <-time.After(2 * time.Second):

@@ -359,7 +359,7 @@ export default function ToolPanel({
           type="button"
           onClick={run}
           disabled={callTool.isPending}
-          className="rounded bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-60"
+          className="rounded bg-accent px-3 py-2 text-sm font-medium text-on-accent disabled:opacity-60"
         >
           {callTool.isPending ? "Calling…" : "Call tool"}
         </button>

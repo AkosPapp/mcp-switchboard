@@ -239,6 +239,18 @@ func (f *fakeAgents) ChatSystemPrompt(_ context.Context, id string) (*agents.Sys
 	return &agents.SystemPromptView{SystemPrompt: "sp " + id, Source: "agent", ToolCount: 2}, nil
 }
 
+func (f *fakeAgents) Answer(context.Context, string, string, []agents.QuestionAnswer) error {
+	return f.err
+}
+func (f *fakeAgents) ListSkills(context.Context) ([]store.Skill, error) { return nil, f.err }
+func (f *fakeAgents) CreateSkill(context.Context, agents.SkillInput) (*store.Skill, error) {
+	return nil, f.err
+}
+func (f *fakeAgents) UpdateSkill(context.Context, string, agents.SkillUpdate) (*store.Skill, error) {
+	return nil, f.err
+}
+func (f *fakeAgents) DeleteSkill(context.Context, string) error { return f.err }
+
 var _ agents.Service = (*fakeAgents)(nil)
 
 type orchFixture struct {

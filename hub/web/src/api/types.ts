@@ -118,7 +118,7 @@ export interface JsonSchema {
 
 /** An event from the global feed. Notifications only - never content (N3). */
 export interface ChangeEvent {
-  type: "connections" | "call" | "agent" | "graph" | "chat" | "profile";
+  type: "connections" | "call" | "agent" | "graph" | "chat" | "profile" | "skill" | "draft";
   callId?: string;
   agentId?: string;
   chatId?: string;

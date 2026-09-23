@@ -305,3 +305,44 @@ func TestServeSSEResumeAndKeepalive(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+func TestSubscribeActiveReplaysRunsInFlightOnly(t *testing.T) {
+	h := NewHub()
+	defer h.Close()
+	h.Publish("c", "done", "run_started", map[string]any{})
+	h.Publish("c", "done", "delta", map[string]any{"text": "old"})
+	h.EndRun("c", "done")
+	h.Publish("c", "live", "run_started", map[string]any{})
+	h.Publish("c", "live", "delta", map[string]any{"text": "a"})
+
+	sub := h.SubscribeActive("c")
+	defer sub.Close()
+	var got []string
+	for i := 0; i < 2; i++ {
+		f, err := sub.Next(nil, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, f.ID())
+	}
+	if got[0] != "live:1" || got[1] != "live:2" {
+		t.Fatalf("replayed %v", got)
+	}
+	h.Publish("c", "live", "delta", map[string]any{"text": "b"})
+	if f, err := sub.Next(nil, time.Second); err != nil || f.ID() != "live:3" {
+		t.Fatalf("live frame = %v %v", f.ID(), err)
+	}
+}
+
+func TestSubscribeActiveSkipsARunWhoseStartWasEvicted(t *testing.T) {
+	h := NewHubWithOptions(Options{RingFrames: 3})
+	defer h.Close()
+	for i := 0; i < 6; i++ {
+		h.Publish("c", "r", "delta", map[string]any{"text": "x"})
+	}
+	sub := h.SubscribeActive("c")
+	defer sub.Close()
+	if _, err := sub.Next(nil, 50*time.Millisecond); !errors.Is(err, ErrIdle) {
+		t.Fatalf("a run with a hole must not be replayed, got %v", err)
+	}
+}

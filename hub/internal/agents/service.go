@@ -42,6 +42,9 @@ type Service interface {
 	CancelRun(ctx context.Context, runID string) error
 	// Approve answers a pending approval (W2). ErrNotPending if none waits.
 	Approve(ctx context.Context, runID, callID string, approved bool, reason string) error
+	// Answer resolves a pending switchboard.user.ask with one answer per
+	// question. ErrNotPending if none waits, ErrInvalid on a mismatched answer.
+	Answer(ctx context.Context, runID, callID string, answers []QuestionAnswer) error
 	// PendingApprovals lists what is currently blocked, for GET /api/runs/{id}.
 	PendingApprovals(runID string) []PendingApproval
 	// AllPendingApprovals lists every pending approval across all runs, oldest
@@ -59,6 +62,12 @@ type Service interface {
 	// DeleteProfile: ErrConflict for the default (while others exist) or the
 	// only profile. Chats and agents made from it keep working (profileId nulled).
 	DeleteProfile(ctx context.Context, id string) error
+	// --- skills (agents/skills.go) ---
+	ListSkills(ctx context.Context) ([]store.Skill, error)
+	// CreateSkill: ErrInvalid on a bad name or empty body, ErrNameTaken on a clash.
+	CreateSkill(ctx context.Context, in SkillInput) (*store.Skill, error)
+	UpdateSkill(ctx context.Context, id string, in SkillUpdate) (*store.Skill, error)
+	DeleteSkill(ctx context.Context, id string) error
 	// CreateChat is the primary chat creation (docs/CHAT_MODEL_API.md): it creates
 	// the chat and its 1:1 execution record together.
 	CreateChat(ctx context.Context, in CreateChatInput) (*store.Chat, error)
@@ -145,6 +154,9 @@ type PendingApproval struct {
 	Arguments map[string]any `json:"arguments"`
 	// ExpiresAt is RFC 3339 (store.FormatTime): when W3 auto-denies.
 	ExpiresAt string `json:"expiresAt"`
+	// Questions is set instead of asking for approval when the model asked the
+	// user something (switchboard.user.ask); Answer resolves it.
+	Questions []Question `json:"questions,omitempty"`
 }
 
 // PendingApprovalDetail is one GET /api/approvals element.
@@ -224,6 +236,22 @@ type ProfileUpdate struct {
 	Approval     *string
 	Budget       json.RawMessage
 	IsDefault    *bool
+}
+
+// SkillInput creates a skill. Name (a slug) and Body are required.
+type SkillInput struct {
+	Name        string
+	Description string
+	Body        string
+	Auto        bool
+}
+
+// SkillUpdate is a partial skill update; nil fields are left alone.
+type SkillUpdate struct {
+	Name        *string
+	Description *string
+	Body        *string
+	Auto        *bool
 }
 
 // CreateChatInput is POST /api/chats' primary form. Prompt source: ProfileID

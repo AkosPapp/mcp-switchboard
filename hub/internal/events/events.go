@@ -30,6 +30,9 @@ const (
 	TypeGraph       = "graph"
 	TypeChat        = "chat"
 	TypeProfile     = "profile"
+	TypeSkill       = "skill"
+	// TypeDraft: a chat's composer draft was saved (in this or another tab).
+	TypeDraft = "draft"
 )
 
 // Event is one notification. The optional ids let a subscriber refetch only the

@@ -9,6 +9,9 @@ import { useChat, useInvalidateChat } from "./api";
 import ChatDialog from "./ChatDialog";
 import ChatList from "./ChatList";
 import ChatThread from "./ChatThread";
+import OverviewPanel from "./OverviewPanel";
+import { useStoredState } from "../../hooks/useStoredState";
+import { isBoolean } from "../../lib/uiMemory";
 
 /**
  * Sizes the view to the space under the app header in dvh, so the composer is
@@ -55,6 +58,9 @@ export default function ChatView() {
   // Below md the list is a slide-over; with nothing to show in the main panel
   // (no chat chosen and not composing one) it is the page instead.
   const [drawer, setDrawer] = useState(false);
+  // The overview sits on the right, like a member list: a column from md up,
+  // a slide-over below it. Remembered by the browser.
+  const [overviewOpen, setOverviewOpen] = useStoredState("chat.overview", false, isBoolean);
   const listOpen = drawer || (!chatId && !creating);
   // ChatView only ever mounts once the orchestrator is confirmed on (App.tsx's
   // orchestratorOnly), so attention tracking can run unconditionally here.
@@ -101,13 +107,34 @@ export default function ChatView() {
               }}
             />
           ) : chatId ? (
-            <ChatThread key={chatId} chatId={chatId} onOpenList={() => setDrawer(true)} />
+            <ChatThread
+              key={chatId}
+              chatId={chatId}
+              onOpenList={() => setDrawer(true)}
+              overviewOpen={overviewOpen}
+              onToggleOverview={() => setOverviewOpen(!overviewOpen)}
+            />
           ) : (
             <div className="hidden h-full items-center justify-center p-6 text-sm text-muted md:flex">
               Select a chat, or start a new one.
             </div>
           )}
         </section>
+        {chatId && !creating && overviewOpen ? (
+          <>
+            <div
+              className="fixed inset-0 z-20 bg-text/40 md:hidden"
+              onClick={() => setOverviewOpen(false)}
+              aria-hidden="true"
+            />
+            <aside
+              aria-label="overview"
+              className="absolute inset-y-0 right-0 z-30 w-[88%] max-w-sm border-l border-border md:static md:z-auto md:w-[26rem] md:max-w-none md:shrink-0 lg:w-[34rem] xl:w-[42rem]"
+            >
+              <OverviewPanel key={chatId} chatId={chatId} onSelected={() => window.matchMedia("(max-width: 767px)").matches && setOverviewOpen(false)} />
+            </aside>
+          </>
+        ) : null}
       </div>
     </AttentionContext.Provider>
   );

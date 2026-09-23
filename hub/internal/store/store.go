@@ -165,6 +165,7 @@ type Store interface {
 	GrantStore
 	RunStore
 	ProfileStore
+	SkillStore
 	DraftStore
 	PushStore
 

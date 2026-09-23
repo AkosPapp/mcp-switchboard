@@ -147,7 +147,7 @@ export default function Settings() {
             onClick={() => void onToggle(!enabled)}
             className={[
               "min-h-[44px] shrink-0 rounded-full px-4 text-sm font-medium transition-colors",
-              enabled ? "bg-accent text-white" : "bg-raised text-muted",
+              enabled ? "bg-accent text-on-accent" : "bg-raised text-muted",
               disabled ? "cursor-not-allowed opacity-50" : "hover:opacity-90",
             ].join(" ")}
           >
