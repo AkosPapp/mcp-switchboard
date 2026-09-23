@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { ApiError } from "../../api/client";
+import { AttentionContext, useAttentionState } from "../../hooks/useAttention";
 import { forgetTab } from "../../lib/routeMemory";
 import { useChat, useInvalidateChat } from "./api";
 
@@ -55,54 +56,59 @@ export default function ChatView() {
   // (no chat chosen and not composing one) it is the page instead.
   const [drawer, setDrawer] = useState(false);
   const listOpen = drawer || (!chatId && !creating);
+  // ChatView only ever mounts once the orchestrator is confirmed on (App.tsx's
+  // orchestratorOnly), so attention tracking can run unconditionally here.
+  const attention = useAttentionState(true, chatId ?? null, (id) => navigate(`/chat/${id}`));
 
   return (
-    <div ref={ref} className="relative flex min-h-0 overflow-hidden" data-testid="chat-view">
-      {listOpen ? (
-        <div
-          className="fixed inset-0 z-20 bg-text/40 md:hidden"
-          onClick={() => setDrawer(false)}
-          aria-hidden="true"
-          hidden={!chatId}
-        />
-      ) : null}
-      <aside
-        aria-label="chats"
-        className={`${
-          listOpen ? "translate-x-0" : "-translate-x-full"
-        } absolute inset-y-0 left-0 z-30 w-[88%] max-w-sm border-r border-border transition-transform md:static md:z-auto md:w-80 md:max-w-none md:shrink-0 md:translate-x-0`}
-      >
-        <ChatList
-          activeId={chatId ?? null}
-          onNavigate={() => setDrawer(false)}
-          onNewChat={(client) => {
-            setCreating({ client });
-            setDrawer(false);
-          }}
-        />
-      </aside>
-      <section className="min-w-0 flex-1">
-        {creating ? (
-          <ChatDialog
-            key={creating.client ?? "none"}
-            variant="panel"
-            defaultClient={creating.client}
-            onClose={() => setCreating(null)}
-            onSaved={(chat) => {
-              setCreating(null);
-              invalidate();
+    <AttentionContext.Provider value={attention}>
+      <div ref={ref} className="relative flex min-h-0 overflow-hidden" data-testid="chat-view">
+        {listOpen ? (
+          <div
+            className="fixed inset-0 z-20 bg-text/40 md:hidden"
+            onClick={() => setDrawer(false)}
+            aria-hidden="true"
+            hidden={!chatId}
+          />
+        ) : null}
+        <aside
+          aria-label="chats"
+          className={`${
+            listOpen ? "translate-x-0" : "-translate-x-full"
+          } absolute inset-y-0 left-0 z-30 w-[88%] max-w-sm border-r border-border transition-transform md:static md:z-auto md:w-80 md:max-w-none md:shrink-0 md:translate-x-0`}
+        >
+          <ChatList
+            activeId={chatId ?? null}
+            onNavigate={() => setDrawer(false)}
+            onNewChat={(client) => {
+              setCreating({ client });
               setDrawer(false);
-              navigate(`/chat/${chat.id}`);
             }}
           />
-        ) : chatId ? (
-          <ChatThread key={chatId} chatId={chatId} onOpenList={() => setDrawer(true)} />
-        ) : (
-          <div className="hidden h-full items-center justify-center p-6 text-sm text-muted md:flex">
-            Select a chat, or start a new one.
-          </div>
-        )}
-      </section>
-    </div>
+        </aside>
+        <section className="min-w-0 flex-1">
+          {creating ? (
+            <ChatDialog
+              key={creating.client ?? "none"}
+              variant="panel"
+              defaultClient={creating.client}
+              onClose={() => setCreating(null)}
+              onSaved={(chat) => {
+                setCreating(null);
+                invalidate();
+                setDrawer(false);
+                navigate(`/chat/${chat.id}`);
+              }}
+            />
+          ) : chatId ? (
+            <ChatThread key={chatId} chatId={chatId} onOpenList={() => setDrawer(true)} />
+          ) : (
+            <div className="hidden h-full items-center justify-center p-6 text-sm text-muted md:flex">
+              Select a chat, or start a new one.
+            </div>
+          )}
+        </section>
+      </div>
+    </AttentionContext.Provider>
   );
 }

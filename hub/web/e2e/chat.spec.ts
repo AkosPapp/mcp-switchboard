@@ -1,6 +1,6 @@
 import { expect, test, type APIRequestContext, type Locator } from "@playwright/test";
 
-import { makeChat as makeChatWith } from "./fixtures";
+import { makeChat as makeChatWith, openHeaderAction } from "./fixtures";
 
 /**
  * One chat, end to end, against the shipped hub and a mock OpenAI-compatible
@@ -119,7 +119,7 @@ test("the Tools panel lists the chat's tools", async ({ page, request }) => {
     }),
   );
   await page.goto(`/chat/${chat.id}`);
-  await page.getByRole("button", { name: "Tools", exact: true }).click();
+  await openHeaderAction(page, "Tools");
   const panel = page.getByRole("dialog", { name: "tools this chat can use" });
   await expect(panel.getByText(/client offline/i)).toBeVisible();
   await expect(panel.getByText("switchboard.chat.spawn")).toBeVisible();

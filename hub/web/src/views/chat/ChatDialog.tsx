@@ -140,6 +140,7 @@ export default function ChatDialog({
       role={panel ? undefined : "dialog"}
       aria-modal={panel ? undefined : "true"}
       aria-label={panel ? undefined : heading}
+      data-testid={panel ? "new-chat-panel" : undefined}
       onSubmit={(e) => void submit(e)}
       className={
         panel

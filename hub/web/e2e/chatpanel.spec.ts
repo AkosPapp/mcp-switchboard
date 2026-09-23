@@ -1,11 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { LABEL, makeChat, MOCK_MODEL } from "./fixtures";
+import { LABEL, makeChat, MOCK_MODEL, openHeaderAction } from "./fixtures";
 
 /**
  * The Chat panel's model (docs/CHAT_MODEL_API.md, spec.md U37 and U50-U52):
  * client groups -> chats -> the chats they spawned; a chat has a title, a prompt
- * and one client, chosen in one dialog and changeable later from its header;
+ * and one client, chosen in one form and changeable later from its header;
  * chats reach each other by injecting messages, which the thread renders apart
  * from what the human typed. Real hub and real client throughout (desktop and
  * phone); only the environment chips and the injected messages are mocked,
@@ -56,7 +56,7 @@ test("New chat: a prompt and a client, chosen in one dialog", async ({ page, req
 
   await page.goto("/chat");
   await page.getByRole("button", { name: "New chat", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "New chat" });
+  const dialog = page.getByTestId("new-chat-panel");
   await dialog.getByLabel("Title").fill(title);
   await dialog.getByLabel("System prompt").selectOption({ label: profileName });
   await expect(dialog.getByText(/Follows the prompt/)).toBeVisible();
@@ -77,7 +77,7 @@ test("New chat: a prompt and a client, chosen in one dialog", async ({ page, req
 
   // The viewer shows what the model gets, and where it comes from.
   await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: "System prompt" }).click();
+  await openHeaderAction(page, "System prompt");
   const panel = page.getByRole("dialog", { name: "system prompt for this chat" });
   await expect(panel.getByTestId("prompt-source")).toHaveText(`from prompt ${profileName}`);
   await expect(panel.getByTestId("prompt-text")).toContainText(marker);
@@ -91,7 +91,7 @@ test("New chat with None and None: a No client group, no system prompt", async (
   const posted = capturePost(page);
   await page.goto("/chat");
   await page.getByRole("button", { name: "New chat", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "New chat" });
+  const dialog = page.getByTestId("new-chat-panel");
   await dialog.getByLabel("Title").fill(title);
   await dialog.getByLabel("System prompt").selectOption({ label: "None (no system prompt)" });
   await dialog.getByRole("radio", { name: /^None/ }).check();
@@ -109,7 +109,7 @@ test("New chat with None and None: a No client group, no system prompt", async (
   await closeList(page);
 
   await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: "System prompt" }).click();
+  await openHeaderAction(page, "System prompt");
   const panel = page.getByRole("dialog", { name: "system prompt for this chat" });
   await expect(panel.getByTestId("prompt-source")).toHaveText("none — no system prompt is sent");
 });
@@ -120,7 +120,7 @@ test("New chat with a Custom prompt sends its own text and no profile", async ({
   const posted = capturePost(page);
   await page.goto("/chat");
   await page.getByRole("button", { name: "New chat", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "New chat" });
+  const dialog = page.getByTestId("new-chat-panel");
   await dialog.getByLabel("Title").fill(title);
   await dialog.getByLabel("System prompt").selectOption({ label: "Custom…" });
   await dialog.getByLabel("Custom system prompt").fill(text);
@@ -130,7 +130,7 @@ test("New chat with a Custom prompt sends its own text and no profile", async ({
   expect(posted.body).toEqual({ title, profileId: null, systemPrompt: text, clientLabel: LABEL });
 
   await expect(page.getByTestId("chat-chips").getByText("custom prompt")).toBeVisible();
-  await page.getByRole("button", { name: "System prompt" }).click();
+  await openHeaderAction(page, "System prompt");
   const panel = page.getByRole("dialog", { name: "system prompt for this chat" });
   await expect(panel.getByTestId("prompt-source")).toHaveText("this chat's own prompt");
   await expect(panel.getByTestId("prompt-text")).toHaveText(text);
@@ -140,7 +140,7 @@ test("a client group's + chat preselects that client", async ({ page, request })
   await makeChat(request, `grp-${run}`);
   await page.goto("/chat");
   await group(page, LABEL).getByRole("button", { name: `new chat for ${LABEL}` }).click();
-  const dialog = page.getByRole("dialog", { name: "New chat" });
+  const dialog = page.getByTestId("new-chat-panel");
   await expect(dialog.getByRole("radio", { name: LABEL, exact: true })).toBeChecked();
   await expect(dialog.getByLabel("System prompt")).not.toHaveValue("");
   await dialog.getByRole("button", { name: "Cancel" }).click();
@@ -154,7 +154,7 @@ test("the header Settings change a chat's prompt, client and title with the same
   await page.goto(`/chat/${chat.id}`);
   await expect(page.getByTestId("chat-chips").getByText("no client")).toBeVisible();
 
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await openHeaderAction(page, "Settings");
   const dialog = page.getByRole("dialog", { name: "Chat settings" });
   await dialog.getByLabel("Title").fill(`set-renamed-${run}`);
   await dialog.getByLabel("System prompt").selectOption({ label: profileName });
@@ -369,7 +369,7 @@ test("the client shows its project and environment in the group header and the p
   await expect(head).toHaveAttribute("title", /workspace: \/work\/proj/);
 
   await page.getByRole("button", { name: "New chat", exact: true }).click();
-  const option = page.getByRole("dialog", { name: "New chat" }).getByRole("radio", { name: LABEL, exact: true }).locator("xpath=ancestor::label");
+  const option = page.getByTestId("new-chat-panel").getByRole("radio", { name: LABEL, exact: true }).locator("xpath=ancestor::label");
   await expect(option).toContainText(`proj-${run}`);
   await expect(option.getByText("direnv")).toBeVisible();
   await expect(option.getByText("connected", { exact: true })).toBeVisible();
@@ -378,12 +378,12 @@ test("the client shows its project and environment in the group header and the p
 test("has no horizontal page scroll with the dialog and the prompt panel open", async ({ page, request }) => {
   const chat = await makeChat(request, `wide-${run}`);
   await page.goto(`/chat/${chat.id}`);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await openHeaderAction(page, "Settings");
   await expect(page.getByRole("dialog", { name: "Chat settings" })).toBeVisible();
   let overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: "System prompt" }).click();
+  await openHeaderAction(page, "System prompt");
   await expect(page.getByRole("dialog", { name: "system prompt for this chat" })).toBeVisible();
   overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);

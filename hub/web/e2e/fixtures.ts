@@ -260,3 +260,19 @@ export async function makeChat(
   if (response.status() !== 201) throw new Error(`create chat: ${response.status()} ${await response.text()}`);
   return (await response.json()) as { id: string; agentId: string; parentChatId: string | null; title: string };
 }
+
+/**
+ * Opens one of the thread header's actions ("Settings", "System prompt",
+ * "Tools"): a direct button on desktop, but tucked behind the "⋯" chat menu
+ * on a phone (ChatThread.tsx hides them below md to keep the header from
+ * wrapping).
+ */
+export async function openHeaderAction(page: import("@playwright/test").Page, name: string) {
+  const button = page.getByRole("button", { name, exact: true });
+  if (await button.isVisible().catch(() => false)) {
+    await button.click();
+    return;
+  }
+  await page.getByRole("button", { name: "chat menu" }).click();
+  await page.getByRole("menuitem", { name, exact: true }).click();
+}
