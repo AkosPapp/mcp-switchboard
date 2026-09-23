@@ -30,7 +30,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-asyncio>=0.23"]
+test = [
+    "pytest",
+    "pytest-asyncio>=0.23",
+    # Not used by the client itself - only by tests/test_end_to_end.py, which
+    # calls the hub's console API and MCP endpoint over real HTTP. It lives here
+    # rather than in its own workspace member because tests/ isn't packaged.
+    "httpx",
+]
 
 [tool.uv.sources]
 mcp-switchboard-server-harness = { workspace = true }
