@@ -22,6 +22,9 @@ Run these before committing changes under `hub/`:
   Do this whenever a commit touches `hub/go.mod` or `hub/go.sum`, then confirm
   with `nix flake check`.
 
+- `cd hub && gofmt -l .` must print nothing — CI runs this separately from
+  `go vet`/`go test` and fails the build on any unformatted file. Fix with
+  `gofmt -w <file>`.
 - `cd hub && go build ./... && go vet ./... && go test ./...`
 - `nix flake check` (needs Nix; covers the Go build, the NixOS module, and the VM test)
 
