@@ -57,23 +57,35 @@ test("shows chats as a tree with sub-chats below parents and opens the panel", a
 // coordinate-based hit-testing (exactly the thing under test - does a real
 // click at that pixel land on the node's handle or fall through to the
 // pane), so unlike the edge-click test below it can't paper over the shared
-// hub's growing clutter with a dispatchEvent.
-//
-// Desktop only: the pan-then-zoom dance below reliably compensates for the
-// shared hub's clutter (see fixtures.ts - one hub for the whole run, both
-// projects), but this file's mobile project also emulates a touchscreen
-// (Playwright's Pixel 7 device), and at the very deep pan/zoom this suite's
-// accumulated cross-project state can require, that combination occasionally
-// leaves the final mouse-emulated drag not landing the connection even
-// though every coordinate checks out (verified directly, interactively, in
-// isolation - a fresh graph with just this pair - that mobile drag-to-connect
-// itself works: this is a coordinate-precision problem in a heavily crowded,
-// deeply zoomed shared-state test canvas, not a product bug).
-test("dragging from one node to another creates a communication edge instead of panning", async ({ page, request }, info) => {
-  test.skip(info.project.name === "mobile", "flaky under this run's cross-project clutter; see comment above");
+// hub's growing clutter with a dispatchEvent - instead it trims its own view
+// of /api/graph down to just its three agents (below), so the pan/zoom dance
+// that finds room for the drag has a small, uncrowded canvas to work with
+// regardless of how much the shared hub has accumulated from the rest of the
+// run.
+test("dragging from one node to another creates a communication edge instead of panning", async ({ page, request }) => {
   const root = await makeChat(request, name("dgroot"));
   const a = await makeChat(request, name("dga"), { parentChatId: root.id });
   const b = await makeChat(request, name("dgb"), { parentChatId: root.id });
+
+  // The shared hub accumulates agents from every spec in the whole run (one
+  // hub for the whole suite - see fixtures.ts), which used to force this test
+  // into a pan/zoom hunt for enough on-screen space between its own two nodes,
+  // occasionally not finding it. Trim the live /api/graph response down to
+  // just this test's own three agents (and edges between them) instead of
+  // trying to out-zoom however much clutter happens to exist: the canvas this
+  // test cares about is small and uncrowded by construction, the drag it
+  // performs and the PUT it waits for are still the real thing.
+  const ids = new Set([root.agentId, a.agentId, b.agentId]);
+  await page.route("**/api/graph", async (route) => {
+    const real = await route.fetch();
+    const body = (await real.json()) as {
+      agents: { id: string }[];
+      edges: { fromAgentId: string; toAgentId: string }[];
+    };
+    body.agents = body.agents.filter((ag) => ids.has(ag.id));
+    body.edges = body.edges.filter((e) => ids.has(e.fromAgentId) && ids.has(e.toAgentId));
+    await route.fulfill({ response: real, json: body });
+  });
 
   await page.goto("/graph");
   const nodeA = node(page, a);
