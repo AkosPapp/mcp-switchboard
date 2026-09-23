@@ -344,13 +344,13 @@ type Message struct {
 	Role     string
 	// Content, ToolCalls, ToolResults and Model are provider-neutral JSON owned
 	// by the orchestrator; nil ToolCalls/ToolResults/Model are stored as NULL.
-	Content      json.RawMessage
-	ToolCalls    json.RawMessage
-	ToolResults  json.RawMessage
-	TokenInput   int64
-	TokenOutput  int64
-	CostMicros   int64
-	LatencyMs    int64
+	Content     json.RawMessage
+	ToolCalls   json.RawMessage
+	ToolResults json.RawMessage
+	TokenInput  int64
+	TokenOutput int64
+	CostMicros  int64
+	LatencyMs   int64
 	// Model is the full turn options actually sent (provider, model,
 	// max_tokens, temperature, thinking) - not just {provider, model} - set
 	// on the assistant message a turn produced.
