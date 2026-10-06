@@ -59,6 +59,8 @@ export function applyEvent(cache: QueryClient, event: ChangeEvent) {
         // Another chat may have injected a message into this one.
         cache.invalidateQueries({ queryKey: ["chatMessages", event.chatId] });
         cache.invalidateQueries({ queryKey: ["chat", event.chatId] });
+        // The agent rewrote its plan list (switchboard.todo.write).
+        cache.invalidateQueries({ queryKey: ["chatTodos", event.chatId] });
       }
       cache.invalidateQueries({ queryKey: ["approvals"] });
       cache.invalidateQueries({ queryKey: ["chats"] });

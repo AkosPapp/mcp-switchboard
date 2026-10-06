@@ -5,7 +5,7 @@ import { Link } from "react-router-dom";
 import CopyButton from "../../components/CopyButton";
 import { siblingTarget } from "../../lib/dag";
 import { draftText, draftThinking, type Draft } from "../../lib/streamAssembly";
-import { formatCost, formatTokens, messageText } from "./format";
+import { costLabel, formatTokens, messageText } from "./format";
 import ToolCard, { type ToolCardData } from "./ToolCard";
 import type { ContentBlock, Message, MessageSender, ModelInfo } from "./types";
 import { ModelPicker, modelKey } from "../../lib/models";
@@ -288,7 +288,8 @@ function HumanOrAssistantMessage({ message, tools, actions }: Props) {
         {!isUser && message.model?.model ? <ReplyModel message={message} actions={actions} /> : null}
         {!isUser && (message.tokenOutput || message.tokenInput) ? (
           <span className="px-1">
-            {formatTokens(message.tokenInput)}→{formatTokens(message.tokenOutput)} · {formatCost(message.costMicros)}
+            {formatTokens(message.tokenInput)}→{formatTokens(message.tokenOutput)}
+            {costLabel(message.costMicros) ? ` · ${costLabel(message.costMicros)}` : null}
           </span>
         ) : null}
       </div>

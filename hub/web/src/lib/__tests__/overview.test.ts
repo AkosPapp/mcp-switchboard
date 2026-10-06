@@ -48,3 +48,34 @@ describe("buildOverview", () => {
     expect(o.nodes.find((n) => n.id === "a1")!.snippet).toBe("used tools");
   });
 });
+
+describe("buildOverview run grouping (improvements I9)", () => {
+  const m = (id: string, parent: string | null, model: string) =>
+    msg(id, parent, "assistant", id, { model: { provider: "p", model } });
+
+  it("collapses one run's same-model tool turns into a single node", () => {
+    const run = [
+      msg("u1", null, "user"),
+      m("a1", "u1", "sonnet"),
+      m("a2", "a1", "sonnet"),
+      m("a3", "a2", "sonnet"),
+    ];
+    const o = buildOverview(run, "a3");
+    expect(o.nodes.map((n) => n.id)).toEqual(["u1", "a3"]);
+    expect(o.nodes[1].snippet).toContain("3 steps");
+    expect(o.edges).toEqual([{ id: "u1->a3", source: "u1", target: "a3", active: true }]);
+  });
+
+  it("splits a new node when the model switches mid-thread", () => {
+    const run = [msg("u1", null, "user"), m("a1", "u1", "sonnet"), m("a2", "a1", "haiku"), m("a3", "a2", "haiku")];
+    const o = buildOverview(run, "a3");
+    expect(o.nodes.map((n) => n.id)).toEqual(["u1", "a1", "a3"]);
+    expect(o.nodes.map((n) => n.label)).toEqual(["You", "sonnet", "haiku"]);
+  });
+
+  it("keeps regenerated branches apart (one message, many models)", () => {
+    const run = [msg("u1", null, "user"), m("a1", "u1", "sonnet"), m("a2", "u1", "sonnet")];
+    const o = buildOverview(run, "a2");
+    expect(o.nodes.map((n) => n.id).sort()).toEqual(["a1", "a2", "u1"]);
+  });
+});

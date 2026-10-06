@@ -68,4 +68,32 @@ describe("TruncationWarning", () => {
     render(<BudgetMeter budget={{ max_tokens: 100 }} usage={{}} />);
     expect(screen.getByTestId("budget-meter")).toBeTruthy();
   });
+  it("the budget meter reads the hub's camelCase usage and has no turns figure", () => {
+    render(
+      <BudgetMeter
+        budget={{ max_turns: 32, max_tokens: 1_000_000, max_cost_micros: 5_000_000 }}
+        usage={{ turns: 4, tokens: 126_000, costMicros: 2_500_000, contextTokens: 23_600, contextWindow: 32_768 }}
+      />,
+    );
+    const meters = screen.getAllByRole("meter").map((m) => m.getAttribute("aria-label"));
+    expect(meters).toEqual(["context", "tokens", "cost"]);
+    expect(screen.getByRole("meter", { name: "cost" }).getAttribute("aria-valuenow")).toBe("2500000");
+    expect(screen.getByRole("meter", { name: "context" }).getAttribute("aria-valuenow")).toBe("23600");
+    expect(screen.getByRole("meter", { name: "tokens" }).getAttribute("aria-valuenow")).toBe("126000");
+    expect(screen.queryByText(/turns/)).toBeNull();
+  });
+  it("the truncation warning names the last prompt's size", () => {
+    render(<TruncationWarning usage={{ truncated: true, contextWindow: 32768, contextTokens: 32000 }} />);
+    expect(screen.getByRole("alert").textContent).toContain("Last prompt: 32,000 tokens");
+  });
+});
+
+import { costLabel, formatCost } from "../../views/chat/format";
+
+describe("costLabel", () => {
+  it("hides cost entirely for a free (or unpriced) model", () => {
+    expect(costLabel(0)).toBe("");
+    expect(costLabel(2_500_000)).toBe("$2.50");
+    expect(formatCost(0)).toBe("$0");
+  });
 });

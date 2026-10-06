@@ -34,6 +34,8 @@ import { newKey } from "./idempotency";
 import MessageView, { DraftView, type MessageActions } from "./MessageView";
 import SystemPromptPanel from "./SystemPromptPanel";
 import ToolsPanel from "./ToolsPanel";
+import FilesPanel from "./FilesPanel";
+import TodoPanel from "./TodoPanel";
 import ToolCard, { type ToolCardData } from "./ToolCard";
 import { ACTIVE_RUN, type ContentBlock, type Message, type ModelInfo, type Question } from "./types";
 
@@ -260,6 +262,15 @@ export default function ChatThread({
       : "no prompt";
   const clientLabel = chat.data?.clientLabel ?? null;
   const clientConn = connections.data?.connections.find((c) => c.label === clientLabel);
+  const setEffort = async (effort: string) => {
+    try {
+      await patchChat(chatId, { effort });
+      invalidate();
+    } catch (error) {
+      fail(error);
+    }
+  };
+
   const removeChat = async () => {
     try {
       const { deletedChats } = await deleteChat(chatId);
@@ -279,8 +290,8 @@ export default function ChatThread({
           <div className="flex items-baseline gap-2">
             <h1 className="truncate text-sm font-medium">{title}</h1>
             <span className="hidden shrink-0 truncate text-xs text-muted sm:inline">
-              {agent.data ? modelLabel(agent.data.model) : ""}
-              {connection !== "live" ? `${agent.data ? " · " : ""}stream ${connection}` : ""}
+              {modelLabel(chat.data?.model ?? agent.data?.model)}
+              {connection !== "live" ? ` · stream ${connection}` : ""}
             </span>
           </div>
           {chat.data ? (
@@ -547,6 +558,9 @@ export default function ChatThread({
       {promptOpen ? <SystemPromptPanel chatId={chatId} onClose={() => setPromptOpen(false)} /> : null}
       {toolsOpen ? <ToolsPanel chatId={chatId} onClose={() => setToolsOpen(false)} /> : null}
 
+      <TodoPanel chatId={chatId} />
+      <FilesPanel messages={messages} />
+
       {queue.length > 0 ? (
         <ul className="shrink-0 space-y-1 border-t border-border bg-surface px-3 pt-2" data-testid="message-queue">
           {queue.map((q, i) => (
@@ -602,7 +616,9 @@ export default function ChatThread({
         budget={run.data?.budgetSnapshot ?? agent.data?.budget}
         usage={run.data?.usage ?? {}}
         onSend={send}
-        defaultModel={agent.data?.model}
+        defaultModel={chat.data?.model ?? agent.data?.model}
+        chatEffort={chat.data?.effort ?? ""}
+        onEffortChange={(effort) => void setEffort(effort)}
         onStop={() => {
           if (lastRunId) cancelRun(lastRunId).then(refresh, fail);
         }}

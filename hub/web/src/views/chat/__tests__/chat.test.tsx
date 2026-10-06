@@ -205,6 +205,22 @@ describe("ApprovalCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Deny" }));
     expect(decide).toHaveBeenCalledWith(false);
   });
+
+  it("shows the irreversible reason when the guard carries one (W10)", () => {
+    const expiresAt = new Date(Date.now() + 90_000).toISOString();
+    renderView(
+      <ApprovalCard
+        runId="r1"
+        callId="c1"
+        tool="git_push"
+        arguments={{}}
+        expiresAt={expiresAt}
+        reason="a push moves a branch on someone else's machine"
+        onDecide={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("approval-reason").textContent).toContain("someone else's machine");
+  });
 });
 
 describe("ChatList", () => {

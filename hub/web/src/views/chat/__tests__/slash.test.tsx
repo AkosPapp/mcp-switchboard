@@ -59,3 +59,10 @@ describe("Composer slash menu", () => {
     expect(screen.queryByTestId("slash-menu")).toBeNull();
   });
 });
+
+describe("hub slash commands", () => {
+  it("offers compact and the optimize_skills unlock", async () => {
+    const { CHAT_COMMANDS } = await import("../Composer");
+    expect(CHAT_COMMANDS.map((c) => c.name)).toEqual(["compact", "optimize_skills"]);
+  });
+});

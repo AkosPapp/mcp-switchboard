@@ -85,6 +85,18 @@ export interface Chat {
   clientLabel?: string | null;
   /** The chat that spawned this one; the console nests it under that chat. */
   parentChatId?: string | null;
+  /** Conversation preferences (per-chat overrides applied to every turn). */
+  model?: { provider?: string; model?: string } | null;
+  contextLimit?: number;
+  approval?: string;
+  autoApprove?: boolean;
+  effort?: string;
+  hasSummary?: boolean;
+  /** The agent's persistent notes for this chat (switchboard.note.*). */
+  notes?: string;
+  /** True between /optimize_skills and /optimize_skills off (gated tools). */
+  optimize?: boolean;
+  summarizedAt?: string | null;
 }
 
 /** POST /api/chats (docs/CHAT_MODEL_API.md). */
@@ -97,6 +109,11 @@ export interface CreateChatInput {
   clientLabel: string | null;
   model?: object;
   parentChatId?: string;
+  /** Initial conversation preferences. */
+  contextLimit?: number;
+  approval?: string;
+  autoApprove?: boolean;
+  effort?: string;
 }
 
 export interface ToolAnnotations {
@@ -181,6 +198,9 @@ export interface PendingApproval {
   tool: string;
   arguments: unknown;
   expiresAt: Ts;
+  /** Set when the W1a irreversible gate caught the call: the server's own
+  explanation of why this cannot be undone from here. */
+  reason?: string;
   /** Set when the run waits for answers rather than an approval. */
   questions?: Question[];
 }
@@ -212,5 +232,6 @@ export interface ApprovalItem {
   tool: string;
   arguments: unknown;
   expiresAt: Ts;
+  reason?: string;
   questions?: Question[];
 }

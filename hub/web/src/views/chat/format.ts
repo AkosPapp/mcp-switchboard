@@ -1,5 +1,11 @@
 /** Small formatters for the chat badges. Money is integer micros (L5). */
 
+/** Cost text for a message: a genuinely free (or unpriced) model shows
+ * nothing at all — a constant "$0" line pretended to be information. */
+export function costLabel(micros: number): string {
+  return micros ? formatCost(micros) : "";
+}
+
 export function formatCost(micros: number): string {
   if (!micros) return "$0";
   const dollars = micros / 1_000_000;

@@ -236,6 +236,10 @@ export interface ModelInfo {
   prices?: Record<string, unknown>;
   contextWindow?: number;
   supportsTools?: boolean;
+  /** Prices were declared (a free model says so; an unpriced model shows no cost). */
+  priced?: boolean;
+  /** The model accepts image content blocks. */
+  supportsImages?: boolean;
   /** Found from the provider rather than declared in the models file. */
   discovered?: boolean;
 }

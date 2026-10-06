@@ -9,13 +9,14 @@ interface Props {
   tool: string;
   arguments: unknown;
   expiresAt: string;
+  reason?: string;
   /** Resolves when the decision is sent (or failed and was reported); the parent removes the card at once (U31). */
   onDecide: (approved: boolean) => void | Promise<void>;
   busy?: boolean;
 }
 
 /** A run blocked on a human decision, with the time left before auto-deny (U10). */
-export default function ApprovalCard({ tool, arguments: args, expiresAt, onDecide, busy = false }: Props) {
+export default function ApprovalCard({ tool, arguments: args, expiresAt, reason, onDecide, busy = false }: Props) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -42,6 +43,11 @@ export default function ApprovalCard({ tool, arguments: args, expiresAt, onDecid
           {left > 0 ? `auto-deny in ${clock(left)}` : "expired"}
         </span>
       </div>
+      {reason && (
+        <p className="mt-1 text-xs text-warn" data-testid="approval-reason">
+          {reason}
+        </p>
+      )}
       <Json value={args} className="mt-2 max-h-64" />
       <div className="mt-2 flex gap-2">
         <button

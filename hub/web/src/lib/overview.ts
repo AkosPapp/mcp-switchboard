@@ -53,6 +53,56 @@ function snippetOf(m: Message): string {
   return text.length > SNIPPET_MAX ? `${text.slice(0, SNIPPET_MAX)}…` : text;
 }
 
+/** What model produced a message (the group split signal, item 9). */
+function modelOf(m: Message): string {
+  return m.model?.provider || m.model?.model ? `${m.model.provider ?? ""}/${m.model.model ?? ""}` : "";
+}
+
+/**
+ * Collapse a run's consecutive same-model assistant messages into one turn
+ * node ("don't create a new child for every mcp call, just when I change a
+ * prompt or switch a model", docs/improvements.md I9). Inside one run the
+ * model answers, calls tools, and answers again — in the overview that must
+ * read as one turn. The node is keyed by the group's LAST message, so
+ * clicking it lands on the newest part of the run.
+ */
+interface Turn {
+  ids: string[];
+  role: "user" | "assistant";
+  model: string;
+  first: Message;
+  last: Message;
+}
+
+function groupTurns(kept: Message[], shownParent: (m: Message) => string | null, byId: Map<string, Message>): Turn[] {
+  const turns: Turn[] = [];
+  const turnByMsg = new Map<string, Turn>();
+  const childrenOf = new Map<string, number>();
+  for (const m of kept) {
+    const parent = turnByMsg.get(m.parentId ?? "") ?? null;
+    const sameRunAsst =
+      m.role === "assistant" &&
+      parent !== null &&
+      parent.role === "assistant" &&
+      parent.model === modelOf(m) &&
+      (childrenOf.get(parent.last.id) ?? 0) === 0 &&
+      m.parentId === parent.last.id;
+    if (sameRunAsst && parent) {
+      parent.ids.push(m.id);
+      parent.last = m;
+      turnByMsg.set(m.id, parent);
+    } else {
+      const t: Turn = { ids: [m.id], role: m.role as "user" | "assistant", model: modelOf(m), first: m, last: m };
+      turns.push(t);
+      turnByMsg.set(m.id, t);
+    }
+    const parentMsg = shownParent(m);
+    if (parentMsg) childrenOf.set(parentMsg, (childrenOf.get(parentMsg) ?? 0) + 1);
+  }
+  void byId;
+  return turns;
+}
+
 export function buildOverview(messages: readonly Message[], activeLeafId: string | null): Overview {
   const tree = indexTree([...messages]);
   const shown = (m: Message) => m.role === "user" || m.role === "assistant";
@@ -71,36 +121,51 @@ export function buildOverview(messages: readonly Message[], activeLeafId: string
   };
 
   const kept = messages.filter(shown);
+  const turns = groupTurns(kept, shownParent, tree.byId);
+  const turnOf = new Map<string, Turn>();
+  for (const t of turns) for (const id of t.ids) turnOf.set(id, t);
+
   const g = new dagre.graphlib.Graph();
   g.setGraph({ rankdir: "TB", nodesep: 16, ranksep: 28, marginx: 8, marginy: 8 });
   g.setDefaultEdgeLabel(() => ({}));
-  for (const m of kept) g.setNode(m.id, { width: OVERVIEW_NODE_WIDTH, height: OVERVIEW_NODE_HEIGHT });
+  for (const t of turns) g.setNode(t.last.id, { width: OVERVIEW_NODE_WIDTH, height: OVERVIEW_NODE_HEIGHT });
 
+  // One edge per turn pair, following the message DAG (deterministically).
   const edges: OverviewEdge[] = [];
+  const seenEdge = new Set<string>();
   for (const m of kept) {
-    const parent = shownParent(m);
-    if (parent === null) continue;
-    g.setEdge(parent, m.id);
-    edges.push({ id: `${parent}->${m.id}`, source: parent, target: m.id, active: active.has(parent) && active.has(m.id) });
+    const parentMsg = shownParent(m);
+    if (parentMsg === null) continue;
+    const from = turnOf.get(parentMsg)!;
+    const to = turnOf.get(m.id)!;
+    if (from === to) continue;
+    const key = `${from.last.id}->${to.last.id}`;
+    if (seenEdge.has(key)) continue;
+    seenEdge.add(key);
+    g.setEdge(from.last.id, to.last.id);
+    const onPath = active.has(from.last.id) || active.has(from.ids[from.ids.length - 1]) || active.has(to.last.id) || active.has(m.id);
+    edges.push({ id: key, source: from.last.id, target: to.last.id, active: onPath && active.has(m.id) });
   }
   dagre.layout(g);
 
   // The leaf the thread ends at may be a hidden tool message; the last shown
   // message on the active path is what to mark.
   const shownActive = kept.filter((m) => active.has(m.id));
-  const leafId = shownActive.length ? pathTo(tree, activeLeafId).filter(shown).pop()?.id : undefined;
+  const lastShown = shownActive.length ? pathTo(tree, activeLeafId).filter(shown).pop()?.id : undefined;
+  const leafTurn = lastShown ? turnOf.get(lastShown) : undefined;
 
-  const nodes = kept.map((m): OverviewNode => {
-    const p = g.node(m.id);
+  const nodes = turns.map((t): OverviewNode => {
+    const p = g.node(t.last.id);
+    const text = snippetOf(t.first);
     return {
-      id: m.id,
+      id: t.last.id,
       x: p.x - OVERVIEW_NODE_WIDTH / 2,
       y: p.y - OVERVIEW_NODE_HEIGHT / 2,
-      role: m.role as "user" | "assistant",
-      label: m.role === "user" ? "You" : (m.model?.model ?? "assistant"),
-      snippet: snippetOf(m),
-      active: active.has(m.id),
-      leaf: m.id === leafId,
+      role: t.role,
+      label: t.role === "user" ? "You" : (t.first.model?.model ?? "assistant"),
+      snippet: t.role === "assistant" && t.ids.length > 1 ? `${text} · ${t.ids.length} steps` : text,
+      active: t.ids.some((id) => active.has(id)),
+      leaf: leafTurn === t,
     };
   });
   return { nodes, edges };

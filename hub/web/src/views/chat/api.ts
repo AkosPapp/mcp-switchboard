@@ -94,6 +94,20 @@ export const putDraft = (id: string, draft: string, keepalive = false) =>
     ...(keepalive ? { keepalive: true } : {}),
   });
 
+export type TodoStatus = "pending" | "in_progress" | "completed";
+export interface Todo {
+  id: number;
+  content: string;
+  status: TodoStatus;
+}
+export const todosKey = (id: string) => ["chatTodos", id] as const;
+export const getTodos = async (id: string): Promise<Todo[]> =>
+  (await request<{ todos: Todo[] | null }>(`chats/${encodeURIComponent(id)}/todos`)).todos ?? [];
+/** The agent's plan list; refetched on every chat event (useEventStream). */
+export function useTodos(id: string | null) {
+  return useQuery({ queryKey: todosKey(id ?? ""), queryFn: () => getTodos(id as string), enabled: id !== null, retry: false });
+}
+
 export const draftKey = (id: string) => ["chatDraft", id] as const;
 
 export interface PatchChat {
@@ -106,6 +120,15 @@ export interface PatchChat {
   archived?: boolean;
   activeLeafId?: string;
   selectMessageId?: string;
+  /** Conversation preferences: an object or null, a limit (0 clears is sent
+   * as omission by the caller), an approval mode ("" resets to the agent),
+   * the auto-approver, and the reasoning effort ("" lets the model default). */
+  model?: object | null;
+  contextLimit?: number;
+  approval?: string;
+  autoApprove?: boolean;
+  effort?: string;
+  notes?: string;
 }
 
 export const patchChat = (id: string, body: PatchChat) =>

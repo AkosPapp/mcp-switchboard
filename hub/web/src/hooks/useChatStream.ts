@@ -60,7 +60,11 @@ export function useChatStream(
       if (!frame) return;
       dispatch({ type: "frame", frame });
       const cache = clientRef.current;
-      if (m.name === "message_done") refetch();
+      if (m.name === "message_done") {
+        refetch();
+        // The hub saves the run's usage after every turn; the footer meter reads it.
+        cache.invalidateQueries({ queryKey: ["run", frame.runId] });
+      }
       if (m.name === "approval_required" || m.name === "run_started") {
         cache.invalidateQueries({ queryKey: ["run", frame.runId] });
       }

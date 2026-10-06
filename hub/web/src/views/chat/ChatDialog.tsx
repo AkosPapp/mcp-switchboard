@@ -4,13 +4,28 @@ import { Link } from "react-router-dom";
 import { useConnections } from "../../api/queries";
 import { useProfiles } from "../../api/resources";
 import ClientBadge from "../../components/ClientBadge";
-import { createChat, patchChat, useSystemPrompt, type PatchChat } from "./api";
+import { createChat, patchChat, useModels, useSystemPrompt, type PatchChat } from "./api";
+import { ModelPicker, modelKey } from "../../lib/models";
 import type { Chat, CreateChatInput } from "./types";
+
+/** Approval modes a chat can override its prompt with (docs/CHAT_MODEL_API.md). */
+const APPROVAL_MODES = [
+  { value: "", label: "Prompt default" },
+  { value: "never", label: "Never ask (auto-approve)" },
+  { value: "destructive", label: "Ask for risky tools" },
+  { value: "always", label: "Ask for every tool" },
+];
 
 const CHIP = "rounded border border-border px-1.5 py-0.5 text-[11px] leading-none text-muted";
 const FIELD =
   "min-h-[44px] w-full rounded border border-border bg-surface px-2 py-1.5 text-sm md:min-h-0";
 const LEGEND = "text-xs font-semibold uppercase tracking-wide text-muted";
+
+/** The chosen (or prompt-default) model's context window, when declared. */
+function modelWindow(models: { provider: string; model: string; contextWindow?: number }[], key: string): number {
+  if (!key || !key.includes("/")) return 0;
+  return models.find((m) => `${m.provider}/${m.model}` === key)?.contextWindow ?? 0;
+}
 
 /** The prompt source is one select: "none", "custom", or "p:<profileId>". */
 const NONE = "none";
@@ -54,6 +69,16 @@ export default function ChatDialog({
   const [choice, setChoice] = useState(chat?.profileId ? `p:${chat.profileId}` : "");
   const [custom, setCustom] = useState("");
   const [client, setClient] = useState<string | null>(chat ? (chat.clientLabel ?? null) : defaultClient);
+  // Conversation preferences (the prompt's model is only a default; the user
+  // picks here). "" model = follow the prompt/agent default; context limit
+  // empty = the full window; approval "" = the prompt's mode.
+  const models = useModels().data?.models ?? [];
+  const [model, setModel] = useState(
+    chat?.model?.provider && chat?.model?.model ? `${chat.model.provider}/${chat.model.model}` : "",
+  );
+  const [contextLimit, setContextLimit] = useState(chat?.contextLimit ? String(chat.contextLimit) : "");
+  const [approval, setApproval] = useState(chat?.approval ?? "");
+  const [autoApprove, setAutoApprove] = useState(chat?.autoApprove ?? false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
@@ -111,18 +136,32 @@ export default function ChatDialog({
           body.profileId = profileId;
           if (profileId === null) body.systemPrompt = choice === CUSTOM ? custom : "";
         }
+        // Preferences: send only what changed; null clears the model choice.
+        const chosenModel = models.find((m) => modelKey(m) === model) ?? null;
+        const beforeModel = chat.model?.provider && chat.model?.model ? `${chat.model.provider}/${chat.model.model}` : "";
+        if (model !== beforeModel) body.model = chosenModel ? { provider: chosenModel.provider, model: chosenModel.model } : null;
+        const limit = Number(contextLimit || 0);
+        if (limit !== (chat.contextLimit ?? 0)) body.contextLimit = limit;
+        if (approval !== (chat.approval ?? "")) body.approval = approval;
+        if (autoApprove !== (chat.autoApprove ?? false)) body.autoApprove = autoApprove;
         if (Object.keys(body).length === 0) {
           onClose();
           return;
         }
         onSaved(await patchChat(chat.id, body));
       } else {
+        const chosenModel = models.find((m) => modelKey(m) === model) ?? null;
+        const limit = Number(contextLimit || 0);
         const body: CreateChatInput = {
           ...(title.trim() ? { title: title.trim() } : {}),
           // Explicit null (not omitted) is what means "no profile": omitted means the default.
           profileId,
           ...(choice === CUSTOM ? { systemPrompt: custom } : {}),
           clientLabel: client,
+          ...(chosenModel ? { model: { provider: chosenModel.provider, model: chosenModel.model } } : {}),
+          ...(limit > 0 ? { contextLimit: limit } : {}),
+          ...(approval ? { approval } : {}),
+          ...(autoApprove ? { autoApprove } : {}),
         };
         onSaved(await createChat(body));
       }
@@ -231,6 +270,51 @@ export default function ChatDialog({
               </p>
             ) : null}
           </div>
+
+          <fieldset className="space-y-2">
+            <legend className={LEGEND}>Model & limits</legend>
+            <div className="space-y-1">
+              <span className="text-xs text-muted">Model</span>
+              <ModelPicker
+                models={models}
+                value={model}
+                onChange={setModel}
+                emptyLabel={profile?.model?.model ? `Prompt default (${profile.model.model})` : "Prompt default"}
+                ariaLabel="chat model"
+                className={`${FIELD} flex items-center justify-between gap-2 text-left`}
+              />
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="chat-context" className="text-xs text-muted">Context size (tokens)</label>
+              <input
+                id="chat-context"
+                type="number"
+                min={2048}
+                step={1024}
+                value={contextLimit}
+                onChange={(e) => setContextLimit(e.target.value)}
+                className={FIELD}
+                placeholder={modelWindow(models, model || (profile?.model ? modelKey(profile.model) : ""))
+                  ? `full (${modelWindow(models, model || (profile?.model ? modelKey(profile.model) : ""))})`
+                  : "model default"}
+              />
+              <p className="text-xs text-muted">
+                The conversation is compressed when it nears this limit; smaller costs less per turn.
+              </p>
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="chat-approval" className="text-xs text-muted">Approvals</label>
+              <select id="chat-approval" value={approval} onChange={(e) => setApproval(e.target.value)} className={FIELD}>
+                {APPROVAL_MODES.map((m) => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
+              </select>
+              <label className="flex min-h-[44px] cursor-pointer items-center gap-2 rounded border border-border px-2 py-1 text-sm md:min-h-0">
+                <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
+                <span>Auto-approve all tools, pushes included</span>
+              </label>
+            </div>
+          </fieldset>
 
           <fieldset className="space-y-1">
             <legend className={LEGEND}>MCP client</legend>
