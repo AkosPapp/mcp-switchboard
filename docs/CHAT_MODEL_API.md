@@ -70,10 +70,15 @@ interface Message { /* everything in docs/API.md, plus: */
 
 | Tool | Input | Output | Behaviour |
 |---|---|---|---|
-| `switchboard.chat.spawn` | `{title, system_prompt, grants?, budget?, model?, capabilities?, approval?, message?}` | `{chat_id}` | creates a child chat (with its execution record) of the calling chat; `message` (optional first task) is injected as `sender.kind = "spawn"` |
+| `switchboard.chat.spawn` | `{title, system_prompt, grants?, allowed_tools?, budget?, model?, capabilities?, approval?, message?}` | `{chat_id}` | creates a child chat (with its execution record) of the calling chat; `message` (optional first task) is injected as `sender.kind = "spawn"` | `allowed_tools` = glob patterns on the upstream tool name that narrow the child's tools (a child can only narrow its parent's list; `switchboard.*` unaffected). Coordination: spawn with a `message` that asks the child to report back, then end the turn; the reply wakes the parent (no `wait_for` tool). |
+| `switchboard.chat.report` | `{status: done\|failed\|blocked, summary, details?, artifacts?}` | `{message_id}` | only offered to a chat with a parent; delivers `[report status=…]` + summary/details/artifacts to the parent chat like `chat.send` and wakes it |
 | `switchboard.chat.send` | `{to_chat_id, message}` | `{message_id}` | requires an allowed edge between the two chats' records; injects into the recipient's own chat as above; always fire-and-forget, no `wait`, no inline reply |
 | `switchboard.chat.list` | `{}` | `[{chat_id, title, status, relation, depth?}]` | one flat list: parent + children (`relation: "parent"`/`"child"`, with `depth`) plus every chat joined by an edge (`relation: "connected"`); no `scope` argument |
 | `switchboard.chat.stop` | `{chat_id}` | `{cancelled}` | descendants only |
+| `switchboard.note.append` | `{entry}` | `{ok, entries}` | appends one durable note to the chat's `notes`; the block is re-injected into every later system prompt and survives context compression (the agent's own long-term memory for a project) |
+| `switchboard.note.read` | `{}` | `{notes}` | reads the chat's persistent notes back verbatim |
+| `switchboard.calls.stats` | `{}` | `{summary}` | this chat's newest ≤200 tool calls as friction stats: per-tool counts/errors/avg latency, calls repeated with identical arguments, slowest calls, recent errors |
+| `switchboard.chat.search` | `{query, limit?}` | `{hits, total}` | full-text search of the whole chat (every branch and any text context compression folded away), not just the active path |
 | `switchboard.graph.set_edge` | `{chat_id, allowed}` | `{ok}` | opens/closes a symmetric edge between the caller and `chat_id`, any chat the caller can name — not limited to its own subtree; the caller must be one of the two endpoints |
 | `switchboard.inbox.read`, `switchboard.mcp.grant` (`chat_id`), `switchboard.mcp.list_servers` | | | as before with chat ids in place of agent ids |
 
@@ -87,3 +92,35 @@ User-facing text never says "agent": the Chat panel lists **chats** (client grou
 chats), the Graph view shows **chats** as nodes (node opens the chat), the system-prompt tab is
 called **Prompts** (route `/prompts`, `/agents` redirects to it; profiles are "prompts"), hub tool
 descriptions say chat. API route names (`/api/agents`, `/api/profiles`) are unchanged.
+
+## Chat conversation preferences (docs/improvements.md, Oct 2026)
+
+A chat carries its own turn settings beyond the prompt: `POST /api/chats` accepts
+`model` (a `{provider, model}` default that overrides the prompt's model but loses to a
+per-message override), `contextLimit` (tokens; drives the meter and compaction, capped by the
+model's window), `approval` (`never|destructive|always`, overriding the agent's mode),
+`autoApprove` (no tool call ever pauses, irreversible ones included — the user's explicit
+"pushes included" choice), and `effort` (`low|medium|high|none`; reasoning effort). `PATCH
+/api/chats` takes the same fields (with clear semantics: `model: null`, `contextLimit: 0`,
+`approval: ""`, `effort: ""`). The chat JSON echoes them and reports `hasSummary`/`summarizedAt`
+without shipping the summary text itself.
+A chat also carries `notes` (its persistent agent-written memory, migration 014):
+the text the `switchboard.note.*` tools read and re-inject.
+
+`/compact` as a whole message compresses the chat: the hub summarizes the oldest part of the
+active path and stores it on the chat (`summary`, `summarize_upto_msg`, migration 012, never
+mutating messages); later turns see `[Summary …]` in place of the covered prefix. Turns
+additionally auto-compact once when the estimated prompt passes 85% of the effective window.
+
+## Harness self-review (`/optimize_skills`)
+
+`/optimize_skills` as a whole message unlocks a gated tool family for the chat
+(migration 015 `chats.optimize`); `/optimize_skills off` locks it again. While unlocked the
+chat's catalog gains `switchboard.optimize.*`: `chats_list` (recent chats to study),
+`chat_read` (a chat's active transcript), `prompts_list` / `prompt_set` (a prompt's system
+prompt — replaces), `skills_list` / `skill_set` / `skill_delete`. The command itself is
+answered by the hub, like `/compact`: its reply is the meta-prompt that tells the model to
+gather evidence from past conversations, report weaknesses and suspected bugs to the user
+FIRST, and edit prompts/skills only with explicit in-chat assent. A chat that never ran the
+command never sees these tools (catalog AND run-time gate), and they stay hidden on the
+`/mcp/agent` surface entirely.

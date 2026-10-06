@@ -9,7 +9,7 @@
       // ./.env relative to its working directory.
       // The console is rebuilt first because the hub embeds hub/web/dist (go:embed);
       // `go run` then recompiles the backend, so one task restarts both.
-      "command": "(cd web && npm run build) && go run ./cmd/mcp-switchboard-hub --env-file ${workspaceFolder}/.env",
+      "command": "direnv exec \"${workspaceFolder}\" bash -c '(cd web && npm run build) && go run ./cmd/mcp-switchboard-hub --env-file ${workspaceFolder}/.env'",
       "options": { "cwd": "${workspaceFolder}/hub" },
       "isBackground": true,
       "problemMatcher": [],
@@ -19,7 +19,7 @@
     {
       "label": "Switchboard: client",
       "type": "shell",
-      "command": "uv run mcp-switchboard-client --hub-url ws://127.0.0.1:8097",
+      "command": "direnv exec \"${workspaceFolder}\" bash -c 'uv run mcp-switchboard-client --hub-url ws://127.0.0.1:8097'",
       "isBackground": true,
       "problemMatcher": [],
       "presentation": { "panel": "dedicated" },
@@ -36,7 +36,7 @@
     {
       "label": "Console: dev server",
       "type": "shell",
-      "command": "npm run dev",
+      "command": "direnv exec \"${workspaceFolder}\" bash -c 'npm run dev'",
       "options": { "cwd": "${workspaceFolder}/hub/web" },
       "isBackground": true,
       "problemMatcher": [],
@@ -46,7 +46,7 @@
     {
       "label": "Console: build",
       "type": "shell",
-      "command": "npm run build",
+      "command": "direnv exec \"${workspaceFolder}\" bash -c 'npm run build'",
       "options": { "cwd": "${workspaceFolder}/hub/web" },
       "problemMatcher": ["$tsc"],
       "presentation": { "panel": "dedicated", "group": "switchboard" },
@@ -55,7 +55,7 @@
     {
       "label": "Test: hub (go)",
       "type": "shell",
-      "command": "go test ./... -race",
+      "command": "direnv exec \"${workspaceFolder}\" bash -c 'go test ./... -race'",
       "options": { "cwd": "${workspaceFolder}/hub" },
       "group": "test",
       "problemMatcher": ["$go"],
@@ -65,7 +65,7 @@
     {
       "label": "Test: console (vitest)",
       "type": "shell",
-      "command": "npm test",
+      "command": "direnv exec \"${workspaceFolder}\" bash -c 'npm test'",
       "options": { "cwd": "${workspaceFolder}/hub/web" },
       "group": "test",
       "problemMatcher": [],
@@ -75,7 +75,7 @@
     {
       "label": "Test: console end-to-end (playwright)",
       "type": "shell",
-      "command": "go build -o \"$TMPDIR/mcp-switchboard-hub\" ./cmd/mcp-switchboard-hub && cd web && MCP_SWITCHBOARD_HUB_BINARY=\"$TMPDIR/mcp-switchboard-hub\" npm run test:e2e",
+      "command": "direnv exec \"${workspaceFolder}\" bash -c 'go build -o \"$TMPDIR/mcp-switchboard-hub\" ./cmd/mcp-switchboard-hub && cd web && MCP_SWITCHBOARD_HUB_BINARY=\"$TMPDIR/mcp-switchboard-hub\" npm run test:e2e'",
       "options": {
         "cwd": "${workspaceFolder}/hub",
         "env": { "CGO_ENABLED": "0", "TMPDIR": "${workspaceFolder}/hub/web/test-results" }
@@ -88,7 +88,7 @@
     {
       "label": "Test: python (client, harness, end-to-end)",
       "type": "shell",
-      "command": "go build -o \"$TMPDIR/mcp-switchboard-hub\" ./cmd/mcp-switchboard-hub && cd .. && MCP_SWITCHBOARD_HUB_BINARY=\"$TMPDIR/mcp-switchboard-hub\" uv run pytest client/tests servers/harness/tests tests -q",
+      "command": "direnv exec \"${workspaceFolder}\" bash -c 'go build -o \"$TMPDIR/mcp-switchboard-hub\" ./cmd/mcp-switchboard-hub && cd .. && MCP_SWITCHBOARD_HUB_BINARY=\"$TMPDIR/mcp-switchboard-hub\" uv run pytest client/tests servers/harness/tests tests -q'",
       "options": {
         "cwd": "${workspaceFolder}/hub",
         "env": { "CGO_ENABLED": "0", "TMPDIR": "${workspaceFolder}/hub/web/test-results" }
