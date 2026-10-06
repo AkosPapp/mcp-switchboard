@@ -255,7 +255,8 @@ client/       the tunnel client, deliberately dependency-light (no MCP dep)
 servers/      first-party MCP servers (harness: filesystem, git and shell tools, on by default in the client)
 nix/          NixOS module, uv2nix package set, VM test
 tests/        end-to-end test: real client, real MCP server, real consumer
-docs/         PROTOCOL.md, the tunnel wire format
+docs/         PROTOCOL.md, the tunnel wire format; EVALS.md, the agent eval harness
+evals/        agent eval harness (run_evals.py; talks to a running hub)
 ```
 
 ## Development

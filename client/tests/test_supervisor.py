@@ -224,3 +224,25 @@ async def test_long_lines_survive_the_stream_limit(recorder):
         assert len(line) == 200000
     finally:
         await server.stop()
+
+
+async def test_oversized_stdout_line_fails_the_server_and_kills_it(recorder, monkeypatch):
+    from mcp_switchboard_client import supervisor
+
+    monkeypatch.setattr(supervisor, "STDOUT_LIMIT", 1024)
+    big = (
+        "import sys,time\n"
+        "sys.stdout.write('x' * 5000 + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+    )
+    spec = ServerSpec(name="big", argv=[sys.executable, "-u", "-c", big])
+    server = LocalServer(spec, on_stdout=recorder.on_stdout, on_state=recorder.on_state)
+    await server.start()
+    try:
+        _, state, _, error = await recorder.wait_for_state(protocol.STATE_FAILED)
+        assert "stdout" in error
+        assert not server.running
+        assert server.state == protocol.STATE_FAILED
+    finally:
+        await server.stop()

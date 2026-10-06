@@ -12,3 +12,4 @@ dist/
 result
 result-*
 .direnv/
+hub/mcp-switchboard-hub

@@ -139,10 +139,20 @@ let
     {
       AGENTS_ENABLED = "true";
       AGENT_MAX_DEPTH = toString cfg.agents.maxDepth;
+      AGENT_TOOL_RESULT_MAX_CHARS = toString cfg.agents.toolResultMaxChars;
       AGENT_MAX_CHILDREN = toString cfg.agents.maxChildren;
       AGENT_MAX_CONCURRENT_RUNS = toString cfg.agents.maxConcurrentRuns;
       AGENT_REPLY_TIMEOUT = toString cfg.agents.replyTimeout;
       APPROVAL_TIMEOUT = toString cfg.agents.approvalTimeout;
+    }
+    // lib.optionalAttrs (cfg.agents.searxngUrl != null) {
+      SEARXNG_URL = cfg.agents.searxngUrl;
+    }
+    // lib.optionalAttrs (!cfg.agents.webFetch) {
+      WEB_FETCH = "false";
+    }
+    // lib.optionalAttrs (cfg.agents.httpGetAllowlist != [ ]) {
+      HTTP_GET_ALLOWLIST = lib.concatStringsSep "," cfg.agents.httpGetAllowlist;
     }
     // lib.optionalAttrs (cfg.llm.modelsFile != null) {
       LLM_MODELS = toString cfg.llm.modelsFile;
@@ -364,6 +374,45 @@ in
     agents = {
       enable = mkEnableOption "the agent orchestrator (LLM-driven agents that call tools through the hub)";
 
+      searxngUrl = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "http://127.0.0.1:8888";
+        description = ''
+          Base URL of a SearXNG instance with the json format enabled. When set,
+          agents are offered the switchboard.web.search tool
+          (MCP_SWITCHBOARD_SEARXNG_URL).
+        '';
+      };
+      webFetch = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Offer agents the switchboard.web.fetch tool (public http/https pages
+          only; private and internal addresses are refused). Set to false to
+          disable it (MCP_SWITCHBOARD_WEB_FETCH).
+        '';
+      };
+      httpGetAllowlist = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "inventory.internal:8080" "api.example.com" ];
+        description = ''
+          Hostnames or host:port pairs agents may call with the
+          switchboard.http.get tool, internal hosts included. Empty means the
+          tool is not offered (MCP_SWITCHBOARD_HTTP_GET_ALLOWLIST).
+        '';
+      };
+      toolResultMaxChars = mkOption {
+        type = types.ints.unsigned;
+        default = 30000;
+        description = ''
+          Most characters of one tool result shown to the model per turn; longer
+          results keep their head and tail with a marker in between. The stored
+          result is unaffected. 0 disables the cap
+          (MCP_SWITCHBOARD_AGENT_TOOL_RESULT_MAX_CHARS).
+        '';
+      };
       maxDepth = mkOption {
         type = types.ints.positive;
         default = 4;

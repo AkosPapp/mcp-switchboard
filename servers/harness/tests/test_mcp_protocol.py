@@ -1,6 +1,7 @@
 """Talks to the server the way a real client does: JSON-RPC over stdio."""
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -23,9 +24,11 @@ def converse(root, calls):
         *({"jsonrpc": "2.0", "id": i, "method": m, "params": p} for i, m, p in calls),
     ]
     wanted = {0, *(i for i, _, _ in calls)}
+    env = {**os.environ, "TMPDIR": str(root)}  # keep the temp allowance away from the real /tmp
     proc = subprocess.Popen(
         SERVER + ["--root", str(root)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        env=env,
     )
     replies = {}
     try:
@@ -60,13 +63,15 @@ def replies(tmp_path):
 
 def test_every_tool_has_an_output_schema_and_annotations(replies):
     tools = {t["name"]: t for t in replies[1]["result"]["tools"]}
-    assert len(tools) == 24
+    assert len(tools) == 34
     for name, tool in tools.items():
         assert tool["annotations"]["readOnlyHint"] in (True, False), name
     assert tools["file_read"]["annotations"]["readOnlyHint"] is True
     assert tools["file_delete"]["annotations"]["destructiveHint"] is True
     assert tools["git_push"]["annotations"]["destructiveHint"] is True
-    assert set(tools["run_command"]["outputSchema"]["properties"]) >= {"stdout", "stderr", "exit_code"}
+    assert set(tools["run_command"]["outputSchema"]["properties"]) >= {"stdout", "stderr", "exit_code", "timed_out"}
+    for w in ("wait_for_start", "wait_for_poll"):
+        assert w in tools and tools[w]["outputSchema"] is not None
     assert "run_bash" not in tools and "list_dir" not in tools
 
 
@@ -79,4 +84,4 @@ def test_tools_work_over_the_protocol(replies):
 def test_confinement_error_reaches_the_client_as_a_tool_error(replies):
     assert replies[4]["result"]["isError"] is True
     # the reason must reach the model, not just a generic "Error executing tool"
-    assert "outside the allowed root" in json.dumps(replies[4])
+    assert "outside the allowed locations" in json.dumps(replies[4])

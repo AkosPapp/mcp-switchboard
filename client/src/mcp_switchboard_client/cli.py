@@ -54,6 +54,8 @@ class Settings:
     harness: bool = True
     project_name: Optional[str] = None
     environment: Optional[Dict[str, Any]] = None  # detected at load_settings
+    instruction_root: Optional[str] = None  # cwd by default; None disables shipping
+    env_brief: bool = True  # host brief in hello + context_update
 
     def tunnel_settings(self) -> TunnelSettings:
         return TunnelSettings(
@@ -63,6 +65,8 @@ class Settings:
             reconnect_delay=self.reconnect_delay,
             max_retries=self.max_retries,
             environment=self.environment,
+            instruction_root=self.instruction_root,
+            env_brief=self.env_brief,
         )
 
 
@@ -150,6 +154,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"Log level (default {DEFAULT_LOG_LEVEL}, or {envconf.PREFIX}LOG_LEVEL)",
     )
+    parser.add_argument(
+        "--no-instructions",
+        action="store_true",
+        help=(
+            "Do not collect instruction files (AGENTS.md, CLAUDE.md, ...) from the working "
+            f"directory and send them to the hub (or set {envconf.PREFIX}INSTRUCTIONS=false)"
+        ),
+    )
+    parser.add_argument(
+        "--no-env-brief",
+        action="store_true",
+        help=(
+            "Do not send the host environment brief (identity, host, git state, writable set, "
+            f"tool presence) to the hub (or set {envconf.PREFIX}ENV_BRIEF=false)"
+        ),
+    )
     return parser
 
 
@@ -231,6 +251,12 @@ def load_settings(args: argparse.Namespace) -> Settings:
         harness=not args.no_harness and envconf.get_bool("HARNESS", True),
         project_name=project_name,
         environment=environment.detect(project_override=project_name),
+        instruction_root=(
+            None
+            if args.no_instructions or not envconf.get_bool("INSTRUCTIONS", True)
+            else str(Path.cwd())
+        ),
+        env_brief=not args.no_env_brief and envconf.get_bool("ENV_BRIEF", True),
     )
 
 
@@ -271,7 +297,8 @@ def setup_logging(level: str) -> None:
     )
 
 
-async def _run(settings: Settings, specs: List[ServerSpec]) -> None:
+async def _run(settings: Settings, specs: List[ServerSpec]) -> Optional[str]:
+    """Run the tunnel; returns a failure message if it gave up, else None."""
     connection = HubConnection(specs, settings.tunnel_settings(), version=__version__)
 
     def request_stop() -> None:
@@ -297,8 +324,17 @@ async def _run(settings: Settings, specs: List[ServerSpec]) -> None:
     )
     if settings.environment is not None:
         LOGGER.info("%s", environment.summarize(settings.environment))
+    if settings.instruction_root:
+        found = environment.collect_instructions(Path(settings.instruction_root))
+        LOGGER.info(
+            "instruction files: %s",
+            ", ".join(f["path"] for f in found) if found else "none found",
+        )
+    if settings.env_brief:
+        LOGGER.info("environment brief: enabled (turn off with --no-env-brief)")
     await connection.run()
     LOGGER.info("shutdown complete")
+    return connection.failure
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -324,7 +360,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         sys.exit(1)
 
     try:
-        asyncio.run(_run(settings, specs))
+        failure = asyncio.run(_run(settings, specs))
+        if failure:
+            print(f"{PROG}: error: {failure}", file=sys.stderr)
+            sys.exit(1)
     except KeyboardInterrupt:
         pass
     except TunnelError as e:

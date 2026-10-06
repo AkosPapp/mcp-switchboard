@@ -30,7 +30,7 @@ TERMINATE_TIMEOUT = 5.0
 
 # asyncio's default StreamReader limit is 64 KiB, and readline() raises once a
 # line exceeds it. MCP tool results routinely do, so give stdout real headroom.
-STDOUT_LIMIT = 4 * 1024 * 1024
+STDOUT_LIMIT = 16 * 1024 * 1024
 
 # (server name, line)
 StdoutCallback = Callable[[str, str], Awaitable[None]]
@@ -186,7 +186,21 @@ class LocalServer:
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
+            # e.g. a line over STDOUT_LIMIT. The stream is unusable, so make the
+            # reported state truthful: fail the server and kill the process.
             self.log.error("error reading stdout: %s", e)
+            if process.returncode is None:
+                with suppress(ProcessLookupError):
+                    process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=TERMINATE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    with suppress(ProcessLookupError):
+                        process.kill()
+                    await process.wait()
+            await self._emit_state(
+                protocol.STATE_FAILED, error=f"error reading stdout: {e}"
+            )
             return
 
         # EOF: the server closed stdout, so it is on its way out. Reap it and

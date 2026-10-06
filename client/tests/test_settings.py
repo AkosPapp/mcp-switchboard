@@ -191,3 +191,56 @@ def test_config_explicit_only_when_asked_for(monkeypatch):
     assert build_settings(BASE + ["--config", "x.json"]).config_explicit is True
     monkeypatch.setenv("MCP_SWITCHBOARD_CONFIG", "y.json")
     assert build_settings(BASE).config_explicit is True
+
+
+@pytest.mark.parametrize("failure,code", [("hub rejected the connection: nope", 1), (None, 0)])
+def test_main_exit_code_reflects_tunnel_failure(monkeypatch, capsys, failure, code):
+    from mcp_switchboard_client import cli
+
+    async def fake_run(settings, specs):
+        return failure
+
+    monkeypatch.setattr(cli, "_run", fake_run)
+    monkeypatch.setattr(cli, "load_settings", lambda args: object())
+    monkeypatch.setattr(cli, "setup_logging", lambda level: None)
+    monkeypatch.setattr(cli, "load_servers", lambda *a, **k: [])
+    monkeypatch.setattr(cli, "Settings", object, raising=False)
+    monkeypatch.setattr(cli, "load_settings", lambda args: type("S", (), {"log_level": "info", "config_path": None, "harness": None, "config_explicit": False})())
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main([])
+    assert exc.value.code == code
+    if failure:
+        assert failure in capsys.readouterr().err
+
+
+def test_instructions_on_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("MCP_SWITCHBOARD_INSTRUCTIONS", raising=False)
+    monkeypatch.delenv("MCP_SWITCHBOARD_ENV_BRIEF", raising=False)
+    s = build_settings(BASE)
+    assert s.instruction_root is not None  # defaults to cwd
+    assert s.env_brief is True
+
+
+def test_no_instructions_flag_disables_collection(tmp_path):
+    s = build_settings([*BASE, "--no-instructions"])
+    assert s.instruction_root is None
+
+
+def test_no_env_brief_flag_disables_brief(tmp_path):
+    s = build_settings([*BASE, "--no-env-brief"])
+    assert s.env_brief is False
+
+
+def test_instruction_feature_env_vars_disable(tmp_path):
+    env_file = write_env(
+        tmp_path,
+        "MCP_SWITCHBOARD_INSTRUCTIONS=false\nMCP_SWITCHBOARD_ENV_BRIEF=false\n",
+    )
+    s = build_settings([*BASE, "--env-file", str(env_file)])
+    assert s.instruction_root is None and s.env_brief is False
+
+
+def test_tunnel_settings_carry_instruction_options(tmp_path):
+    ts = build_settings([*BASE, "--no-env-brief"]).tunnel_settings()
+    assert ts.instruction_root is not None and ts.env_brief is False, "only the brief is off"

@@ -162,6 +162,24 @@ Unchanged by this revision. Retained verbatim for completeness.
   devcontainer, container, direnv, nix-shell, venv; plus `project`, `workspace`, small non-secret
   `details`) and sends it as the optional `hello.client.environment`. `MCP_SWITCHBOARD_PROJECT_NAME` /
   `--project-name` overrides the project name. One INFO line summarises it.
+- **C12. Instruction files.** Collects, without raising and without ever leaving the working
+  directory tree (cache/dependency dirs skipped; standard names `AGENTS.md`, `CLAUDE.md`,
+  `.cursorrules`, `.github/copilot-instructions.md`, walked root-first so nested files stay
+  ordered), the repo's own agent instruction files — up to 8 files, 32 KiB each, 64 KiB total, with
+  an explicit in-band marker when a file is truncated or omitted — and sends them as the optional
+  `hello.client.instructions`. A freshness loop re-reads them on an interval and pushes a
+  `context_update` frame when the set changes, so editing `AGENTS.md` mid-session reaches the agent
+  (P1-A) without a reconnect. Disable with `--no-instructions` / `MCP_SWITCHBOARD_INSTRUCTIONS=false`.
+- **C13. Environment brief.** Builds, without raising and within ~30 lines, a brief of the host the
+  tools run on — user/uid/groups, hostname/OS, sudo (`unknown` unless a non-interactive check proves
+  otherwise, never guessed), cwd, git root/branch/dirty+untracked and `origin` URL with credentials
+  redacted, the writable set (root, scratch, temp), DNS resolvers and local addresses with
+  **reachability explicitly not probed**, and present/absent for a curated tool list — and sends it as
+  the optional `hello.client.environment_brief`. One shared refresh loop pushes a `context_update`
+  when it changes alongside the instruction files (C12), also resetting the hub's staleness clock.
+  The hub injects the brief plus hub-only facts (effective `CALL_TIMEOUT`, push state) into agents
+  that can reach that client's tools, and marks a brief older than 5 minutes stale instead of
+  trusting it (P2-B). Disable with `--no-env-brief` / `MCP_SWITCHBOARD_ENV_BRIEF=false`.
 
 ## 4. Hub
 
@@ -743,12 +761,28 @@ trusted to use it without a human in the loop for every call.
 
 | Tool | Input | Output | Behaviour |
 |---|---|---|---|
-| `switchboard.chat.spawn` | `{title, system_prompt, model?, grants?, budget?, capabilities?, approval?, message?}` | `{chat_id}` | Creates a child chat of the calling chat (A29). `model`, `capabilities` and `approval` default to the caller's (M3). `grants` are intersected with the caller's (A12). Fails if the child's depth (`parent.depth + 1`) would exceed `AGENT_MAX_DEPTH`, or if the caller already has `AGENT_MAX_CHILDREN` live direct children. `message`, when given, is injected into the child as `sender.kind = "spawn"` and wakes it; its final answer returns to the caller's chat as a reply (B8). |
-| `switchboard.chat.send` | `{to, message}` | `{message_id}` | `to` is a **name**, as returned by `chat.list`'s `name` field — not a chat id (M4a). Resolved against the same set `chat.list` shows: the caller's parent, a child, or a chat joined to it by an allowed edge (D14; never itself). Inserts `message` into the recipient's **own** (most recently active) chat exactly as if the human had typed it there — a plain `user`-role turn, distinguished only by `sender` metadata (chat id, title and kind, B7) — and wakes it (B2). Always fire-and-forget: there is no `wait`, no synchronous reply, and no special routing back. If the recipient wants to answer, it calls `switchboard.chat.send` back to the sender, exactly like any other message — the edge is symmetric (D14), so it always can. The one exception is `switchboard.chat.spawn`'s own `message` (B8): a spawned child's *final* answer is still returned to the spawning chat automatically, because that is a property of spawning a task, not of `chat.send`. |
+| `switchboard.chat.spawn` | `{title, system_prompt, model?, grants?, allowed_tools?, budget?, capabilities?, approval?, message?}` | `{chat_id}` | Creates a child chat of the calling chat (A29). `model`, `capabilities` and `approval` default to the caller's (M3). `grants` are intersected with the caller's (A12). `allowed_tools` (optional, list of glob patterns on the *upstream* tool name, e.g. `["file_read","git_*"]`) narrows which tools of the granted servers the child may call: hidden from its catalog and refused in `execTool`; `switchboard.*` tools are unaffected. A child can only narrow: with no list it inherits its parent's, and when the parent has one every requested pattern must match one of the parent's patterns (else denied). Stored as `agents.tool_allow` (JSON, null = no narrowing), shown as `toolAllow` on the Agent. Fails if the child's depth (`parent.depth + 1`) would exceed `AGENT_MAX_DEPTH`, or if the caller already has `AGENT_MAX_CHILDREN` live direct children. `message`, when given, is injected into the child as `sender.kind = "spawn"` and wakes it; its final answer to that first message returns to the caller's chat as a reply (B8), but only that first run: the reliable way to get a result back is for the child to `chat.report`/`chat.send` it. **Coordination pattern** (there is deliberately no `wait_for` tool): to delegate, `chat.spawn` with a `message` that states the task and tells the child to send its result back with `chat.report` (or `chat.send`), then **end the turn**; the child's message wakes the parent, which continues. Do not poll. |
+| `switchboard.chat.report` | `{status: "done"\|"failed"\|"blocked", summary, details?, artifacts?: [string]}` | `{message_id}` | Offered only to a chat that has a parent (needs no capability). Delivers to the parent chat, as a message from this chat and exactly like `chat.send` (wakes it, fire-and-forget), a fixed-format text: first line `[report status=<status>]`, then the summary, then `Details:` and `Artifacts:` (one `- item` per line) when given. The preferred way for a child to hand its result back. Annotations `destructiveHint: false, openWorldHint: false`. |
+| `switchboard.chat.send` | `{to, message}` | `{message_id}` | `to` is a **name**, as returned by `chat.list`'s `name` field — not a chat id (M4a). Resolved against the same set `chat.list` shows: the caller's parent, a child, or a chat joined to it by an allowed edge (D14; never itself). Inserts `message` into the recipient's **own** (most recently active) chat exactly as if the human had typed it there — a plain `user`-role turn, distinguished only by `sender` metadata (chat id, title and kind, B7) — and wakes it (B2). Always fire-and-forget: there is no `wait`, no synchronous reply, and no special routing back; a chat that expects an answer ends its turn and is woken by the reply. If the recipient wants to answer, it calls `switchboard.chat.send` back to the sender, exactly like any other message — the edge is symmetric (D14), so it always can. The one exception is `switchboard.chat.spawn`'s own `message` (B8): a spawned child's *final* answer is still returned to the spawning chat automatically, because that is a property of spawning a task, not of `chat.send`. |
 | `switchboard.chat.list` | `{}` | `[{name, chat_id, title, status, relation, depth?}]` | Every chat the caller can currently message: its parent and children (`relation: "parent"` / `"child"`, with `depth`) plus every chat joined by an edge (`relation: "connected"`). One flat list, no scope parameter — this is deliberately the *only* way a chat discovers who it can talk to, so there is nothing to get wrong. Never reveals a chat the caller cannot message. `name` is what `chat.send`'s `to` takes. |
 | `switchboard.chat.stop` | `{chat_id}` | `{cancelled}` | Cancels a descendant chat's runs. Only on descendants. |
 | `switchboard.user.ask` | `{questions: [{question, header?, options?: [{label, description?}], multi_select?}]}` (1–4 questions, at most 6 options each) | `{answers: [{question, answers: [string]}]}` | Asks the user and waits (see M6). Each answer is the chosen option labels and/or the user's own words. Errors if the user skips, if nobody answers within `APPROVAL_TIMEOUT`, or when there is no run to pause (through `/mcp/agent/{id}`). |
 | `switchboard.mcp.list_tools` | `{}` | `[{label, project, server, connected, tools: [{name, description}]}]` | The caller's own grants joined against the live registry: which servers it may use, whether each is connected right now, and — for a connected one — every tool on it, named exactly as the caller would call it (naming.go's client-pinning rule applies here too, so a single-client chat sees the same short names it would actually use). |
+| `switchboard.web.search` | `{query, categories?, language?, time_range?, page?, limit?}` | `{query, results: [{title, url, snippet, published?}], answers?, suggestions?}` | Searches the internet through the SearXNG instance at `SEARXNG_URL` (json format must be enabled there). Offered, like `skill.load`, only while `SEARXNG_URL` is set, and needs no capability. `readOnlyHint: true, openWorldHint: true`. `limit` defaults to 8, at most 20. Snippets only, no page fetching. |
+| `switchboard.web.fetch` | `{url, max_chars?, offset?}` | `{url, final_url, status, content_type, title, text, truncated, next_offset?, untrusted: true, body_truncated?}` | Fetches an http(s) page and returns readable text (HTML reduced to markdown-ish text: headings, `[text](url)` links, lists, code blocks; scripts, styles, nav, footer dropped; JSON pretty-printed; other `text/*` as is; other types metadata only). `text` starts with a one-line note that the content is untrusted data. SSRF-safe: loopback, private, link-local, unspecified, multicast and CGNAT addresses are refused at dial time (so DNS rebinding and redirects cannot bypass it), at most 5 redirects, 20 s timeout, 2 MB body cap. `max_chars` defaults to 20000, at most 100000; page with `offset` = the previous `next_offset`. Offered by default, no capability; disabled by `WEB_FETCH=false`. `readOnlyHint: true, openWorldHint: true`. |
+| `switchboard.http.get` | `{url, query?, headers?}` | `{status, content_type, body, truncated, location?}` | GET against an operator-allowlisted API host (`HTTP_GET_ALLOWLIST`), private and internal hosts included; exact host (or host:port) match only, redirects are not followed (a 3xx is returned with `location`), `Authorization`/`Cookie` headers are refused. `body` is parsed JSON for JSON responses, text otherwise, capped at 200 KB (`truncated`). Offered only while the allowlist is non-empty. `readOnlyHint: true, openWorldHint: true`. |
+| `switchboard.time.now` | `{tz?, add?, convert_from?, from_tz?, convert_to?}` | `{iso8601, unix, weekday, tz, tz_abbrev, utc_offset}` | Current time in an IANA zone (default the hub's local zone), optionally shifted by `add` (Go duration or `2d`), or converting `convert_from` (RFC3339 or `YYYY-MM-DD HH:MM`, read in `from_tz`, default UTC) into `convert_to`. Always offered. `readOnlyHint: true`. |
+| `switchboard.calc` | `{expression}` | `{expression, result}` | Safe arithmetic (recursive-descent parser, no code evaluation, 500 characters and 50 nesting levels at most): `+ - * / % ^ **`, parentheses, unary minus, `sqrt abs min max round floor ceil ln log10 exp sin cos tan`, `pi`, `e`, scientific notation and `15% of 80`. Division by zero and other domain errors are reported as errors. Always offered. `readOnlyHint: true`. |
+| `switchboard.todo.write` | `{todos: [{content, status}]}` | `{count, todos}` | Replaces the chat's TODO list with the whole list given (at most 50 items, `content` 1-300 characters, `status` one of `pending`, `in_progress`, `completed`, at most one `in_progress`). The console shows it live as the chat's Plan panel (`GET /api/chats/{id}/todos`). Always offered; needs a chat, so it is an error through `/mcp/agent/{id}` with no run. `destructiveHint: false, openWorldHint: false`, so it never asks for approval. |
+| `switchboard.todo.read` | `{}` | `{todos}` | The chat's current TODO list. Always offered. `readOnlyHint: true`. |
+
+**Web search configuration.**
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `SEARXNG_URL` | unset | base URL of a SearXNG instance (json format enabled). Must be an `http` or `https` URL with a host, otherwise the hub refuses to start; a trailing slash is trimmed. While set, chats are offered `switchboard.web.search`. |
+| `WEB_FETCH` | `true` | set to `false` to stop offering `switchboard.web.fetch`. |
+| `HTTP_GET_ALLOWLIST` | unset | comma-separated hostnames or `host:port` entries that `switchboard.http.get` may call (private hosts allowed). While empty the tool is not offered. |
 
 - **M6. Asking the user.** `switchboard.user.ask` runs on the approval machinery (W1–W3): the run
   leaves its slot and reads as `blocked`, an `approval_required` frame carrying `questions` is
@@ -843,6 +877,7 @@ request/response; a chat that is not running cannot be called. So:
   | `AGENT_MAX_CHILDREN` | 8 | live direct children per agent |
   | `AGENT_MAX_CONCURRENT_RUNS` | 16 | runs in `running` at once, hub-wide (R7) |
   | `AGENT_MAX_PARALLEL_TOOL_CALLS` | 8 | concurrent tool calls within one turn |
+  | `AGENT_TOOL_RESULT_MAX_CHARS` | 30000 | most characters of one tool result the model is shown per turn; longer ones keep their head and tail with an "omitted" marker in between. The stored result and the console are not affected. `0` disables the cap |
 
 - **B5. Cost accumulates up the tree, durably, and that is what terminates a cycle.** When a turn
   finishes, its cost and tokens are added to `agents.cost_total_micros` / `token_total` for the
@@ -962,17 +997,45 @@ request/response; a chat that is not running cannot be called. So:
   `harness` server, and to `never` otherwise; it is never re-derived afterwards, because a mode
   that silently changed when a grant was edited would be a surprising way to lose a safety prompt.
   Editing grants later leaves the mode alone, and the Graph view shows it next to the grant list.
-  With `destructive`, any tool whose MCP annotations
-  say `destructiveHint: true` or `openWorldHint: true` — which is exactly `run_command`,
-  `run_python`, `process_start`, `git_push`, `file_delete`, `file_write`, `edit_file`,
-  `git_checkout`, `process_kill` (§9.6) — pauses the run.
+  With `destructive`, every tool pauses the run unless it is explicitly harmless: `readOnlyHint: true`,
+  or both `destructiveHint: false` and `openWorldHint: false`. Missing annotations (none at all, or
+  the destructive/open-world hints unset) do **not** count as harmless: the MCP defaults for a tool
+  that is not read-only are `destructiveHint: true` and `openWorldHint: true`, so the hub follows
+  them. This covers the harness's `run_command`, `run_python`, `process_start`, `git_push`,
+  `file_delete`, `file_write`, `edit_file`, `git_checkout` (§9.6), and any
+  unannotated tool from any other server. (`process_kill` is **not** gated: it can address only
+  background processes this same harness instance started for this same agent — an unknown id is an
+  error, there is no path to an external pid — so killing one is not an external destructive action.)
+- **W1a. Irreversibility overrides the mode (P2-D).** A tool whose `_meta` declares
+  `switchboard.irreversible: true` (the harness's `git_push`) pauses the run even under
+  `approval: "never"` and even if its four standard MCP hints read harmless: moving a branch on
+  someone else's machine cannot be undone from here, and "never" is a statement about friction,
+  not a licence. The server's `switchboard.irreversibleReason` rides along and appears in the
+  approval card and in the denial a model receives; the target remote and branch are in the
+  client's environment brief (C13), which the approver can read. The flag travels over `_meta`
+  under the `switchboard` key, so foreign servers' metadata cannot trip it; the hub passes it on
+  to downstream `/mcp` consumers as tool meta `irreversible` and in the API as
+  `annotations.irreversibleHint`.
 - **W2.** A paused run sets `agent.status = "blocked"` and `run.status = "waiting"` — releasing
   its concurrency slot (R7) — emits an event, and shows in the Chat view as an approve/deny card
   with the full arguments. It is answered by `POST /api/runs/{id}/approvals/{callId}`.
 - **W3. Timeout.** Unanswered after `APPROVAL_TIMEOUT` (default 1 h), the call is auto-denied and
   the run continues with a tool error saying so. It never hangs forever holding a goroutine.
-- **W4.** The annotations that drive this are advisory data from an upstream server, so W1 is a
+- **W4.** The annotations that drive this are advisory data from an upstream server (a server can
+  claim `readOnlyHint: true` for anything), so W1 fails closed on missing annotations but is still a
   usability feature, not a security control. §10 says what actually is one.
+- **W5. A rejection is explainable.** A gated call that does not proceed tells the model in its tool
+  error *what* was pending, *which rule* triggered (approval mode plus the annotation, or its
+  absence, that made the call non-harmless), and *whether retrying is meaningful*. A cancellation
+  names its cause from `ctx.Err()`: the hub's per-call deadline (`CALL_TIMEOUT`) elapsing mid-wait is
+  stated as such and flagged retryable, never surfacing as the same bare "cancelled" as a human deny
+  (P1-B — both looked identical in the session that produced this rule).
+- **W6. Shell-command classification: a known follow-up, deliberately not built.** Per-call
+  downgrading of `run_command` by parsing the shell string (read-only probes prompting zero) is
+  consistent with S3 (the root is not a security boundary, so annotation-level gating already sits
+  above the same cliff) — but it is a security-relevant classifier with a bypass story (quotes,
+  command substitution, `bash -c` indirection), and its guarantees cannot currently be stated, so it
+  is not shipped. Until someone writes those guarantees down, `run_command` gates whole.
 
 ## 6. Storage
 
@@ -1592,14 +1655,20 @@ just sitting `blocked`). Everything else stays in-app.
 - **S1. Identity.** Stdio MCP server; name from `--name` (default `harness`). Through the hub its tools
   are named `{label}__harness__{tool}` at `/mcp`, and plain `{tool}` at `/mcp/host/{label}/server/harness`.
 - **S2. Root and confinement.** Every file path (absolute or relative) is resolved with `realpath` and
-  must lie inside the *root*: `--root` / `MCP_SWITCHBOARD_HARNESS_ROOT`, default the working directory the
-  client was started in (`--root /` lifts the restriction). Relative paths resolve against the root;
-  `..` escapes and symlinks pointing outside are refused (`PermissionError`). A symlink *itself* can be
-  deleted or moved; only following it is checked. The root itself cannot be deleted. Paths returned to
-  the caller are relative to the root (`.` for the root).
+  must lie inside the *root* (`--root` / `MCP_SWITCHBOARD_HARNESS_ROOT`, default the working directory
+  the client was started in; `--root /` lifts the restriction), the *scratch* directory
+  (`<root>/.harness/scratch` by default; `--scratch` / `MCP_SWITCHBOARD_HARNESS_SCRATCH`, may live
+  outside the root, created on first use, disposable), or the *system temp directory* (`$TMPDIR`, else
+  `/tmp`) — the same set the unconfined shell tools can write anyway, so the paths never disagree.
+  Relative paths resolve against the root; `..` escapes and symlinks pointing outside the set are
+  refused (`PermissionError`, and the refusal names root, scratch and temp). `apply_patch` targets
+  must additionally stay inside the root. A symlink *itself* can be deleted or moved; only following
+  it is checked. The root itself cannot be deleted. Paths returned to the caller are relative to the
+  root (`.` for the root) or absolute when outside it.
 - **S3. Confinement is a guard, not a sandbox.** `run_command`, `run_python`, `process_start` (and
   `git_*`, through hooks and configuration) run arbitrary code as the launching user and are not
-  confined; only their `cwd` is. See section 10.
+  confined; only their `cwd` is. See section 10 and `docs/SANDBOX_PROPOSAL.md` (a proposal, not
+  implemented — nothing here enforces a security boundary).
 - **S4. Errors.** Expected failures are reported one of two ways, by tool family:
   - The *typed file tools* (9.2) report them **in the result** (`success`, `deleted`, `moved` = `false`
     plus a `message`) for outcomes like a missing path or refused overwrite, and raise for faults such
@@ -1628,7 +1697,9 @@ just sitting `blocked`). Everything else stays in-app.
 
 All outputs are advertised as JSON output schemas (`structuredContent`).
 
-**`run_command`**: run a shell command via `bash -c`.
+**`run_command`**: run a shell command via `bash -c`. When it drives CLIs that have machine-readable
+modes (especially Slurm), prefer `--json` / `--parsable` over default table output: Slurm table
+columns are misalignment-prone and silently mis-parse.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1680,8 +1751,10 @@ All outputs are advertised as JSON output schemas (`structuredContent`).
 | Field | Type | Notes |
 |---|---|---|
 | in `path` | string | required |
-| in `recursive` | boolean, default `false` | symlinks are not followed |
+| in `recursive` | boolean, default `false` | symlinks are not followed; `.git`, `node_modules`, `__pycache__`, `.venv`, `venv`, `.direnv` and the usual tool caches are listed but not entered (naming one as `path` lists its contents) |
+| in `limit` | integer, default `500` | at most this many entries are returned; must be positive |
 | out `entries[]` | object | `name`, `path` (root-relative), `size` (bytes), `is_dir`, `mtime` (ISO 8601 UTC) |
+| out `truncated` | boolean | more entries existed than `limit`: list a narrower path |
 
 Order is stable: sorted by name; when recursive, each directory's subdirectories then its files.
 Raises if `path` is not a directory.
@@ -1701,7 +1774,15 @@ Raises if `path` is not a directory.
 | `tree_of_files` | `root="."` | nested dict: subdirectories by name, files under `"__files__"`; skips `.git`, `node_modules`, `__pycache__`, `.venv` |
 | `find_files` | `pattern`, `root="."`, `limit=1000` | sorted root-relative paths of files whose path or name matches a glob such as `**/*.py`. Inside a git repository `.gitignore` is honoured (tracked plus untracked-not-ignored files); otherwise the directories above are skipped |
 | `ripgrep` | `query`, `path="."`, `glob=None`, `ignore_case=false`, `context=0`, `max_results=200` | `{matches: [{file, line_no, text, is_match}], truncated}`; `context` adds up to 20 surrounding lines per match (`is_match: false`); `truncated` when `max_results` was hit; requires `rg` |
-| `read_lines` | `path`, `start=1`, `end=None` | lines `start..end`, 1-based inclusive |
+| `read_lines` | `path`, `start=1`, `end=None` | `{text, start, end, total_lines, truncated}` — lines `start..end` (1-based inclusive) as **one string with newlines intact**, newline-faithful the way `file_read` is (`read_lines(f, 1, ∞).text == file_read(f).raw_text`); `truncated` output pages with `start=end+1` |
+| `apply_patch` | `patch`, `dry_run=false` | `{applied, dry_run, files: [{path, action, hunks, added, removed, renamed_from}]}`; applies a git-style or plain unified diff (multi-file, create, delete, rename) with a built-in applier, all-or-nothing across files; paths must stay inside the root |
+| `multi_edit` | `path`, `edits: [{old_str, new_str, replace_all?}]`, `dry_run=false` | summary plus diff; edits apply in order with `edit_file`'s uniqueness rules, all-or-nothing, errors name the failing edit |
+| `find_symbol` | `name`, `path="."`, `kind=None`, `max_results=100` | `{method: "ctags"\|"heuristic", results: [{file, line, text, kind}], truncated}`; definitions, via universal-ctags when installed, else ripgrep patterns for py, go, ts/js, rust, java and c/c++ |
+| `find_references` | `name`, `path="."`, `max_results=100` | same shape as `find_symbol`; word-boundary matches minus the definition lines |
+| `run_tests` | `command=None`, `path="."`, `timeout=None` | `{framework, command, exit_code, ok, passed, failed, skipped, failures: [{name, file, line, message}], output_tail, output_id}`; auto-detects pytest, `go test`, `npm test` and `cargo test` |
+| `data_query` | `path`, `query=None`, `format=None`, `limit=100`, `filter=None`, `columns=None`, `where=None`, `describe=false` | read-only JSON, JSONL, CSV and TSV queries: a dotted/bracket path for JSON, `columns` and `where` for CSV, and `describe` for a schema summary |
+| `output_read` | `output_id`, `stream="stdout"`, `offset=0`, `limit=None`, `mode="chars"\|"lines"` | `{text, offset, next_offset, total, more}`; pages through output that was cut at the cap (the full text of the last 20 cut outputs is kept in memory) |
+| `output_grep` | `output_id`, `pattern`, `stream="stdout"`, `context=2`, `max_results=100` | line-numbered matches from a stored output |
 | `edit_file` | `path`, then either `new_content`, or `old_str` + `new_str` (+ `replace_all=false`) | confirmation. `old_str` must occur **exactly once** unless `replace_all`; zero matches, several matches without `replace_all`, an empty `old_str`, or a missing file is an error, so the wrong spot is never edited silently |
 | `run_python` | `code`, `timeout=120` | `{exit_code, stdout, stderr, truncated}` from a fresh interpreter run in the root; output capped. Field names and the `timeout` default match `run_command` deliberately — the two are siblings, and a model that has learnt `exit_code` on one should not have to retry against `returncode` on the other. (The current implementation returns `returncode`; renaming it is part of this revision.) |
 
@@ -1723,7 +1804,7 @@ and path arguments are confined to the root. Output is capped (S5).
 | `git_add` | `files: [str]` | git output |
 | `git_checkout` | `ref`, `create=false` | switch (or create and switch); git refuses if uncommitted changes would be lost |
 | `git_commit` | `message` | git output |
-| `git_push` | none | git output |
+| `git_push` | none | git output; declares `switchboard.irreversible` in its `_meta` (W1a: gated even under `approval=never`), takes no arguments (so no force path exists), and flags a direct push to `main`/`master` in the output |
 
 ### 9.5 Background processes
 
@@ -1734,18 +1815,29 @@ For work that outlives one call (dev servers, watchers, slow builds).
 | `process_start` | `command`, `cwd=None`, `env=None` | `{id, pid}`; at most 16 at once, all killed when the harness exits |
 | `process_read` | `id`, `wait=0` | `{id, stdout, stderr, running, exit_code, dropped}`: only output produced since the previous read; `wait` (max 30 s) pauses until exit or timeout first; `dropped` means older output overflowed the 1,000,000-character buffer |
 | `process_kill` | `id` | `{id, killed, message}`; kills the whole process group; unread output stays readable |
+| `wait_for_start` | `until`, `timeout=3600`, `poll=20` | `{id}`; a harness-side **watch**: re-runs the shell `until` predicate every `poll` s (each run capped at 60 s) and is **satisfied when a run exits non-zero** (`until="squeue -j 3046 -h | grep -q ."` clears when the queue line disappears). Returns at once — a long wait is never a blocking tool call, so no hub `CALL_TIMEOUT` can kill it (P0-B). `timeout` up to one week. Shares the cap of 16 with `process_start`; killed when the harness exits |
+| `wait_for_poll` | `id` | `{id, done, satisfied, exit_code, elapsed_s, polls, stdout, stderr, dropped}`; output drains incrementally like `process_read`. **Pull only:** completion is never pushed to the agent |
 
-Finished, fully-read processes are forgotten when a new one starts. An unknown `id` is an error.
+Finished, fully-read processes and watches are forgotten when a new one starts. An unknown `id` is an error.
+
+**The wake contract** (what the harness cannot do, and what replaces it): a background process
+or watch finishing does **not** wake the agent — `process_read` and `wait_for_poll` are pull-only;
+the agent cannot self-schedule and runs only when a turn fires; background processes and watches
+die when the harness exits. The supported way to "notify the user on completion of a long task"
+is therefore in-turn: `wait_for_start`, then keep turns going by calling `wait_for_poll` (a short
+call; a satisfied or timed-out watch also reports partial predicate output rather than nothing),
+and ask/report with `switchboard_user_ask` when the watch is `done`.
 
 ### 9.6 Tool annotations
 
 | Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
 |---|---|---|---|---|
-| `file_read`, `dir_list`, `tree_of_files`, `find_files`, `ripgrep`, `read_lines`, `git_status`, `git_log`, `git_diff`, `git_show`, `git_branch` | true | | true | false |
+| `file_read`, `dir_list`, `tree_of_files`, `find_files`, `ripgrep`, `read_lines`, `find_symbol`, `find_references`, `data_query`, `output_read`, `output_grep`, `git_status`, `git_log`, `git_diff`, `git_show`, `git_branch` | true | | true | false |
 | `process_read` (consumes buffered output) | true | | false | false |
-| `file_write`, `edit_file`, `git_checkout` | false | true | false | false |
-| `file_delete`, `process_kill` | false | true | true | false |
+| `file_write`, `edit_file`, `multi_edit`, `apply_patch`, `git_checkout` | false | true | false | false |
+| `file_delete` | false | true | true | false |
 | `file_move`, `git_commit` | false | false | false | false |
+| `process_kill` (can only address ids this same harness started, W9) | false | false | true | false |
 | `git_add` | false | false | true | false |
 | `run_command`, `run_python`, `process_start` | false | true | false | true |
 | `git_push` | false | true | false | true |

@@ -54,6 +54,26 @@ required: this listener is the one intended to face the public internet.
 `instance` is a per-process UUID. `label` identifies the machine, defaults to its hostname, and is what
 the hub uses to tag tools by host. `command` is descriptive only — the hub never executes it.
 
+`client.instructions` is optional and additive (the protocol version stays 1; older clients omit it): a
+list of `{"path", "content"}` objects carrying the repository's own agent instruction files
+(`AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `.github/copilot-instructions.md`), read from the client's
+working directory tree at connect time, root-first. The hub injects them verbatim into the system
+prompt of agents that can see that client's tools, each labelled `label:path`, and re-reads them via
+`context_update` below. It is untrusted input bounded hub-side — at most 8 files, 32 KiB per file and
+64 KiB total, paths collapsed to one line, a malformed list dropped without refusing the hello (same
+tolerance as `environment`) — and it is a mirror: the hub never opens the paths it is shown.
+
+`client.environment_brief` is optional and additive (the protocol version stays 1; older clients omit
+it): a short (~30 lines) plain-text description of the client host — user/uid/groups, hostname and OS,
+sudo status (verified only by a non-interactive check; otherwise `unknown`), cwd, git root/branch/
+dirty+untracked counts and the `origin` remote with credentials redacted, the scratch and temp paths the
+file tools may write, DNS resolvers and local addresses (**reachability is never probed**), and
+present/absent for a curated tool list. The hub injects it, verbatim and stamped with its age, into the
+system prompt of agents that can see that client's tools; a brief older than 5 minutes is marked stale
+rather than silently trusted, alongside a hub section (effective `CALL_TIMEOUT`, push-notification
+state) that only the hub knows. Untrusted input capped at 8 KiB hub-side; a malformed value is dropped
+without refusing the hello. Clients refresh it via `context_update` below.
+
 `client.environment` is optional and additive (the protocol version stays 1; older clients omit it). It
 tells the hub where the client runs so a console can show it: `kinds` is a list of open strings (today
 `devcontainer`, `container`, `direnv`, `nix-shell`, `venv`; may be empty), `project` the project name
@@ -97,6 +117,29 @@ and the hub needs no id rewriting.
 
 States: `starting`, `running`, `exited`, `failed`. Sent on every transition so the console can show a
 crashed server with its error instead of silently listing no tools.
+
+### `context_update` — client → hub
+
+```json
+{"type": "context_update", "instructions": [{"path": "AGENTS.md", "content": "# new rules\n"}], "environment_brief": "uid=1000 user=me\n..."}
+```
+
+Carries an updated copy of either context item; both fields are independently optional and each
+replaces its hub-side copy **wholesale** (an empty list or string clears it, an absent field is left
+alone). Clients send it whenever the collected instruction files change (edits to `AGENTS.md` reach the
+agent without a reconnect) and whenever the environment brief changes (each push also resets that
+carry's staleness clock). Same caps and same tolerance rules as the corresponding `hello` fields; a hub
+that does not know this frame ignores it, so the older snapshot simply stays in use.
+
+## Tool `_meta` extensions
+
+Servers may carry namespaced hints in a tool's `_meta` (an MCP standard field). Switchboard honours
+exactly one: `switchboard.irreversible: true` — the server asserts that this tool's effect cannot be
+undone from that machine (a `git_push`; the harness also sends `switchboard.irreversibleReason`, shown
+to the approver). The hub gates such tools even under `approval: "never"` (spec W1a), passes the fact
+to downstream `/mcp` consumers as tool meta `irreversible`, and serves it in the API as
+`annotations.irreversibleHint`. Foreign namespaces in `_meta` are never interpreted, and a claim from
+a server is a claim — like all annotations it is advisory (spec W4), never a security control.
 
 ### `restart` — hub → client
 

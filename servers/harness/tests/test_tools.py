@@ -89,11 +89,26 @@ def test_timeout_kills_the_whole_process_group(tmp_path):
     marker = tmp_path / "child_alive"
     cmd = f"(sleep 2; touch {marker}) & sleep 30"
     start = time.time()
-    with pytest.raises(RuntimeError, match="timed out"):
-        run(h.run_command(cmd, timeout=0.5))
-    assert time.time() - start < 5
+    r = run(h.run_command(cmd, timeout=0.5))
+    assert time.time() - start < 10
+    assert r.timed_out and r.exit_code == h.TIMEOUT_EXIT_CODE
     time.sleep(2.5)
     assert not marker.exists(), "background child survived the timeout"
+
+
+def test_timeout_returns_partial_output(tmp_path):
+    r = run(h.run_command("echo first; echo oops >&2; sleep 30", timeout=1))
+    assert r.timed_out and r.exit_code == h.TIMEOUT_EXIT_CODE and r.truncated
+    assert r.stdout == "first\n" and r.stderr == "oops\n"
+    assert r.stdout_total == 6 and r.stderr_total == 5
+    assert r.applied_timeout_s == 1 and r.elapsed_s is not None and r.elapsed_s < 15
+
+
+def test_run_python_timeout_keeps_output(tmp_path):
+    code = "import sys, time\nprint('tick', flush=True)\ntime.sleep(30)\n"
+    r = run(h.run_python(code, timeout=1))
+    assert r["timed_out"] and r["truncated"]
+    assert r["stdout"] == "tick\n" and r["returncode"] == h.TIMEOUT_EXIT_CODE
 
 
 def test_missing_binary_is_a_clear_error():
@@ -157,7 +172,7 @@ def test_file_delete(tmp_path):
     assert h.file_delete("f").deleted
     (tmp_path / "d" / "in").mkdir(parents=True)
     assert not h.file_delete("d", recursive=False).deleted and (tmp_path / "d").exists()
-    assert h.file_delete("d").deleted and not (tmp_path / "d").exists()
+    assert h.file_delete("d", recursive=True).deleted and not (tmp_path / "d").exists()
     missing = h.file_delete("nope")
     assert not missing.deleted and "does not exist" in missing.message
 
@@ -185,8 +200,9 @@ def test_file_move(tmp_path):
 
 def test_read_lines(tmp_path):
     (tmp_path / "b.txt").write_text("1\n2\n3\n")
-    assert h.read_lines("b.txt", 2, 3) == ["2", "3"]
-    assert h.read_lines("b.txt") == ["1", "2", "3"]
+    r = h.read_lines("b.txt", 2, 3)
+    assert r.text == "2\n3\n" and (r.start, r.end, r.total_lines, r.truncated) == (2, 3, 3, False)
+    assert h.read_lines("b.txt").text == "1\n2\n3\n"
 
 
 def test_edit_file(tmp_path):
@@ -195,8 +211,8 @@ def test_edit_file(tmp_path):
     with pytest.raises(ValueError, match="2 times"):  # ambiguous
         h.edit_file("f.txt", old_str="a", new_str="X")
     assert p.read_text() == "a a b"
-    assert h.edit_file("f.txt", old_str="b", new_str="c") == "replaced 1 occurrence"
-    assert h.edit_file("f.txt", old_str="a", new_str="z", replace_all=True) == "replaced 2 occurrences"
+    assert h.edit_file("f.txt", old_str="b", new_str="c").startswith("replaced 1 occurrence\n")
+    assert h.edit_file("f.txt", old_str="a", new_str="z", replace_all=True).startswith("replaced 2 occurrences")
     assert p.read_text() == "z z c"
     h.edit_file("f.txt", new_content="q")
     assert p.read_text() == "q"
@@ -334,3 +350,70 @@ def test_too_many_background_processes():
                 await h.process_kill(i)
 
     run(scenario())
+
+
+def test_file_delete_directory_needs_recursive_by_default(tmp_path):
+    (tmp_path / "d" / "in").mkdir(parents=True)
+    assert not h.file_delete("d").deleted and (tmp_path / "d").exists()
+
+
+def test_read_lines_and_text_paging(tmp_path):
+    (tmp_path / "t").write_text("a\nb\nc\nd\n")
+    assert h.read_lines("t", 2, 3).text == "b\nc"  # mid-file range: no trailing newline
+    assert h.read_lines("t", 3).text == "c\nd\n"
+    r = h.file_read("t", offset=2, limit=3)
+    assert r.raw_text == "b\nc"[:3] and r.truncated and r.size == 8
+    assert not h.file_read("t", offset=4).truncated
+
+
+def test_ripgrep_max_results_truncates(tmp_path):
+    (tmp_path / "g").write_text("hit\n" * 50)
+    r = run(h.ripgrep("hit", max_results=5))
+    assert len(r.matches) == 5 and r.truncated
+    assert not run(h.ripgrep("hit", max_results=500)).truncated
+
+
+def test_cleanup_kills_background_process_groups():
+    import os
+
+    async def go():
+        started = await h.process_start("sleep 60 & sleep 60")
+        return started.pid
+
+    pid = run(go())
+    os.killpg(pid, 0)  # group alive
+    h._kill_all_processes()
+    for _ in range(50):
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("process group still alive")
+
+
+def test_dir_list_recursive_skips_dependency_trees_and_honours_limit(tmp_path):
+    for d in ("node_modules/pkg", ".direnv/x", "src"):
+        (tmp_path / d).mkdir(parents=True)
+    (tmp_path / "node_modules/pkg/deep.js").write_text("x")
+    (tmp_path / ".direnv/x/blob").write_text("x")
+    (tmp_path / "src/a.py").write_text("x")
+    h.configure(root=str(tmp_path))
+    res = h.dir_list(".", recursive=True)
+    paths = {e.path for e in res.entries}
+    assert "node_modules" in paths and ".direnv" in paths  # listed...
+    assert "node_modules/pkg" not in paths and ".direnv/x" not in paths  # ...not entered
+    assert "src/a.py" in paths and not res.truncated
+    # naming a skipped directory explicitly still lists what is inside it
+    inside = {e.path for e in h.dir_list("node_modules", recursive=True).entries}
+    assert "node_modules/pkg/deep.js" in inside
+
+    for i in range(30):
+        (tmp_path / "src" / f"f{i:02}.py").write_text("x")
+    cut = h.dir_list("src", recursive=True, limit=10)
+    assert len(cut.entries) == 10 and cut.truncated
+    flat = h.dir_list("src", limit=5)
+    assert len(flat.entries) == 5 and flat.truncated
+    with pytest.raises(ValueError):
+        h.dir_list("src", limit=0)

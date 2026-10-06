@@ -1,9 +1,9 @@
 """Tunnel protocol v1 frames. Spec: docs/PROTOCOL.md.
 
-This module is duplicated byte-for-byte into mcp_switchboard_client and
-mcp_switchboard_hub so that neither package has to depend on the other - the
-client deliberately carries no MCP dependency. hub/tests/test_protocol_sync.py
-fails if the two copies drift.
+docs/protocol.json is the normative manifest, asserted from both sides:
+client/tests/test_protocol_conformance.py is the Python half and
+hub/internal/protocol/protocol_test.go the Go half. Drift in either direction
+fails CI. The client deliberately carries no MCP dependency.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ MCP = "mcp"
 SERVER_STATE = "server_state"
 RESTART = "restart"
 ERROR = "error"
+CONTEXT_UPDATE = "context_update"
 
 STATE_STARTING = "starting"
 STATE_RUNNING = "running"
@@ -50,16 +51,41 @@ def hello(
     label: str,
     servers: List[Dict[str, Any]],
     environment: Optional[Dict[str, Any]] = None,
+    instructions: Optional[List[Dict[str, str]]] = None,
+    environment_brief: Optional[str] = None,
 ) -> Dict[str, Any]:
     client: Dict[str, Any] = {"name": client_name, "version": version, "instance": instance, "label": label}
     if environment is not None:
         client["environment"] = environment
+    if instructions is not None:
+        client["instructions"] = instructions
+    if environment_brief is not None:
+        client["environment_brief"] = environment_brief
     return {
         "type": HELLO,
         "protocol": PROTOCOL_VERSION,
         "client": client,
         "servers": servers,
     }
+
+
+def context_update(
+    instructions: Optional[List[Dict[str, str]]] = None,
+    environment_brief: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Replace the hub's copy of the client's instruction files and/or host brief.
+
+    Each present field replaces its hub-side copy wholesale (an empty list or
+    string clears it); an absent field is left alone. Sent whenever the client
+    re-reads them (files changed / brief refreshed); it is additive (protocol
+    version stays 1) and hubs that do not know the frame ignore it.
+    """
+    frame: Dict[str, Any] = {"type": CONTEXT_UPDATE}
+    if instructions is not None:
+        frame["instructions"] = instructions
+    if environment_brief is not None:
+        frame["environment_brief"] = environment_brief
+    return frame
 
 
 def hello_ack(connection_id: str, hub_name: str, hub_version: str) -> Dict[str, Any]:

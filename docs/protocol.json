@@ -9,12 +9,17 @@
       "direction": "client->hub",
       "required": ["type", "protocol", "client", "servers"],
       "optional": [],
-      "clientOptional": ["environment"]
+      "clientOptional": ["environment", "instructions", "environment_brief"]
     },
     "hello_ack": {
       "direction": "hub->client",
       "required": ["type", "connectionId", "hub"],
       "optional": []
+    },
+    "context_update": {
+      "direction": "client->hub",
+      "required": ["type"],
+      "optional": ["instructions", "environment_brief"]
     },
     "mcp": {
       "direction": "both",

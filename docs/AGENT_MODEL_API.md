@@ -44,6 +44,7 @@ interface Agent { /* everything in docs/API.md, plus: */
   origin: "manual" | "spawn" | "chat";   // manual = created from the Chat panel via POST /api/agents with clientLabel present
   clientLabel: string | null;            // the one client; null = none
   profileId: string | null;
+  toolAllow: string[] | null;            // glob patterns on the upstream tool name narrowing the agent's tools; null = no narrowing. Set by switchboard.chat.spawn's `allowed_tools`
 }
 ```
 

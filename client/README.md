@@ -47,6 +47,24 @@ the client in. Turn it off with
 `--no-harness` or `MCP_SWITCHBOARD_HARNESS=false`; an `mcp.json` entry named
 `harness` replaces it.
 
+The client also collects the instruction files your repository carries for coding
+agents (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `.github/copilot-instructions.md`,
+also at any depth, capped at 8 files / 64 KiB) from the start directory and ships them
+to the hub, which puts them into the agent's system prompt; it re-sends them whenever
+they change, so an edit to `AGENTS.md` reaches a running session. Turn it off with
+`--no-instructions` or `MCP_SWITCHBOARD_INSTRUCTIONS=false`.
+
+A push is treated as what it is: the harness marks `git_push` irreversible in its tool `_meta`, so
+the hub asks for approval before any agent can run it — even one set to `approval=never`. If that
+friction is wrong for your deployment, that is a decision to make deliberately, not by silence.
+
+Alongside them the client ships a short environment brief of the host your tools run
+on — user, hostname, git branch/dirtiness (remote with credentials redacted), what the
+file tools may write, tool presence; sudo is reported only if provable without a
+prompt, and network reachability is never probed — refreshed like the instruction
+files and marked stale by the hub if a client vanishes. Turn it off with
+`--no-env-brief` or `MCP_SWITCHBOARD_ENV_BRIEF=false`.
+
 Settings can also come from `MCP_SWITCHBOARD_*` environment variables or a
 `.env` file (`HUB_URL`, `TUNNEL_TOKEN`, `LABEL`, `CONFIG`, …). Any value that
 starts with `/` and points at an existing regular file is read from that file, so

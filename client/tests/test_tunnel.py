@@ -4,12 +4,15 @@ Both the WebSocket and the local servers are faked; the real ones are covered
 by test_supervisor.py and by the hub's own tests.
 """
 
+import asyncio
 import json
+import logging
 
 import pytest
 
 from mcp_switchboard_client import protocol
 from mcp_switchboard_client.config import ServerSpec
+from mcp_switchboard_client import tunnel as tunnel_mod
 from mcp_switchboard_client.tunnel import HubConnection, TunnelSettings
 
 pytestmark = pytest.mark.asyncio
@@ -117,6 +120,7 @@ def make_connection(sessions, *, max_retries=1, when_exhausted=None, **overrides
         label=overrides.pop("label", "legion5"),
         reconnect_delay=0.0,
         max_retries=max_retries,
+        **overrides,
     )
     connect = FakeConnect(sessions, when_exhausted=when_exhausted)
     connection = HubConnection(
@@ -241,6 +245,105 @@ async def test_error_before_hello_ack_is_fatal_and_not_retried():
     await connection.run()
 
     assert len(connect.calls) == 1
+    assert "unsupported protocol version" in connection.failure
+
+
+async def test_label_already_connected_is_retried():
+    sessions = [
+        FakeWebSocket([protocol.error("label legion5 is already connected")]),
+        FakeWebSocket([protocol.hello_ack("c1", "hub", "0.1.0")]),
+    ]
+    connection, connect = make_connection(sessions, max_retries=5)
+
+    await connection.run()
+
+    assert len(connect.calls) >= 2
+    assert connection.servers["git"].restarts >= 1  # second session got its ack
+
+
+async def test_max_retries_exhaustion_sets_failure():
+    connection, _ = make_connection([], max_retries=2)
+
+    await connection.run()
+
+    assert connection.failure and "giving up" in connection.failure
+
+
+async def test_clean_stop_has_no_failure():
+    ws = FakeWebSocket([protocol.hello_ack("c1", "hub", "0.1.0")])
+    connection, _ = make_connection([ws], max_retries=0, when_exhausted=lambda: connection.request_stop())
+
+    await connection.run()
+
+    assert connection.failure is None
+
+
+async def test_backoff_delay_is_jittered(monkeypatch):
+    delays = []
+
+    async def fake_sleep(self, delay):
+        delays.append(delay)
+        return False
+
+    monkeypatch.setattr(HubConnection, "_sleep_or_stop", fake_sleep)
+    monkeypatch.setattr(tunnel_mod.random, "uniform", lambda a, b: b)
+    connection, _ = make_connection([], max_retries=3)
+    connection.settings.reconnect_delay = 1.0
+
+    await connection.run()
+
+    assert delays == pytest.approx([1.2, 2.4])
+    assert tunnel_mod.BACKOFF_JITTER == 0.2
+
+
+async def test_slow_server_does_not_stall_others():
+    connection, _ = make_connection([], max_retries=1)
+    gate = asyncio.Event()
+    slow, fast = connection.servers["git"], connection.servers["fetch"]
+
+    async def slow_send(line):
+        await gate.wait()
+        slow.received.append(line)
+
+    slow.send = slow_send
+    connection._ws = FakeWebSocket([])
+    try:
+        await connection._handle_frame(json.dumps(protocol.mcp("git", {"id": 1})))
+        await connection._handle_frame(json.dumps(protocol.mcp("git", {"id": 2})))
+        await connection._handle_frame(json.dumps(protocol.mcp("fetch", {"id": 3})))
+        await asyncio.sleep(0.05)
+        assert len(fast.received) == 1
+        assert slow.received == []
+        gate.set()
+        await asyncio.sleep(0.05)
+        assert slow.received == [json.dumps({"id": 1}), json.dumps({"id": 2})]  # ordered
+    finally:
+        await connection._shutdown_workers(drain=False)
+    assert connection._workers == {}
+
+
+async def test_workers_are_cancelled_on_disconnect():
+    ws = FakeWebSocket([protocol.hello_ack("c1", "hub", "0.1.0"), protocol.mcp("git", {"id": 1})])
+    connection, _ = make_connection([ws])
+    await connection.run()
+    assert connection._workers == {} and connection._queues == {}
+
+
+@pytest.mark.parametrize(
+    "url,warns",
+    [
+        ("ws://hub.example.com", True),
+        ("ws://192.168.1.5:8080", True),
+        ("ws://localhost:8080", False),
+        ("ws://127.0.0.2:8080", False),
+        ("ws://[::1]:8080", False),
+        ("wss://hub.example.com", False),
+    ],
+)
+def test_plaintext_remote_ws_warns(url, warns, caplog):
+    with caplog.at_level(logging.WARNING, logger="mcp_switchboard_client.tunnel"):
+        make_connection([], hub_url=url)
+    assert any("plaintext" in r.message for r in caplog.records) is warns
 
 
 async def test_error_after_hello_ack_keeps_the_session():

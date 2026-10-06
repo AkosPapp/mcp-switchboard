@@ -70,6 +70,17 @@ interface Run {
   budgetSnapshot: object; usage: object; error: string | null; finishReason: string | null;
   createdAt: Ts; startedAt: Ts | null; finishedAt: Ts | null;
 }
+// Run.usage, camelCase, saved after every turn and finalised when the run ends.
+interface RunUsage {
+  turns: number; toolCalls: number;
+  inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number;
+  tokens: number;          // sum over every turn; each turn resends the conversation, so this grows faster than the chat
+  contextTokens: number;   // the last turn's prompt: how full the context window is now
+  contextWindow?: number;  // the model's window, when the provider reports it
+  costMicros: number; wallSeconds: number;
+  truncated?: true;        // the provider dropped the start of a prompt that filled the window
+  limit?: string;          // the budget key that ended the run, if one did
+}
 interface PendingApproval { callId: string; tool: string; arguments: object; expiresAt: Ts }
 ```
 
@@ -143,6 +154,7 @@ interface GraphView {
 | `GET /api/chats/{id}/export?format=json\|markdown` | | file download. `json` is `{chat, messages, systemPrompt, tools}`. Each **assistant message** in `messages` is byte-reproduction-complete on its own: `model` carries the full turn options actually sent (`provider`, `model`, `max_tokens`, `temperature`, `thinking`), plus its own `systemPrompt` and `tools` (the exact text/definitions that turn ran against) — these do not drift even if the chat's profile or grants change later, unlike the top-level `systemPrompt`/`tools` fields, which are only a convenience snapshot of what the chat resolves to *now* (same live-resolved data as `GET .../system-prompt` and `GET .../tools`), omitted if that can no longer be resolved. `markdown` is the active path only, without any of this |
 | `GET /api/chats/{id}/draft` | | `200 {draft: string, updatedAt: string\|null}` (`""` / `null` when none) |
 | `PUT /api/chats/{id}/draft` | `{draft: string}` | `200` same shape. Empty or whitespace-only deletes the draft. Body max 256 KiB (`413`). Publishes a `chat` event |
+| `GET /api/chats/{id}/todos` | | `200 {todos: [{id, content, status, createdAt, updatedAt}]}` in order; `status` is `pending`, `in_progress` or `completed`. The agent's plan list, rewritten whole by its `switchboard.todo.write` tool; each write publishes a `chat` event. `404` for an unknown chat |
 | `GET /api/chats/{id}/stream` | | SSE, see below |
 
 - Drafts: unsent composer text, stored server-side. Posting a message or branching with new user
