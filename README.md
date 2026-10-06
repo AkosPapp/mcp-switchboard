@@ -158,8 +158,13 @@ curl -fsSL https://akospapp.github.io/mcp-switchboard/install.sh | sh -s -- \
   --editor=code --hub-url wss://switchboard.example.com --token "$TOKEN"
 ```
 
-`--editor=code` implies `--opencode`, which is also usable on its own — for hosts
-where you just want `opencode` in any terminal, no VS Code:
+`--editor=code` implies `--opencode`, which is also usable on its own and **ends
+the command in a running `opencode` session**: the client tunnel is moved to the
+background (pid and log under `~/.cache/mcp-switchboard-installer/`, a rerun
+reuses a live client instead of double-tunnelling) and `opencode` takes the
+terminal. Exiting opencode leaves the tunnel running; `kill $(cat
+~/.cache/mcp-switchboard-installer/client.pid)` stops it. For hosts where you
+just want `opencode`, no VS Code:
 
 ```sh
 curl -fsSL https://akospapp.github.io/mcp-switchboard/install.sh | sh -s -- \

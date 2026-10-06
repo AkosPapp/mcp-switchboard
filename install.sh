@@ -22,12 +22,16 @@
 #                        from starting. MCP_SWITCHBOARD_MCP_URL overrides the
 #                        endpoint. Implies --opencode.
 #
-#   --opencode           make sure OpenCode itself exists, so `opencode` works
-#                        in any terminal, VS Code or not. The official
-#                        per-user installer (~/.opencode/bin, no sudo) runs
-#                        only when none is found: an existing copy - a Nix-
-#                        managed one very likely - is left completely alone.
-#                        The /mcp config merge applies here too.
+#   --opencode           end this command IN an OpenCode session. Makes sure
+#                        opencode exists (the official per-user installer,
+#                        ~/.opencode/bin, no sudo, runs only when none is
+#                        found - an existing copy, very likely a Nix-managed
+#                        one, is left completely alone), merges the /mcp entry
+#                        into the global opencode.json, starts the client
+#                        TUNNEL in the background (log/pid under
+#                        ~/.cache/mcp-switchboard-installer/), then execs
+#                        opencode in this terminal. Exiting opencode leaves the
+#                        client running; `kill $(cat .../client.pid)` stops it.
 #
 # POSIX sh only - no bashisms. Safe to re-run. Fails loudly rather than
 # falling through to a broken `uvx` invocation.
@@ -432,7 +436,7 @@ setup_editor() {
                 # terminal reaches the hub's /mcp without VS Code.
                 ensure_opencode
                 merge_opencode_config "$(resolved_mcp_url)"
-                log "run 'opencode' in any terminal; it talks to the hub through the switchboard entry just configured"
+                log "opencode is wired to the hub through the switchboard entry just configured"
             fi
             return 0
             ;;
@@ -536,10 +540,57 @@ main() {
     # and before the exec, so it happens even on a first-ever run.
     setup_editor
 
+    # The client's command line as positional arguments, so one exec point can
+    # either replace this shell with it (plain run) or background it (--opencode).
     if [ "$_via_nix" -eq 1 ]; then
-        exec nix shell nixpkgs#nodejs nixpkgs#uv --command uvx --prerelease allow "$PACKAGE_NAME" "$@"
+        set -- nix shell nixpkgs#nodejs nixpkgs#uv --command uvx --prerelease allow "$PACKAGE_NAME" "$@"
+    else
+        set -- uvx --prerelease allow "$PACKAGE_NAME" "$@"
     fi
-    exec uvx --prerelease allow "$PACKAGE_NAME" "$@"
+
+    # --opencode ends the command IN an opencode session: the client goes to
+    # the background (it is the tunnel that gives opencode's hub tools their
+    # local reach; nohup keeps it past this terminal), and opencode takes over
+    # the foreground terminal. The session is the point of the flag, so after
+    # exiting opencode the client keeps running - stop it with the printed
+    # kill, or just say so with a plain re-run of this script.
+    if [ "$OPENCODE_WANTED" -eq 1 ]; then
+        _oc=""
+        if has_cmd opencode; then
+            _oc=$(command -v opencode)
+        elif [ -x "$HOME/.opencode/bin/opencode" ]; then
+            # Just installed by ensure_opencode: ~/.opencode/bin is only on the
+            # PATH of shells the installer EDITED, not of this one.
+            _oc="$HOME/.opencode/bin/opencode"
+        fi
+        if [ -n "$_oc" ]; then
+            _pidfile="$CACHE_DIR/client.pid"
+            _log="$CACHE_DIR/client.log"
+            _running=0
+            if [ -f "$_pidfile" ] && read -r _p <"$_pidfile" 2>/dev/null && [ -n "${_p:-}" ] \
+                && kill -0 "$_p" 2>/dev/null; then
+                # /proc/cmdline check where it exists: a bare kill -0 would
+                # believe a recycled pid.
+                if [ -r "/proc/${_p}/cmdline" ]; then
+                    grep -qa "$PACKAGE_NAME" "/proc/${_p}/cmdline" 2>/dev/null && _running=1
+                    [ "$_running" -eq 1 ] || rm -f "$_pidfile"
+                else
+                    _running=1
+                fi
+            fi
+            if [ "$_running" -eq 1 ]; then
+                log "client already running in the background (pid $_p); leaving it alone"
+            else
+                mkdir -p "$CACHE_DIR"
+                nohup "$@" < /dev/null >> "$_log" 2>&1 &
+                echo "$!" >"$_pidfile"
+                log "client started in the background (pid $!); log: $_log; stop: kill \$(cat $_pidfile)"
+            fi
+            exec "$_oc"
+        fi
+        log "WARNING: no opencode binary found; starting the client in the foreground instead"
+    fi
+    exec "$@"
 }
 
 main "$@"
