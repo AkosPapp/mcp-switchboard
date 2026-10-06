@@ -193,7 +193,7 @@ func (m *Manager) createAgent(ctx context.Context, in CreateAgentInput, spawned 
 		return nil, nil, err
 	}
 
-	chat := store.Chat{AgentID: created.ID, Kind: store.ChatKindHuman, Title: in.ChatTitle, ProfileID: created.ProfileID, ClientLabel: created.ClientLabel}
+	chat := store.Chat{AgentID: created.ID, Kind: chatKindFor(in), Title: in.ChatTitle, ProfileID: created.ProfileID, ClientLabel: created.ClientLabel}
 	if parent != nil {
 		parentChat := in.ParentChatID
 		if spawned {
@@ -467,6 +467,11 @@ func (m *Manager) liveAgentForChat(ctx context.Context, chatID string) (*store.C
 func (m *Manager) Post(ctx context.Context, chatID string, in PostInput) (*PostResult, error) {
 	if len(in.Content) == 0 {
 		return nil, fmt.Errorf("%w: content is required", ErrInvalid)
+	}
+	if chat, err := m.st.GetChat(ctx, chatID); err != nil {
+		return nil, err
+	} else if chat != nil && chat.Kind == store.ChatKindBridge {
+		return m.postBridge(ctx, chat, in)
 	}
 	chat, agent, err := m.liveAgentForChat(ctx, chatID)
 	if err != nil {

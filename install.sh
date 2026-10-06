@@ -12,26 +12,31 @@
 # One flag belongs to this script and is consumed here rather than forwarded:
 #
 #   --editor=code|none   set up the OpenCode TUI inside VS Code (default none).
-#                        Installs the sst-dev.opencode extension and creates
-#                        (merging, never clobbering) the global opencode.json
-#                        entry that points OpenCode at the hub's /mcp endpoint -
-#                        worked out from --hub-url: a loopback hub URL means the
-#                        private listener right here (127.0.0.1:8099), anything
-#                        else gets /mcp on the same origin. Best-effort: a
-#                        missing or unwritable editor never stops the client
-#                        from starting. MCP_SWITCHBOARD_MCP_URL overrides the
-#                        endpoint. Implies --opencode.
+#                        Installs the sst-dev.opencode extension and the hub
+#                        bridge plugin (see --opencode). Best-effort: a missing
+#                        or unwritable editor never stops the client from
+#                        starting. Implies --opencode.
 #
 #   --opencode           end this command IN an OpenCode session. Makes sure
 #                        opencode exists (the official per-user installer,
 #                        ~/.opencode/bin, no sudo, runs only when none is
 #                        found - an existing copy, very likely a Nix-managed
-#                        one, is left completely alone), merges the /mcp entry
-#                        into the global opencode.json, starts the client
-#                        TUNNEL in the background (log/pid under
+#                        one, is left completely alone), installs the hub
+#                        bridge plugin (editor/opencode/plugin in this repo,
+#                        served from the Pages site): every opencode session
+#                        gets a bridge chat in the hub console - transcript
+#                        mirrored in both directions, permission prompts and
+#                        questions pushed to the phone, and switchboard_*
+#                        tools for talking to the hub's agents. The plugin
+#                        dials the hub API at an origin derived from
+#                        --hub-url (loopback -> http://127.0.0.1:8099,
+#                        otherwise the same origin; MCP_SWITCHBOARD_MCP_URL
+#                        overrides). Starts the client TUNNEL in the
+#                        background (log/pid under
 #                        ~/.cache/mcp-switchboard-installer/), then execs
-#                        opencode in this terminal. Exiting opencode leaves the
-#                        client running; `kill $(cat .../client.pid)` stops it.
+#                        opencode in this terminal. Exiting opencode leaves
+#                        the client running; `kill $(cat .../client.pid)`
+#                        stops it.
 #
 # POSIX sh only - no bashisms. Safe to re-run. Fails loudly rather than
 # falling through to a broken `uvx` invocation.
@@ -205,6 +210,11 @@ OPENCODE_EXTENSION="sst-dev.opencode"
 # because a hub URL describes this machine, not one repository.
 EDITOR_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
 
+# The hub-bridge plugin opencode loads from the config dir; it is served from
+# the same Pages site as this script (see .github/workflows/pages.yml).
+PLUGIN_FILE=""
+PLUGIN_URL="${MCP_SWITCHBOARD_PLUGIN_URL:-https://akospapp.github.io/mcp-switchboard/opencode/plugin/switchboard-hub.js}"
+
 # The endpoint written into opencode.json when nothing better is known.
 DEFAULT_MCP_URL="http://127.0.0.1:8099/mcp"
 
@@ -296,91 +306,6 @@ install_editor_extension() {
     fi
 }
 
-# merge_opencode_config: add/refresh the hub's mcp entry in the global
-# opencode.json without touching any other key. Merging rather than writing the
-# file is the whole point - that file carries the user's providers, agents and
-# plugins, and overwriting it would be exactly the host damage this script
-# promises not to do. Round-tripping JSON reflows formatting and key order.
-merge_opencode_config() {
-    _url=$1
-    _dir=$EDITOR_CONFIG_DIR
-    _file="$_dir/opencode.json"
-
-    mkdir -p "$_dir" 2>/dev/null || {
-        log "WARNING: cannot create $_dir; skipping the MCP wiring"
-        return 0
-    }
-    [ -f "$_file" ] || printf '{}' >"$_file" 2>/dev/null || {
-        log "WARNING: cannot write $_file; skipping the MCP wiring"
-        return 0
-    }
-
-    _out=$(mktemp) || return 0
-    # The token is only forwarded when the caller already exported it; the
-    # private listener is unauthenticated by default, and writing a secret into
-    # a config file is not something to do unasked.
-    OPENCODE_MCP_URL="$_url" \
-    OPENCODE_MCP_TOKEN="${MCP_SWITCHBOARD_PRIVATE_TOKEN:-}" \
-        _merge_json "$_file" "$_out" || {
-        rm -f "$_out"
-        log "WARNING: could not merge $_file (it may not be valid JSON); leaving it untouched"
-        log "  add this by hand under \"mcp\": {\"switchboard\": {\"type\": \"remote\", \"url\": \"$_url\", \"enabled\": true}}"
-        return 0
-    }
-    if cat "$_out" >"$_file" 2>/dev/null; then
-        log "wired opencode -> $_url ($_file)"
-    else
-        log "WARNING: could not write $_file"
-    fi
-    rm -f "$_out"
-}
-
-# _merge_json: pick whichever interpreter is on PATH. Both exist in this
-# script's normal environment (node is what it bootstraps), but the nix-shell
-# path keeps node inside the nix shell rather than on our PATH, so python3 is
-# the fallback and printing the snippet is the last resort.
-_merge_json() {
-    _in=$1
-    _out=$2
-    if has_cmd node; then
-        node -e '
-            const fs = require("fs");
-            const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-            if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) throw new Error("not an object");
-            cfg.mcp = (cfg.mcp && typeof cfg.mcp === "object") ? cfg.mcp : {};
-            const entry = { type: "remote", url: process.env.OPENCODE_MCP_URL, enabled: true };
-            if (process.env.OPENCODE_MCP_TOKEN) entry.headers = { Authorization: "Bearer " + process.env.OPENCODE_MCP_TOKEN };
-            cfg.mcp.switchboard = entry;
-            fs.writeFileSync(process.argv[2], JSON.stringify(cfg, null, 2) + "\n");
-        ' "$_in" "$_out" 2>/dev/null
-    elif has_cmd python3; then
-        python3 - "$_in" "$_out" <<'PY' 2>/dev/null
-import json, os, sys
-try:
-    with open(sys.argv[1]) as f:
-        cfg = json.load(f)
-except Exception:
-    sys.exit(1)
-if not isinstance(cfg, dict):
-    sys.exit(1)
-mcp = cfg.get("mcp")
-if not isinstance(mcp, dict):
-    mcp = {}
-entry = {"type": "remote", "url": os.environ["OPENCODE_MCP_URL"], "enabled": True}
-token = os.environ.get("OPENCODE_MCP_TOKEN") or ""
-if token:
-    entry["headers"] = {"Authorization": f"Bearer {token}"}
-mcp["switchboard"] = entry
-cfg["mcp"] = mcp
-with open(sys.argv[2], "w") as f:
-    json.dump(cfg, f, indent=2)
-    f.write("\n")
-PY
-    else
-        return 1
-    fi
-}
-
 # ensure_opencode: --opencode (implied by --editor=code). Detect first, install
 # second. The detect step is the whole point and must never be dropped: an
 # existing opencode is likely managed declaratively (on this project's author's
@@ -423,6 +348,104 @@ ensure_opencode() {
         log "note: Nix users can get a managed copy instead with 'nix profile install nixpkgs#opencode'"
 }
 
+# install_opencode_plugin: fetch the bridge plugin and merge its entry into
+# the global opencode.json without touching any other key (that file carries
+# the user's providers and agents; clobbering it is exactly what this script
+# promises not to do). Merging also REMOVES the legacy mcp "switchboard" entry:
+# opencode gets its local file/shell power from its own built-in tools now,
+# and hub comms from the plugin - a second harness over /mcp was duplication.
+install_opencode_plugin() {
+    _hub_base=$1
+    _dir=$EDITOR_CONFIG_DIR
+    _file="$_dir/opencode.json"
+    PLUGIN_FILE="$_dir/plugin/switchboard-hub.js"
+
+    mkdir -p "$_dir/plugin" 2>/dev/null || {
+        log "WARNING: cannot create $_dir/plugin; skipping the hub bridge"
+        return 0
+    }
+    if fetch "$PLUGIN_URL" "$PLUGIN_FILE"; then
+        log "installed the hub bridge plugin: $PLUGIN_FILE"
+    else
+        log "WARNING: could not fetch $PLUGIN_URL; skipping the hub bridge"
+        return 0
+    fi
+
+    [ -f "$_file" ] || printf '{}' >"$_file" 2>/dev/null || {
+        log "WARNING: cannot write $_file; skipping the plugin config"
+        return 0
+    }
+    _out=$(mktemp) || return 0
+    OPENCODE_PLUGIN_FILE="$PLUGIN_FILE" \
+    OPENCODE_HUB_BASE="$_hub_base" \
+    OPENCODE_TOKEN="${MCP_SWITCHBOARD_PRIVATE_TOKEN:-}" \
+        _merge_plugin_json "$_file" "$_out" || {
+        rm -f "$_out"
+        log "WARNING: could not merge $_file (it may not be valid JSON); leaving it untouched"
+        log "  add this by hand: \"plugin\": [[\"$PLUGIN_FILE\", {\"hub\": \"$_hub_base\"}]]"
+        return 0
+    }
+    if cat "$_out" >"$_file" 2>/dev/null; then
+        log "opencode bridges to $_hub_base (chat + tools + questions: $_file)"
+    else
+        log "WARNING: could not write $_file"
+    fi
+    rm -f "$_out"
+}
+
+# _merge_plugin_json: node first, python3 fallback; identical semantics.
+_merge_plugin_json() {
+    _in=$1
+    _out=$2
+    if has_cmd node; then
+        node -e '
+            const fs = require("fs");
+            const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) throw new Error("not an object");
+            if (cfg.mcp && typeof cfg.mcp === "object") delete cfg.mcp.switchboard;
+            const pth = process.env.OPENCODE_PLUGIN_FILE;
+            const entry = [pth, { hub: process.env.OPENCODE_HUB_BASE, ...(process.env.OPENCODE_TOKEN ? { token: process.env.OPENCODE_TOKEN } : {}) }];
+            let list = Array.isArray(cfg.plugin) ? cfg.plugin : [];
+            list = list.filter((e) => {
+                const first = Array.isArray(e) ? e[0] : e;
+                return !(typeof first === "string" && first.endsWith("switchboard-hub.js"));
+            });
+            list.push(entry);
+            cfg.plugin = list;
+            fs.writeFileSync(process.argv[2], JSON.stringify(cfg, null, 2) + "\n");
+        ' "$_in" "$_out" 2>/dev/null
+    elif has_cmd python3; then
+        python3 - "$_in" "$_out" <<'PY' 2>/dev/null
+import json, os, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+except Exception:
+    sys.exit(1)
+if not isinstance(cfg, dict):
+    sys.exit(1)
+mcp = cfg.get("mcp")
+if isinstance(mcp, dict):
+    mcp.pop("switchboard", None)
+pth = os.environ["OPENCODE_PLUGIN_FILE"]
+opts = {"hub": os.environ["OPENCODE_HUB_BASE"]}
+token = os.environ.get("OPENCODE_TOKEN") or ""
+if token:
+    opts["token"] = token
+lst = [e for e in (cfg.get("plugin") or []) if isinstance(e, (str, list))]
+lst = [e for e in lst if not (isinstance(e, str) and e.endswith("switchboard-hub.js"))
+       and not (isinstance(e, list) and e and isinstance(e[0], str) and e[0].endswith("switchboard-hub.js"))]
+lst.append([pth, opts])
+cfg["plugin"] = lst
+with open(sys.argv[2], "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PY
+    else
+        return 1
+    fi
+}
+
 # setup_editor: --editor=code (and the opencode-only half of --opencode). Runs
 # before the client launches, because it is one-time host setup; the client
 # itself stays what it is - a tunnel that listens on nothing and touches only
@@ -435,8 +458,8 @@ setup_editor() {
                 # opencode.json merge still applies, so `opencode` in any
                 # terminal reaches the hub's /mcp without VS Code.
                 ensure_opencode
-                merge_opencode_config "$(resolved_mcp_url)"
-                log "opencode is wired to the hub through the switchboard entry just configured"
+                _url=$(resolved_mcp_url)
+                install_opencode_plugin "${_url%/mcp}"
             fi
             return 0
             ;;
@@ -455,16 +478,13 @@ setup_editor() {
     fi
 
     _mcp=$(resolved_mcp_url)
-    merge_opencode_config "$_mcp"
+    install_opencode_plugin "${_mcp%/mcp}"
 
     log "in VS Code: Ctrl+Escape opens the OpenCode TUI and shares your current selection; use @File#L37-42 to pin a range"
-    # The per-host narrowing is the point when one hub fronts many machines:
-    # each client's tools then only appear to its own chats.
-    log "one hub, many machines? narrow this entry to this machine: $_mcp/host/$(hostname 2>/dev/null || echo '<label>')"
     # Plain expansion, deliberately: $(...) would *run* the CLI, and `code`
     # with no arguments opens an editor window instead of printing a revert hint.
     _revert_cli=${_cli:-code}
-    log "revert: $_revert_cli --uninstall-extension $OPENCODE_EXTENSION, and delete the switchboard entry from $EDITOR_CONFIG_DIR/opencode.json"
+    log "revert: $_revert_cli --uninstall-extension $OPENCODE_EXTENSION, delete $PLUGIN_FILE, and drop the plugin entry from $EDITOR_CONFIG_DIR/opencode.json"
 }
 
 main() {

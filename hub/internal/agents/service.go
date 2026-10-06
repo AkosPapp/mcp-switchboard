@@ -34,6 +34,12 @@ type Service interface {
 	// ParentID when set) and enqueues a run. A repeated IdempotencyKey within 10
 	// minutes returns the original run (R5), Deduplicated true.
 	Post(ctx context.Context, chatID string, in PostInput) (*PostResult, error)
+	// AppendBridge mirrors one transcript line of an external session into a
+	// bridge chat (kind "bridge"); no hub run is ever scheduled. BridgeQuestion
+	// pushes a question from the external session to the user's devices and
+	// reports whether push delivery is configured at all.
+	AppendBridge(ctx context.Context, chatID string, in BridgeAppend) (*store.Message, error)
+	BridgeQuestion(ctx context.Context, chatID, text string) (bool, error)
 	// Branch creates a sibling of FromMessageID (with Content if given, else a
 	// copy point for regenerate) and re-points the leaf; for a user-role sibling
 	// with content it also enqueues a run, for regenerate (assistant message id)
@@ -130,6 +136,9 @@ type CreateAgentInput struct {
 	// for a ClientSet record (which otherwise gets none).
 	origin   string
 	withChat bool
+	// bridge makes the record's chat a bridge chat (see store.ChatKindBridge):
+	// its agent is never scheduled, the conversation is mirrored from outside.
+	bridge bool
 }
 
 type PostInput struct {
@@ -278,6 +287,9 @@ type CreateChatInput struct {
 	AutoApprove  bool
 	Approval     string
 	Effort       string
+	// Bridge creates a chat whose conversation is mirrored from an external
+	// session (opencode plugin); the owning agent exists but never runs.
+	Bridge bool
 }
 
 // ChatUpdate is the rebinding part of PATCH /api/chats/{id}. ProfileSet with a

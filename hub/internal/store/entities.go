@@ -48,6 +48,12 @@ const (
 	ChatKindHuman = "human"
 	ChatKindAgent = "agent"
 	ChatKindSpawn = "spawn"
+	// ChatKindBridge: a chat whose real engine lives outside the hub (an
+	// opencode session, mirrored by the hub's opencode plugin). Messages from
+	// the console append without triggering a hub run, and the external side
+	// appends transcript lines back. The owning agent record exists but is
+	// never scheduled.
+	ChatKindBridge = "bridge"
 
 	RoleSystem    = "system"
 	RoleUser      = "user"

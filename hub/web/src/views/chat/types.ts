@@ -39,8 +39,9 @@ export interface MessageSender {
   chatId: string;
   /** the sender's title at the time of sending */
   chatTitle: string;
-  /** message = a send, reply = a returned answer, spawn = the parent's first task */
-  kind: "message" | "reply" | "spawn";
+  /** message = a send, reply = a returned answer, spawn = the parent's first task,
+   * bridge = a line mirrored in from an external session (opencode plugin) */
+  kind: "message" | "reply" | "spawn" | "bridge";
 }
 
 export interface Message {
@@ -71,7 +72,7 @@ export interface Chat {
   agentId: string;
   peerAgentId: string | null;
   title: string;
-  kind: "human" | "agent" | "spawn";
+  kind: "human" | "agent" | "spawn" | "bridge";
   activeLeafId: string | null;
   tags: string[];
   tokenTotal: number;

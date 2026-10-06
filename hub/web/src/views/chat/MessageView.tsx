@@ -108,6 +108,7 @@ function Blocks({ blocks, markdown }: { blocks: ContentBlock[]; markdown: boolea
 const SENDER_KIND: Record<MessageSender["kind"], string> = {
   message: "message",
   reply: "reply",
+  bridge: "bridge",
   spawn: "task",
 };
 
@@ -143,13 +144,19 @@ function InjectedMessage({ message, sender, actions }: { message: Message; sende
         <p className="mb-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
           <span aria-hidden="true">↳</span>
           <span>from</span>
-          <Link
-            to={`/chat/${sender.chatId}`}
-            data-testid="sender-chip"
-            className="max-w-[16rem] truncate rounded border border-border bg-surface px-1.5 py-0.5 font-medium text-text hover:underline"
-          >
-            {sender.chatTitle || "Untitled chat"}
-          </Link>
+          {sender.chatId ? (
+            <Link
+              to={`/chat/${sender.chatId}`}
+              data-testid="sender-chip"
+              className="max-w-[16rem] truncate rounded border border-border bg-surface px-1.5 py-0.5 font-medium text-text hover:underline"
+            >
+              {sender.chatTitle || "Untitled chat"}
+            </Link>
+          ) : (
+            <span data-testid="sender-chip" className="max-w-[16rem] truncate rounded border border-border bg-surface px-1.5 py-0.5 font-medium text-text">
+              {sender.chatTitle || "opencode"}
+            </span>
+          )}
           <span className="rounded border border-border px-1.5 py-0.5 text-[11px] leading-none" data-testid="sender-kind">
             {SENDER_KIND[sender.kind] ?? sender.kind}
           </span>

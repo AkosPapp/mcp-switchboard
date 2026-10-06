@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "install.sh"
+      - "editor/opencode/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -28,8 +29,9 @@ jobs:
 
       - name: Prepare site directory
         run: |
-          mkdir -p _site
+          mkdir -p _site/opencode/plugin
           cp install.sh _site/install.sh
+          cp editor/opencode/plugin/switchboard-hub.js _site/opencode/plugin/switchboard-hub.js
 
       - uses: actions/configure-pages@v5
         with:

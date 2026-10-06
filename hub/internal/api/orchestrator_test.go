@@ -34,6 +34,8 @@ type fakeAgents struct {
 	edges     []store.Edge
 	posts     []agents.PostInput
 	branches  []agents.BranchInput
+	bridge    []agents.BridgeAppend
+	questions []string
 	cancelled []string
 	approvals []string
 	pending   []agents.PendingApproval
@@ -117,6 +119,22 @@ func (f *fakeAgents) Post(_ context.Context, chatID string, in agents.PostInput)
 	}
 	f.posts = append(f.posts, in)
 	return &agents.PostResult{MessageID: "m-1", RunID: "run-1", Deduplicated: f.dedupe}, nil
+}
+func (f *fakeAgents) AppendBridge(_ context.Context, _ string, in agents.BridgeAppend) (*store.Message, error) {
+	defer f.lock()()
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.bridge = append(f.bridge, in)
+	return &store.Message{ID: "m-bridge", ChatID: "c-bridge", Role: store.RoleAssistant}, nil
+}
+func (f *fakeAgents) BridgeQuestion(_ context.Context, _ string, text string) (bool, error) {
+	defer f.lock()()
+	if f.err != nil {
+		return false, f.err
+	}
+	f.questions = append(f.questions, text)
+	return false, nil
 }
 func (f *fakeAgents) Branch(_ context.Context, chatID string, in agents.BranchInput) (*agents.PostResult, error) {
 	defer f.lock()()
@@ -850,5 +868,52 @@ func TestListApprovals(t *testing.T) {
 	}
 	if got[0]["arguments"].(map[string]any)["p"] != float64(1) {
 		t.Errorf("arguments = %v", got[0]["arguments"])
+	}
+}
+
+func TestBridgeAppendAndQuestionRoutes(t *testing.T) {
+	o := newOrch(t)
+	a := o.agent(t, "bridgeowner")
+	c, err := o.db.CreateChat(context.Background(), store.Chat{AgentID: a.ID, Kind: store.ChatKindBridge, Title: "oc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := o.doH(t, "POST", "/api/chats/"+c.ID+"/bridge/append", `{"role":"assistant","text":"hello from opencode","source":"opencode-1"}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("append: %d %s", rec.Code, rec.Body.String())
+	}
+	unl := o.agents.lock()
+	if len(o.agents.bridge) != 1 || o.agents.bridge[0].Text != "hello from opencode" || o.agents.bridge[0].Role != "assistant" {
+		unl()
+		t.Fatalf("append did not reach the service: %+v", o.agents.bridge)
+	}
+	unl()
+	rec = o.doH(t, "POST", "/api/chats/"+c.ID+"/bridge/question", `{"text":"approve rm -rf?"}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("question: %d %s", rec.Code, rec.Body.String())
+	}
+	unl = o.agents.lock()
+	if len(o.agents.questions) != 1 {
+		unl()
+		t.Fatalf("question not recorded: %+v", o.agents.questions)
+	}
+	unl()
+	// The append hit the stream too: the hub has one pseudo-run with a frame.
+	rec = o.doH(t, "GET", "/api/chats/"+c.ID+"/messages", "", nil)
+	if rec.Code != 200 {
+		t.Fatalf("messages: %d", rec.Code)
+	}
+}
+
+func TestBridgeQuestionNeedsText(t *testing.T) {
+	o := newOrch(t)
+	a := o.agent(t, "bridgeowner2")
+	c, err := o.db.CreateChat(context.Background(), store.Chat{AgentID: a.ID, Kind: store.ChatKindBridge, Title: "oc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := o.doH(t, "POST", "/api/chats/"+c.ID+"/bridge/question", `{"text":"  "}`, nil)
+	if rec.Code != 400 {
+		t.Fatalf("expected 400, got %d", rec.Code)
 	}
 }

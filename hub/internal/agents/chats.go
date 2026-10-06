@@ -126,6 +126,7 @@ func (m *Manager) CreateChat(ctx context.Context, in CreateChatInput) (*store.Ch
 	ci := CreateAgentInput{
 		Name: agentNameFor(title, store.NewID()), ChatTitle: title, Model: in.Model,
 		ParentChatID: in.ParentChatID, ClientSet: true, withChat: true, origin: store.OriginChat,
+		bridge: in.Bridge,
 	}
 	if label != "" {
 		ci.ClientLabel = &label

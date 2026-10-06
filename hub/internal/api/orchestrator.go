@@ -91,6 +91,10 @@ func (h *Handler) registerOrchestrator() {
 	m.HandleFunc("GET /api/chats/{id}/export", h.exportChat)
 	m.HandleFunc("GET /api/chats/{id}/draft", h.getDraft)
 	m.HandleFunc("PUT /api/chats/{id}/draft", h.putDraft)
+	// Bridge chats: the opencode plugin mirrors transcripts in and pings the
+	// user; the console side is the existing GET/POST /messages pair.
+	m.HandleFunc("POST /api/chats/{id}/bridge/append", h.bridgeAppend)
+	m.HandleFunc("POST /api/chats/{id}/bridge/question", h.bridgeQuestion)
 	m.HandleFunc("GET /api/chats/{id}/todos", h.getTodos)
 	if h.opts.Streams != nil {
 		m.HandleFunc("GET /api/chats/{id}/stream", h.chatStream)
@@ -616,6 +620,7 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 		in := agents.CreateChatInput{
 			Title: b.Title, SystemPrompt: b.SystemPrompt, Model: b.Model, ParentChatID: strings.TrimSpace(b.ParentChatID),
 			ContextLimit: b.ContextLimit, AutoApprove: b.AutoApprove, Approval: b.Approval, Effort: b.Effort,
+			Bridge: strings.EqualFold(strings.TrimSpace(b.Kind), "bridge"),
 		}
 		profile, present, err := clientField(b.ProfileID)
 		if err != nil {
@@ -1401,4 +1406,58 @@ func (h *Handler) putDraft(w http.ResponseWriter, r *http.Request) {
 	// the chat and its messages, only the draft.
 	h.opts.Bus.Publish(events.Event{Type: events.TypeDraft, ChatID: c.ID})
 	writeJSON(w, http.StatusOK, draftView(d))
+}
+
+// --------------------------------------------------------------------------
+// bridge chats (kind "bridge"; docs the opencode plugin relies on)
+// --------------------------------------------------------------------------
+
+// bridgeAppend mirrors one transcript line from the external session into the
+// chat. No run is scheduled - see agents/bridge.go.
+func (h *Handler) bridgeAppend(w http.ResponseWriter, r *http.Request) {
+	c := h.loadChat(w, r)
+	if c == nil {
+		return
+	}
+	var b struct {
+		Role   string `json:"role"`
+		Text   string `json:"text"`
+		Source string `json:"source"`
+	}
+	if !h.readBody(w, r, &b) {
+		return
+	}
+	msg, err := h.opts.Agents.AppendBridge(r.Context(), c.ID, agents.BridgeAppend{Role: b.Role, Text: b.Text, Source: b.Source})
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, msg)
+}
+
+// bridgeQuestion pushes an opencode question to the user's devices; the
+// plugin mirrors the question into the chat itself (role user, source
+// opencode) so console readers see it too. pushed=false means the hub has no
+// push configured - the console chat remains the delivery channel.
+func (h *Handler) bridgeQuestion(w http.ResponseWriter, r *http.Request) {
+	c := h.loadChat(w, r)
+	if c == nil {
+		return
+	}
+	var b struct {
+		Text string `json:"text"`
+	}
+	if !h.readBody(w, r, &b) {
+		return
+	}
+	if strings.TrimSpace(b.Text) == "" {
+		writeError(w, http.StatusBadRequest, "text is required")
+		return
+	}
+	pushed, err := h.opts.Agents.BridgeQuestion(r.Context(), c.ID, b.Text)
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pushed": pushed})
 }

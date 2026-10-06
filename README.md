@@ -145,13 +145,8 @@ The installer only makes sure `npx` and `uvx` exist (via `nix shell` if you have
 Nix, otherwise per-user installs with no sudo) and then hands off to `uvx`.
 
 Pass `--editor=code` to also set up the [OpenCode](https://opencode.ai) TUI inside
-VS Code: it installs the `sst-dev.opencode` extension and creates (merging, never
-clobbering; invalid JSON gets a printed snippet instead) the global
-`~/.config/opencode/opencode.json` entry for this hub's `/mcp`. The endpoint comes
-straight from `--hub-url`: a loopback URL maps to the private listener
-(`http://127.0.0.1:8099/mcp`), anything else gets `/mcp` on the same origin
-(a path prefix is kept), and `MCP_SWITCHBOARD_MCP_URL` overrides both. A missing
-editor only warns; the client still starts:
+VS Code (it installs the `sst-dev.opencode` extension and the hub bridge plugin
+described below). A missing editor only warns; the client still starts:
 
 ```sh
 curl -fsSL https://akospapp.github.io/mcp-switchboard/install.sh | sh -s -- \
@@ -174,10 +169,27 @@ curl -fsSL https://akospapp.github.io/mcp-switchboard/install.sh | sh -s -- \
 Either flag makes sure `opencode` exists, **detect-first**: an existing copy — a
 Nix-managed one, typically — is reported and left completely alone (a per-user
 install would silently shadow it); the official installer runs only where the
-binary is entirely absent, into `~/.opencode/bin`, per-user, no sudo. Because the
-`/mcp` entry goes into the *global* opencode config, `opencode` reaches the hub's
-tools from any directory and any terminal — the VS Code extension only adds the
-selection/tab sharing.
+binary is entirely absent, into `~/.opencode/bin`, per-user, no sudo.
+
+It then installs the **hub bridge plugin** (`editor/opencode/plugin/switchboard-hub.js`,
+served from the same Pages site, merged into the *global*
+`~/.config/opencode/opencode.json`, never clobbering it; invalid JSON gets a
+printed snippet instead). The plugin turns every opencode project into a live
+**bridge chat** in the hub console:
+
+- the assistant's replies and finished tool calls are mirrored into the chat, and
+  what you type there is fed back as opencode's next turn — see it, steer it, from
+  the browser;
+- a permission prompt opencode raises is mirrored **and** pushed to your phone
+  (the hub's `question` notification); answering `yes`/`no` in the chat decides it;
+- `switchboard_chats` / `switchboard_read` / `switchboard_message` tools let the
+  model talk to any hub chat — the agent-to-agent comms the setup is for.
+
+A bridge chat is `kind: "bridge"` on the hub: sending to it never runs the hub
+agent (opencode is the brain); the plugin reaches the hub's **private** API, so
+that origin must serve `/api` (a loopback hub at `http://127.0.0.1:8099` works
+out of the box; the URL is derived from `--hub-url`, override with
+`MCP_SWITCHBOARD_MCP_URL`). The VS Code extension only adds selection/tab sharing.
 
 Related editor tooling lives in this repo: [`editor/vscode`](editor/vscode) quotes
 the current selection into a chat's draft, and `.vscode/tasks.json`,

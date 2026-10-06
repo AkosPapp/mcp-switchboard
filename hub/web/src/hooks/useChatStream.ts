@@ -68,6 +68,12 @@ export function useChatStream(
       if (m.name === "approval_required" || m.name === "run_started") {
         cache.invalidateQueries({ queryKey: ["run", frame.runId] });
       }
+      if (m.name === "chat_message") {
+        // Bridge chats: an external append (or a mirrored console send echoed
+        // back) has no run frames at all; this is the only nudge there is.
+        refetch();
+        cache.invalidateQueries({ queryKey: ["chats"] });
+      }
       if (m.name === "run_done") {
         refetch();
         cache.invalidateQueries({ queryKey: ["run", frame.runId] });

@@ -628,7 +628,7 @@ export default function ChatThread({
         chatId={chatId}
         models={models.data?.models ?? []}
         running={runActive}
-        budget={run.data?.budgetSnapshot ?? agent.data?.budget}
+        budget={chat.data?.kind === "bridge" ? undefined : run.data?.budgetSnapshot ?? agent.data?.budget}
         usage={run.data?.usage ?? {}}
         onSend={send}
         defaultModel={chat.data?.model ?? agent.data?.model}
