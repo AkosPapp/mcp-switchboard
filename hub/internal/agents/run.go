@@ -32,6 +32,11 @@ type runState struct {
 
 	// Owned by the run's own goroutine (before it starts: the submitter).
 	materialized bool
+	// compactedRun (I11): this run already ran a mid-run compaction; do not
+	// spend a second summariser call. estPrompt (I5): the last prompt-size
+	// estimate — the context meter's fallback when a provider reports no usage.
+	compactedRun bool
+	estPrompt    int64
 
 	// leaf is the message the next append goes under. leafMu serialises the
 	// concurrent tool-result appends of one turn.
@@ -54,6 +59,9 @@ type runState struct {
 	toolCalls  int
 	usage      llm.Usage
 	costMicros int64
+	// lastPrompt is the size of the most recent turn's prompt in tokens: how full
+	// the context window is right now, as opposed to usage, which sums every turn.
+	lastPrompt int
 	lastText   string
 	budgetHit  string
 }
@@ -70,7 +78,22 @@ func (rs *runState) addUsage(u llm.Usage, cost int64) {
 	rs.usage = rs.usage.Add(u)
 	rs.costMicros += cost
 	rs.turns++
+	if p := u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens; p > 0 {
+		rs.lastPrompt = p
+	}
 	rs.usageMu.Unlock()
+}
+
+// saveRunUsage writes the run's running totals so the console can show them
+// while the run is still going; finish overwrites them with the final figures.
+// A failed write costs only a stale meter, so it is logged and ignored.
+func (m *Manager) saveRunUsage(rs *runState) {
+	usage := rs.usageJSON("", time.Since(rs.createdAt))
+	ctx, cancel := detached()
+	defer cancel()
+	if _, err := m.st.UpdateRun(ctx, rs.id, store.RunPatch{Usage: usage}); err != nil {
+		m.log.Debug("could not save run usage", "run", rs.id, "error", err)
+	}
 }
 
 func (rs *runState) tokens() int64 {
@@ -86,6 +109,7 @@ func (rs *runState) usageJSON(limit string, elapsed time.Duration) json.RawMessa
 		"inputTokens": rs.usage.InputTokens, "outputTokens": rs.usage.OutputTokens,
 		"cacheReadTokens": rs.usage.CacheReadTokens, "cacheWriteTokens": rs.usage.CacheWriteTokens,
 		"tokens": rs.tokens(), "costMicros": rs.costMicros, "wallSeconds": elapsed.Seconds(),
+		"contextTokens": rs.contextTokensLocked(),
 	}
 	if rs.usage.ContextWindow > 0 {
 		m["contextWindow"] = rs.usage.ContextWindow
@@ -144,6 +168,20 @@ func (m *Manager) execute(rs *runState) runOutcome {
 	m.frame(rs, "run_started", map[string]any{"runId": rs.id, "chatId": rs.chatID, "agentId": rs.agentID, "trigger": rs.trigger})
 	m.emit("run_started", map[string]any{"agentId": rs.agentID, "runId": rs.id, "chatId": rs.chatID, "trigger": rs.trigger})
 	m.publish(events.Event{Type: events.TypeChat, ChatID: rs.chatID, AgentID: rs.agentID})
+
+	// Hub commands, answered without a conversation-model turn: /compact
+	// (compress the context; the reply carries the summary) and
+	// /optimize_skills (unlock/lock the self-modification tools; the reply is
+	// the meta-prompt that tells the model how to use the unlock).
+	if rs.chatID != "" && rs.trigger == store.TriggerHuman {
+		text := m.lastUserText(ctx, rs.chatID)
+		if compactCommand(text) {
+			return m.compactCommandTurn(ctx, rs)
+		}
+		if mode, ok := optimizeCommand(text); ok {
+			return m.optimizeCommandTurn(ctx, rs, mode)
+		}
+	}
 
 	for turn := 0; ; turn++ {
 		if ctx.Err() != nil {
@@ -230,7 +268,8 @@ type turnResult struct {
 // turn is one model round-trip: catalog, stream, persist.
 func (m *Manager) turn(rs *runState, agent *store.Agent) (turnResult, error) {
 	ctx := rs.ctx
-	plan, err := m.planTurn(ctx, agent, nil) // agent is already effective (resolveAgent)
+	chat := m.chatForRun(ctx, rs)
+	plan, err := m.planTurn(ctx, agent, nil, chat) // agent is already effective (resolveAgent)
 	if err != nil {
 		if ctx.Err() != nil { // cancelled while the turn was being set up: a cancel, not a failure
 			return turnResult{kind: turnCancelled}, nil
@@ -252,39 +291,60 @@ func (m *Manager) turn(rs *runState, agent *store.Agent) (turnResult, error) {
 		}
 		m.log.Warn("could not list skills; /commands are sent as typed", "error", err)
 	}
-	msgs := expandSlashSkills(toLLMMessages(path), skills)
+	rebuild := func(p []store.Message) []llm.Message {
+		return expandSlashSkills(toLLMMessages(applyChatSummary(p, chat), m.set.ToolResultMaxChars), skills)
+	}
+	msgs := rebuild(path)
 
 	mc, err := parseModel(agent.Model)
 	if err != nil {
 		return turnResult{kind: turnFailed, errText: err.Error()}, nil
 	}
+	// I2: the chat's model preference (picked in the new-chat panel) sits over
+	// the profile default and under the per-message override this run carries.
+	if chat != nil {
+		mergeModelConfig(&mc, chat.ModelPref)
+	}
 	if len(rs.sub.modelOverride) > 0 {
-		if o, err := parseModel(rs.sub.modelOverride); err == nil {
-			if o.Provider != "" {
-				mc.Provider = o.Provider
-			}
-			if o.Model != "" {
-				mc.Model = o.Model
-			}
-			if o.Temperature != nil {
-				mc.Temperature = o.Temperature
-			}
-			if o.MaxTokens > 0 {
-				mc.MaxTokens = o.MaxTokens
-			}
-			if o.Thinking != nil {
-				mc.Thinking = o.Thinking
-			}
-		}
+		mergeModelConfig(&mc, rs.sub.modelOverride)
 	}
 	prov, ok := m.llm.Provider(mc.Provider)
 	if !ok {
 		return turnResult{kind: turnFailed, errText: fmt.Sprintf("no model provider %q is configured", mc.Provider)}, nil
 	}
 	spec, _, _ := m.llm.Lookup(mc.Provider, mc.Model)
+	window := effectiveWindow(chat, spec)
 
 	toolDefs := cat.llmTools()
 	turnOpts := mc.options(plan.system)
+	// I12: reasoning effort — the chat's selection, beaten by an explicit
+	// per-message override.
+	if chat != nil && chat.Effort != "" {
+		turnOpts.Effort = chat.Effort
+	}
+	if len(rs.sub.modelOverride) > 0 {
+		if o, err := parseModel(rs.sub.modelOverride); err == nil && o.Effort != "" {
+			turnOpts.Effort = o.Effort
+		}
+	}
+	if window > 0 {
+		turnOpts.MaxContext = int(window)
+	}
+	// I11: when the prompt nears the effective window, compress before the
+	// call instead of letting the provider silently drop the oldest context.
+	est := estimateTokens(plan.system, toolDefs, msgs)
+	if window > 0 && !rs.compactedRun && est*100 >= window*compactRatio {
+		if _, _, did := m.compactNow(ctx, rs, mc); did {
+			rs.compactedRun = true
+			if p2, err2 := m.st.ActivePath(ctx, rs.chatID); err2 == nil {
+				msgs = rebuild(p2)
+			}
+			est = estimateTokens(plan.system, toolDefs, msgs)
+		}
+	}
+	rs.usageMu.Lock()
+	rs.estPrompt = est // the context indicator's fallback for silent providers
+	rs.usageMu.Unlock()
 	began := time.Now()
 	ch, err := prov.Complete(ctx, msgs, toolDefs, turnOpts)
 	if err != nil {
@@ -358,6 +418,12 @@ func (m *Manager) turn(rs *runState, agent *store.Agent) (turnResult, error) {
 
 	cost, _ := spec.Cost(usage) // unknown price => 0 (L5)
 	inTok := usage.InputTokens + usage.CacheReadTokens + usage.CacheWriteTokens
+	if usage.ContextWindow <= 0 && window > 0 {
+		// I5: providers other than native Ollama never report the window; fall
+		// back to the chat's effective budget so the context meter has a
+		// denominator everywhere.
+		usage.ContextWindow = int(window)
+	}
 	cancelled := ctx.Err() != nil
 	res := turnResult{cat: cat, finish: finish}
 	switch {
@@ -390,6 +456,7 @@ func (m *Manager) turn(rs *runState, agent *store.Agent) (turnResult, error) {
 			usage.CacheReadTokens, usage.CacheWriteTokens, cost, latency.Seconds())
 	}
 	rs.addUsage(usage, cost)
+	m.saveRunUsage(rs)
 
 	// Nothing to persist when nothing was produced (e.g. cancelled before the
 	// first token): an empty assistant message would break the next request.
@@ -531,8 +598,10 @@ func (m *Manager) persistToolResult(rs *runState, tc llm.ToolCall, out toolOutco
 
 // toLLMMessages turns the active path into provider-neutral messages, mapping
 // tool names to provider-safe ones and repairing tool_use/tool_result pairing
-// (a crash or cancel can leave a call without a result).
-func toLLMMessages(path []store.Message) []llm.Message {
+// (a crash or cancel can leave a call without a result). A tool result longer
+// than toolResultMaxChars is shown to the model in shortened form (capBlocks);
+// the stored message is untouched.
+func toLLMMessages(path []store.Message, toolResultMaxChars int) []llm.Message {
 	var out []llm.Message
 	for _, sm := range path {
 		var blocks []llm.Block
@@ -558,7 +627,7 @@ func toLLMMessages(path []store.Message) []llm.Message {
 				if len(content) == 0 && r.Error != "" {
 					content = textBlocks(r.Error)
 				}
-				tm.ToolResults = append(tm.ToolResults, llm.ToolResult{ToolCallID: r.ToolCallID, Content: content, IsError: r.Error != ""})
+				tm.ToolResults = append(tm.ToolResults, llm.ToolResult{ToolCallID: r.ToolCallID, Content: capBlocks(content, toolResultMaxChars), IsError: r.Error != ""})
 			}
 			out = append(out, tm)
 		case store.RoleSystem:

@@ -92,7 +92,7 @@ func TestSkillLoadToolReturnsBodyAndNoToolWithoutAutoSkills(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 	a := e.agent("a", nil)
-	cat, err := e.m.buildCatalog(ctx, a)
+	cat, err := e.m.buildCatalog(ctx, a, nil)
 	if err != nil || cat.byName[skillLoadName] != nil {
 		t.Fatalf("no skills yet, tool offered: %v %v", cat.byName[skillLoadName], err)
 	}

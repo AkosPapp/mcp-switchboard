@@ -167,6 +167,7 @@ type Store interface {
 	ProfileStore
 	SkillStore
 	DraftStore
+	TodoStore
 	PushStore
 
 	Stats(ctx context.Context) (Stats, error)

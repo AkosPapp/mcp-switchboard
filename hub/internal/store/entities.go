@@ -103,6 +103,9 @@ type Agent struct {
 	Capabilities Capabilities
 	Approval     string
 	AutoWake     bool
+	// ToolAllow, when non-empty, is a list of glob patterns on the upstream tool
+	// name that narrows the agent's per-server grants; nil means no narrowing.
+	ToolAllow []string
 	// TokenTotal and CostTotalMicros are cumulative over self and descendants (B5).
 	TokenTotal      int64
 	CostTotalMicros int64
@@ -140,6 +143,7 @@ type agentJSON struct {
 	Capabilities    Capabilities    `json:"capabilities"`
 	Approval        string          `json:"approval"`
 	AutoWake        bool            `json:"autoWake"`
+	ToolAllow       []string        `json:"toolAllow"`
 	TokenTotal      int64           `json:"tokenTotal"`
 	CostTotalMicros int64           `json:"costTotalMicros"`
 	CreatedAt       string          `json:"createdAt"`
@@ -156,7 +160,7 @@ func (a Agent) MarshalJSON() ([]byte, error) {
 		ID: a.ID, ParentID: a.ParentID, Name: a.Name, Description: a.Description,
 		Project: a.Project, Model: rawOr(a.Model, "{}"), SystemPrompt: a.SystemPrompt,
 		Depth: a.Depth, Status: a.Status, Budget: rawOr(a.Budget, "{}"),
-		Capabilities: a.Capabilities, Approval: a.Approval, AutoWake: a.AutoWake,
+		Capabilities: a.Capabilities, Approval: a.Approval, AutoWake: a.AutoWake, ToolAllow: a.ToolAllow,
 		TokenTotal: a.TokenTotal, CostTotalMicros: a.CostTotalMicros,
 		CreatedAt: FormatTime(a.CreatedAt), UpdatedAt: FormatTime(a.UpdatedAt),
 		LastActivityAt: FormatTime(a.LastActivityAt), DeletedAt: fmtTimePtr(a.DeletedAt),
@@ -271,6 +275,28 @@ type Chat struct {
 	// ParentChatID is the chat that spawned this one (docs/CHAT_MODEL_API.md);
 	// nil for a top-level chat and for legacy chats it could not be inferred for.
 	ParentChatID *string
+	// Conversation preferences (migration 012): per-chat overrides applied at
+	// turn build. ModelPref overrides the profile's model; Approval overrides
+	// the owning agent's mode; AutoApprove skips the approval gate entirely
+	// (irreversible tools included, by the user's decision); ContextLimit
+	// bounds the prompt within the model's window; Effort is the reasoning
+	// effort sent with each turn ("", low, medium, high, none).
+	ModelPref    json.RawMessage
+	Approval     string
+	AutoApprove  bool
+	ContextLimit int64
+	Effort       string
+	// Notes is the agent's own persistent memory for this chat, re-injected
+	// into every later system prompt (migration 014, switchboard.note.append).
+	Notes string
+	// Optimize is the /optimize_skills unlock: when true the chat's catalog
+	// gains the switchboard.optimize.* self-modification tools (migration 015).
+	Optimize bool
+	// Summary replaces every active-path message up to (and including)
+	// SummarizeUptoMsg (context compression, I11); empty = none yet.
+	Summary          string
+	SummarizedAt     *time.Time
+	SummarizeUptoMsg string
 }
 
 type chatJSON struct {
@@ -289,6 +315,18 @@ type chatJSON struct {
 	ProfileID       *string  `json:"profileId"`
 	ClientLabel     *string  `json:"clientLabel"`
 	ParentChatID    *string  `json:"parentChatId"`
+	// Preferences (migration 012). The summary text itself is not exported —
+	// it is only ever read when building a model prompt; the list endpoint
+	// carries no bloated rows.
+	ModelPref    json.RawMessage `json:"model,omitempty"`
+	Approval     string          `json:"approval,omitempty"`
+	AutoApprove  bool            `json:"autoApprove,omitempty"`
+	ContextLimit int64           `json:"contextLimit,omitempty"`
+	Effort       string          `json:"effort,omitempty"`
+	HasSummary   bool            `json:"hasSummary,omitempty"`
+	SummarizedAt *string         `json:"summarizedAt,omitempty"`
+	Notes        string          `json:"notes,omitempty"`
+	Optimize     bool            `json:"optimize,omitempty"`
 }
 
 func (c Chat) MarshalJSON() ([]byte, error) {
@@ -303,7 +341,19 @@ func (c Chat) MarshalJSON() ([]byte, error) {
 		CreatedAt: FormatTime(c.CreatedAt), UpdatedAt: FormatTime(c.UpdatedAt),
 		ArchivedAt: fmtTimePtr(c.ArchivedAt), ProfileID: c.ProfileID, ClientLabel: c.ClientLabel,
 		ParentChatID: c.ParentChatID,
+		ModelPref:    c.ModelPref, Approval: c.Approval, AutoApprove: c.AutoApprove,
+		ContextLimit: c.ContextLimit, Effort: c.Effort, HasSummary: c.Summary != "",
+		SummarizedAt: fmtTimePtr(c.SummarizedAt), Notes: c.Notes, Optimize: c.Optimize,
 	})
+}
+
+// ApprovalMode is the effective approval mode for the chat's runs: the chat's
+// own override when set, the owning agent's mode otherwise (I3).
+func (c Chat) ApprovalMode(agentApproval string) string {
+	if c.Approval != "" {
+		return c.Approval
+	}
+	return agentApproval
 }
 
 // ChatFilter selects chats for ListChats, most recently updated first.
@@ -328,6 +378,21 @@ type ChatPatch struct {
 	ProfileID   *string
 	SetClient   bool
 	ClientLabel *string
+	// Conversation preferences (I1–I4, I12). SetModelPref writes ModelPref
+	// (empty RawMessage or "null" clears it); ContextLimit <= 0 clears the
+	// limit; SetApproval writes Approval ("" resets to the agent's mode);
+	// AutoApprove and Effort ("" clears) apply when non-nil.
+	SetModelPref bool
+	ModelPref    json.RawMessage
+	ContextLimit *int64
+	SetApproval  bool
+	Approval     string
+	AutoApprove  *bool
+	Effort       *string
+	// Notes replaces the chat's persistent notes wholesale (switchboard.note).
+	Notes *string
+	// Optimize writes the /optimize_skills unlock flag when non-nil.
+	Optimize *bool
 }
 
 // ChatDeletion is what DeleteChatCascade removed.
@@ -421,6 +486,7 @@ type SiblingSet struct {
 type SearchQuery struct {
 	Text    string
 	AgentID string // optional: only chats owned by this agent
+	ChatID  string // optional: only this chat's DAG (switchboard.chat.search)
 	Limit   int    // clamped to MaxLimit; zero means DefaultLimit
 }
 
@@ -443,6 +509,9 @@ type ChatStore interface {
 	GetChat(ctx context.Context, id string) (*Chat, error)
 	ListChats(ctx context.Context, f ChatFilter) ([]Chat, error)
 	UpdateChat(ctx context.Context, id string, p ChatPatch) (Chat, error)
+	// SetChatSummary records a context compression (I11): summary stands in
+	// for active-path messages up to and including uptoMsg.
+	SetChatSummary(ctx context.Context, id, summary, uptoMsg string) error
 	// DeleteChat removes the chat, its messages and its runs.
 	DeleteChat(ctx context.Context, id string) error
 	// DeleteChatCascade deletes the chat and every chat below it (parent_chat_id),

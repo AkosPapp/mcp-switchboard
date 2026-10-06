@@ -13,6 +13,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
+	"net/url"
+	"strings"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 
@@ -121,6 +124,10 @@ func (s *Sender) Send(ctx context.Context, payload Payload) []error {
 }
 
 func (s *Sender) sendOne(ctx context.Context, sub store.PushSubscription, message []byte) error {
+	if err := ValidateEndpoint(sub.Endpoint); err != nil {
+		s.logger.Warn("push: refusing to send to a subscription with a disallowed endpoint", "error", err)
+		return err
+	}
 	resp, err := s.send(ctx, message, &webpush.Subscription{
 		Endpoint: sub.Endpoint,
 		Keys: webpush.Keys{
@@ -182,4 +189,37 @@ var ErrPushDisabled = errors.New("push: not configured")
 //     out ("NOT every descendant sub-chat").
 func IsTopLevelHumanChat(chatKind string, agentIsRoot bool) bool {
 	return chatKind == "human" && agentIsRoot
+}
+
+// ValidateEndpoint rejects push endpoints the hub must never POST to: the hub
+// sends to whatever URL a subscriber registered, so an unchecked endpoint is a
+// server-side request forgery primitive. It must be https, and the host must be
+// a dotted DNS name or a public IP literal: no "localhost", no single-label
+// (intranet) names, and no loopback, private, link-local, unspecified or
+// multicast address literals. Names that merely resolve to a private address
+// are not caught here.
+func ValidateEndpoint(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("endpoint is not a valid URL")
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("endpoint must be an https URL")
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "" {
+		return fmt.Errorf("endpoint must have a host")
+	}
+	if ip, perr := netip.ParseAddr(host); perr == nil {
+		ip = ip.Unmap()
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+			ip.IsMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("endpoint host must not be a loopback, private or link-local address")
+		}
+		return nil
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || !strings.Contains(host, ".") {
+		return fmt.Errorf("endpoint host must be a public hostname")
+	}
+	return nil
 }

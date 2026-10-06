@@ -19,6 +19,9 @@ type ModelConfig struct {
 	Temperature *float64      `json:"temperature,omitempty"`
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Thinking    *llm.Thinking `json:"thinking,omitempty"`
+	// Effort (I12) is the caller-visible reasoning knob; the hub maps it to
+	// whatever the provider understands.
+	Effort string `json:"effort,omitempty"`
 }
 
 // defaultMaxTokens is used when a model config names no max_tokens.
@@ -41,7 +44,7 @@ func (mc ModelConfig) options(system string) llm.Options {
 	if mt <= 0 {
 		mt = defaultMaxTokens
 	}
-	return llm.Options{Model: mc.Model, MaxTokens: mt, Temperature: mc.Temperature, Thinking: mc.Thinking, System: system}
+	return llm.Options{Model: mc.Model, MaxTokens: mt, Temperature: mc.Temperature, Thinking: mc.Thinking, System: system, Effort: mc.Effort}
 }
 
 // mergeBudget is "agent.budget merged with the hub-wide defaults, whichever is
@@ -92,16 +95,10 @@ func providerName(name string) string {
 	return s
 }
 
-// blocksText concatenates text blocks.
-func blocksText(bs []llm.Block) string {
-	var sb strings.Builder
-	for _, b := range bs {
-		if b.Type == llm.BlockText {
-			sb.WriteString(b.Text)
-		}
-	}
-	return sb.String()
-}
+// blocksText delegates to llm.BlocksText: one rule (join with "\n") for every
+// flattener, so tool-result text here and text reaching the model can never
+// diverge again (P0-A: two copies of this function behaved differently).
+func blocksText(bs []llm.Block) string { return llm.BlocksText(bs) }
 
 func textBlocks(s string) []llm.Block { return []llm.Block{{Type: llm.BlockText, Text: s}} }
 

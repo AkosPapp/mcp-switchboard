@@ -294,3 +294,58 @@ func TestOllamaSettings(t *testing.T) {
 		t.Error("bad num_ctx must fail")
 	}
 }
+
+func TestSearxngURLIsValidated(t *testing.T) {
+	for _, tc := range []struct {
+		in, want string
+		bad      bool
+	}{
+		{in: "http://searx:8080/", want: "http://searx:8080"},
+		{in: "https://s.example", want: "https://s.example"},
+		{in: "", want: ""},
+		{in: "searx:8080", bad: true},
+		{in: "ftp://searx", bad: true},
+		{in: "http://", bad: true},
+		{in: "javascript:alert(1)", bad: true},
+	} {
+		clearEnv(t)
+		t.Setenv("MCP_SWITCHBOARD_TUNNEL_TOKEN", "t")
+		t.Setenv("MCP_SWITCHBOARD_SEARXNG_URL", tc.in)
+		s, err := Load("")
+		if tc.bad {
+			if err == nil {
+				t.Errorf("%q: expected a config error", tc.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%q: %v", tc.in, err)
+		} else if s.SearxngURL != tc.want {
+			t.Errorf("%q: got %q, want %q", tc.in, s.SearxngURL, tc.want)
+		}
+	}
+}
+
+func TestWebFetchAndHTTPGetSettings(t *testing.T) {
+	t.Setenv("MCP_SWITCHBOARD_WEB_FETCH", "false")
+	t.Setenv("MCP_SWITCHBOARD_HTTP_GET_ALLOWLIST", " Api.local:8080, ,other.internal ")
+	var s Settings
+	if err := loadAgentSettings(&s); err != nil {
+		t.Fatal(err)
+	}
+	if !s.WebFetchDisabled {
+		t.Error("WEB_FETCH=false not honoured")
+	}
+	if len(s.HTTPGetAllowlist) != 2 || s.HTTPGetAllowlist[0] != "api.local:8080" || s.HTTPGetAllowlist[1] != "other.internal" {
+		t.Errorf("allowlist %v", s.HTTPGetAllowlist)
+	}
+	t.Setenv("MCP_SWITCHBOARD_WEB_FETCH", "")
+	t.Setenv("MCP_SWITCHBOARD_HTTP_GET_ALLOWLIST", "")
+	s = Settings{}
+	if err := loadAgentSettings(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.WebFetchDisabled || len(s.HTTPGetAllowlist) != 0 {
+		t.Errorf("defaults wrong: %+v", s)
+	}
+}

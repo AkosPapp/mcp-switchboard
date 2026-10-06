@@ -108,6 +108,9 @@ type CreateAgentInput struct {
 	// Grants requested. Root agents: defaults to AGENT_DEFAULT_GRANTS. For a
 	// child (ParentID set) they are intersected with the parent's (A12).
 	Grants []store.Grant
+	// ToolAllow narrows the record's tools to these globs on the upstream tool
+	// name; a child's must stay within its parent's (deriveToolAllow).
+	ToolAllow []string
 	// ParentChatID (children only) is the chat the child chat nests under (the
 	// parent's most recently active chat when empty); for a spawn it is also the
 	// chat whose client label and profile the child's chat records.
@@ -154,6 +157,9 @@ type PendingApproval struct {
 	Arguments map[string]any `json:"arguments"`
 	// ExpiresAt is RFC 3339 (store.FormatTime): when W3 auto-denies.
 	ExpiresAt string `json:"expiresAt"`
+	// Reason is set for tools the W1a irreversible gate caught: the server's
+	// own explanation, shown on the approval card next to the arguments.
+	Reason string `json:"reason,omitempty"`
 	// Questions is set instead of asking for approval when the model asked the
 	// user something (switchboard.user.ask); Answer resolves it.
 	Questions []Question `json:"questions,omitempty"`
@@ -265,8 +271,13 @@ type CreateChatInput struct {
 	ProfileNone  bool
 	SystemPrompt *string
 	ClientLabel  string
-	Model        json.RawMessage // optional {provider, model}
+	Model        json.RawMessage // optional {provider, model} → chat's model_pref
 	ParentChatID string
+	// Initial conversation preferences (I1–I4, I12).
+	ContextLimit int64
+	AutoApprove  bool
+	Approval     string
+	Effort       string
 }
 
 // ChatUpdate is the rebinding part of PATCH /api/chats/{id}. ProfileSet with a
@@ -279,14 +290,25 @@ type ChatUpdate struct {
 	SystemPrompt *string
 	ClientSet    bool
 	ClientLabel  *string
+	// Conversation preferences (I1–I4, I12); zero-value semantics per field.
+	SetModelPref bool            // write ModelPref (null clears)
+	ModelPref    json.RawMessage // "" / null ⇒ clear
+	SetApproval  bool            // write Approval ("" resets to the agent's mode)
+	Approval     string
+	AutoApprove  *bool
+	ContextLimit *int64  // <= 0 clears
+	Effort       *string // "" clears
 }
 
-// ToolAnnotations is the MCP hint set as the API shows it.
+// ToolAnnotations is the MCP hint set as the API shows it, plus the
+// switchboard extension hint (from tool _meta, not the MCP standard) that marks
+// an irreversible call gated even under approval=never (W10).
 type ToolAnnotations struct {
-	ReadOnlyHint    *bool `json:"readOnlyHint,omitempty"`
-	DestructiveHint *bool `json:"destructiveHint,omitempty"`
-	IdempotentHint  *bool `json:"idempotentHint,omitempty"`
-	OpenWorldHint   *bool `json:"openWorldHint,omitempty"`
+	ReadOnlyHint     *bool `json:"readOnlyHint,omitempty"`
+	DestructiveHint  *bool `json:"destructiveHint,omitempty"`
+	IdempotentHint   *bool `json:"idempotentHint,omitempty"`
+	OpenWorldHint    *bool `json:"openWorldHint,omitempty"`
+	IrreversibleHint *bool `json:"irreversibleHint,omitempty"`
 }
 
 // HubTool is one switchboard.* tool (GET /api/hub-tools).

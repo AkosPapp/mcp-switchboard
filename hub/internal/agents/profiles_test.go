@@ -143,7 +143,7 @@ func TestChatToolsMatchesTheRunCatalogAndHubTools(t *testing.T) {
 	if !view.ClientConnected || *view.ClientLabel != "laptop" {
 		t.Fatalf("view = %+v", view)
 	}
-	cat, err := e.m.buildCatalog(ctx, e.agentNow(chat.AgentID))
+	cat, err := e.m.buildCatalog(ctx, e.agentNow(chat.AgentID), nil)
 	if err != nil || len(cat.tools) != len(view.Tools) {
 		t.Fatalf("catalog %d vs view %d (%v)", len(cat.tools), len(view.Tools), err)
 	}
@@ -176,7 +176,7 @@ func TestChatToolsMatchesTheRunCatalogAndHubTools(t *testing.T) {
 	for _, ht := range e.m.HubTools() {
 		req[ht.Name] = ht.Requires
 	}
-	if len(req) != len(sbTools) || req["switchboard.chat.spawn"] != "canSpawn" || req["switchboard.chat.send"] != "canMessage" ||
+	if len(req) != len(sbTools)+len(e.m.extraTools()) || req["switchboard.chat.spawn"] != "canSpawn" || req["switchboard.chat.send"] != "canMessage" ||
 		req["switchboard.chat.list"] != "canSpawn or canMessage" {
 		t.Fatalf("requires = %v", req)
 	}
@@ -223,7 +223,7 @@ func TestSpawnInheritsAndNeverReachesAnotherClient(t *testing.T) {
 			t.Fatal(err)
 		}
 		kid := e.agentOfChat(out.(map[string]any)["chat_id"].(string))
-		cat, err := e.m.buildCatalog(ctx, kid)
+		cat, err := e.m.buildCatalog(ctx, kid, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

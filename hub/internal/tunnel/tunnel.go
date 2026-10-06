@@ -15,6 +15,7 @@ package tunnel
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -60,6 +61,12 @@ type Options struct {
 	// per frame; see superviseChannel.
 	SettleDelay time.Duration
 
+	// PingInterval and PingTimeout drive the server-side websocket keepalive.
+	// The client never pings, and behind a proxy a dead connection can linger
+	// indefinitely, so the hub probes it.
+	PingInterval time.Duration
+	PingTimeout  time.Duration
+
 	HubVersion string
 	Metrics    Metrics
 	Logger     *slog.Logger
@@ -72,6 +79,8 @@ const (
 	defaultToolsTimeout = 30 * time.Second
 	defaultStopWait     = 5 * time.Second
 	defaultSettleDelay  = 150 * time.Millisecond
+	defaultPingInterval = 20 * time.Second
+	defaultPingTimeout  = 10 * time.Second
 	hubName             = "mcp-switchboard-hub"
 )
 
@@ -93,6 +102,12 @@ func NewHandler(reg *registry.Registry, opts Options) *Handler {
 	if opts.SettleDelay == 0 {
 		opts.SettleDelay = defaultSettleDelay
 	}
+	if opts.PingInterval <= 0 {
+		opts.PingInterval = defaultPingInterval
+	}
+	if opts.PingTimeout <= 0 {
+		opts.PingTimeout = defaultPingTimeout
+	}
 	if opts.HubVersion == "" {
 		opts.HubVersion = "0.0.0+dev"
 	}
@@ -108,11 +123,16 @@ func NewHandler(reg *registry.Registry, opts Options) *Handler {
 // one rather than a theoretical one.
 func (h *Handler) authorized(r *http.Request) bool {
 	header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, "Bearer ") {
+	const prefix = "bearer "
+	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
 		return false
 	}
-	presented := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
-	return subtle.ConstantTimeCompare([]byte(presented), []byte(h.opts.Token)) == 1
+	presented := strings.TrimSpace(header[len(prefix):])
+	// Compare fixed-length digests so the comparison does not leak the token's
+	// length.
+	a := sha256.Sum256([]byte(presented))
+	b := sha256.Sum256([]byte(h.opts.Token))
+	return subtle.ConstantTimeCompare(a[:], b[:]) == 1
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -161,6 +181,8 @@ type clientConn struct {
 	// The connection's own lifetime, which every socket write is bounded by.
 	// See send for why a caller's context is not used for the write itself.
 	baseCtx context.Context
+	// cancelRun ends run's context; used to evict this connection.
+	cancelRun context.CancelFunc
 
 	mu       sync.Mutex
 	channels map[string]*channelOwner
@@ -170,6 +192,12 @@ type clientConn struct {
 // goroutine: a way to feed it, a way to stop it, and a way to know it is gone.
 type channelOwner struct {
 	incoming chan json.RawMessage
+
+	// mu guards accepting, lastWarn and the drain of incoming, so a frame can
+	// never slip into the buffer after a session is retired.
+	mu        sync.Mutex
+	accepting bool
+	lastWarn  time.Time
 	// desired holds the last state the client reported, latest-wins.
 	desired chan string
 	cancel  context.CancelFunc
@@ -214,10 +242,52 @@ func (c *clientConn) send(_ context.Context, frame any) error {
 	return nil
 }
 
+// evict shuts this connection down because a newer one took its label. It must
+// not block the evictor, so the close handshake runs on its own goroutine.
+func (c *clientConn) evict() {
+	if c.cancelRun != nil {
+		c.cancelRun()
+	}
+	go c.ws.Close(websocket.StatusPolicyViolation, "replaced by a newer connection")
+}
+
+// keepalive pings the client until the connection ends, closing it when a ping
+// goes unanswered. The receive loop is what reads the pong.
+func (c *clientConn) keepalive(ctx context.Context) {
+	ticker := time.NewTicker(c.opts.PingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		pingCtx, cancel := context.WithTimeout(ctx, c.opts.PingTimeout)
+		err := c.ws.Ping(pingCtx)
+		cancel()
+		if err != nil {
+			if ctx.Err() == nil {
+				c.log.Warn("client did not answer ping; closing", "error", err)
+				c.cancelRun()
+				c.ws.Close(websocket.StatusGoingAway, "ping timeout")
+			}
+			return
+		}
+	}
+}
+
+// current reports whether this connection is still the registered one, i.e. it
+// has not been evicted or removed. Only a current connection owns the metrics
+// for its label.
+func (c *clientConn) current() bool {
+	return c.connection != nil && c.registry.Get(c.connection.ID) != nil
+}
+
 func (c *clientConn) run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	c.baseCtx = ctx
+	c.cancelRun = cancel
 
 	helloCtx, helloCancel := context.WithTimeout(ctx, c.opts.ToolsTimeout)
 	defer helloCancel()
@@ -242,9 +312,24 @@ func (c *clientConn) run(ctx context.Context) {
 	if err := c.send(ctx, protocol.HelloAck(c.connection.ID, hubName, c.opts.HubVersion)); err != nil {
 		return
 	}
-	c.registry.AddConnection(c.connection)
+	c.connection.Evict = c.evict
+	if old := c.registry.AddOrReplaceConnection(c.connection); old != nil {
+		// A reconnecting client must not be locked out by its own stale
+		// connection, so the newer claim on the label wins. The old teardown
+		// removes by connection ID, so it cannot touch this registration; its
+		// metrics are cleared here, once, before this connection opens sessions.
+		if c.opts.Metrics != nil {
+			for _, channel := range old.Servers() {
+				c.opts.Metrics.ClearTools(old.Label, channel.Name)
+			}
+		}
+		if old.Evict != nil {
+			old.Evict()
+		}
+	}
 
 	defer c.teardown()
+	go c.keepalive(ctx)
 	c.receiveLoop(ctx)
 }
 
@@ -269,11 +354,8 @@ func (c *clientConn) acceptHello(frame *protocol.Frame) error {
 	if err := protocol.ValidateName(label, "label"); err != nil {
 		return err
 	}
-	if c.registry.LabelInUse(label) {
-		// Two machines claiming one label would make tools ambiguous and
-		// silently shadow each other in the aggregated catalog.
-		return protocolErrorf("label %q is already connected", label)
-	}
+	// A label already in use is not an error here: registration evicts the older
+	// connection atomically (see AddOrReplaceConnection).
 
 	connection := registry.NewConnection(
 		uuid.NewString(), label, *frame.Client, time.Now().UTC(), c.send,
@@ -334,6 +416,19 @@ func (c *clientConn) receiveLoop(ctx context.Context) {
 			c.onMCP(frame)
 		case protocol.TypeServerState:
 			c.onServerState(ctx, frame)
+		case protocol.TypeContextUpdate:
+			// The client re-read its instruction files and/or environment brief;
+			// replace whichever fields the frame carries so the next turn's prompt
+			// shows current state. An absent field is left alone; an empty list
+			// or string clears its copy. Never a reason to drop the connection.
+			if c.connection != nil {
+				if frame.Instructions != nil {
+					c.connection.SetInstructions(protocol.SanitizeInstructions(frame.Instructions))
+				}
+				if frame.EnvironmentBrief != nil {
+					c.connection.SetBrief(protocol.SanitizeEnvironmentBrief(*frame.EnvironmentBrief), time.Now())
+				}
+			}
 		default:
 			c.log.Warn("ignoring unknown frame type", "type", frame.Type)
 		}
@@ -353,9 +448,53 @@ func (c *clientConn) onMCP(frame *protocol.Frame) {
 		return
 	}
 
+	owner.deliver(frame.Payload, c.log, frame.Server)
+}
+
+// deliver hands a payload to the session without ever blocking: the receive
+// loop carries every server on the tunnel, so one stalled reader must not stall
+// them all. Frames arriving while no session is open belong to a dead process
+// and are dropped; frames that do not fit are dropped with a rate-limited
+// warning.
+func (o *channelOwner) deliver(payload json.RawMessage, log *slog.Logger, server string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.accepting {
+		return
+	}
 	select {
-	case owner.incoming <- frame.Payload:
-	case <-owner.done:
+	case o.incoming <- payload:
+	default:
+		if now := time.Now(); now.Sub(o.lastWarn) >= 5*time.Second {
+			o.lastWarn = now
+			log.Warn("dropping mcp frame: session buffer full", "server", server)
+		}
+	}
+}
+
+// startAccepting flushes stale frames and opens the channel to new ones.
+func (o *channelOwner) startAccepting() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.drainLocked()
+	o.accepting = true
+}
+
+// stopAccepting closes the channel to new frames and discards buffered ones.
+func (o *channelOwner) stopAccepting() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.accepting = false
+	o.drainLocked()
+}
+
+func (o *channelOwner) drainLocked() {
+	for {
+		select {
+		case <-o.incoming:
+		default:
+			return
+		}
 	}
 }
 
@@ -448,13 +587,14 @@ func (c *clientConn) superviseChannel(ctx context.Context, channel *registry.Ser
 			return
 		}
 		open = false
+		owner.stopAccepting()
 		if session != nil {
 			session.Close()
 			session = nil
 		}
 		channel.SetSession(nil)
 		channel.SetTools(nil)
-		if c.opts.Metrics != nil {
+		if c.opts.Metrics != nil && c.current() {
 			c.opts.Metrics.ClearTools(channel.Label, channel.Name)
 		}
 		c.registry.PublishChange()
@@ -488,6 +628,7 @@ func (c *clientConn) superviseChannel(ctx context.Context, channel *registry.Ser
 
 		opened, err := c.openSession(ctx, channel, owner)
 		if err != nil {
+			owner.stopAccepting()
 			if ctx.Err() == nil {
 				channel.SetState(protocol.StateFailed, "initialize failed: "+err.Error(), nil)
 				c.log.Warn("session did not initialize", "server", channel.Name, "error", err)
@@ -535,6 +676,7 @@ func (o *channelOwner) settle(ctx context.Context, delay time.Duration) (string,
 func (c *clientConn) openSession(
 	ctx context.Context, channel *registry.ServerChannel, owner *channelOwner,
 ) (*mcp.ClientSession, error) {
+	owner.startAccepting()
 	transport := &mcpsession.ChannelTransport{
 		Incoming: owner.incoming,
 		Send: func(sendCtx context.Context, payload json.RawMessage) error {
@@ -590,20 +732,39 @@ func (c *clientConn) refreshTools(ctx context.Context, channel *registry.ServerC
 			Title:       tool.Title,
 			Description: tool.Description,
 			InputSchema: asSchemaMap(tool.InputSchema),
-			Annotations: annotationsOf(tool.Annotations),
+			Annotations: annotationsOf(tool.Annotations, tool.Meta),
 		})
 	}
 	channel.SetTools(tools)
-	if c.opts.Metrics != nil {
+	if c.opts.Metrics != nil && c.current() {
 		c.opts.Metrics.SetTools(channel.Label, channel.Name, len(tools))
 	}
 }
 
-func annotationsOf(a *mcp.ToolAnnotations) *registry.ToolAnnotations {
-	if a == nil {
+func annotationsOf(a *mcp.ToolAnnotations, meta mcp.Meta) *registry.ToolAnnotations {
+	if a == nil && !metaIrreversible(meta) {
 		return nil
 	}
-	return &registry.ToolAnnotations{ReadOnly: a.ReadOnlyHint, Destructive: a.DestructiveHint, OpenWorld: a.OpenWorldHint}
+	out := &registry.ToolAnnotations{}
+	if a != nil {
+		out.ReadOnly, out.Destructive, out.OpenWorld = a.ReadOnlyHint, a.DestructiveHint, a.OpenWorldHint
+	}
+	if sw, ok := meta["switchboard"].(map[string]any); ok {
+		if irr, _ := sw["irreversible"].(bool); irr {
+			out.Irreversible = true
+			out.Reason, _ = sw["irreversibleReason"].(string)
+		}
+	}
+	return out
+}
+
+func metaIrreversible(meta mcp.Meta) bool {
+	sw, ok := meta["switchboard"].(map[string]any)
+	if !ok {
+		return false
+	}
+	irr, _ := sw["irreversible"].(bool)
+	return irr
 }
 
 // asSchemaMap normalises a tool's input schema to the generic map the registry
@@ -648,8 +809,10 @@ func (c *clientConn) teardown() {
 	}
 
 	if c.connection != nil {
-		c.registry.RemoveConnection(c.connection.ID)
-		if c.opts.Metrics != nil {
+		removed := c.registry.RemoveConnection(c.connection.ID)
+		// If this connection was evicted, the newer one owns the metrics for
+		// the label; the evictor already cleared the old ones.
+		if removed != nil && c.opts.Metrics != nil {
 			for _, channel := range c.connection.Servers() {
 				c.opts.Metrics.ClearTools(c.connection.Label, channel.Name)
 			}

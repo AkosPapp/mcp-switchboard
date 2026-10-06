@@ -148,8 +148,16 @@ func (m *Manager) createAgent(ctx context.Context, in CreateAgentInput, spawned 
 	if in.AutoWake != nil {
 		autoWake = *in.AutoWake
 	}
+	var parentAllow []string
+	if parent != nil {
+		parentAllow = parent.ToolAllow
+	}
+	toolAllow, err := deriveToolAllow(parentAllow, in.ToolAllow)
+	if err != nil {
+		return nil, nil, err
+	}
 	a := store.Agent{
-		Name: name, Description: in.Description, Model: model, SystemPrompt: in.SystemPrompt,
+		ToolAllow: toolAllow, Name: name, Description: in.Description, Model: model, SystemPrompt: in.SystemPrompt,
 		Budget: budget, Capabilities: in.Capabilities, Approval: approval, AutoWake: autoWake, Status: store.AgentIdle,
 	}
 	if in.ParentID != "" {

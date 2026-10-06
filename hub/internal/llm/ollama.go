@@ -277,6 +277,9 @@ func (o *OpenAI) completeOllama(ctx context.Context, msgs []Message, tools []Too
 		slog.Debug("llm: ollama /api/show failed", "model", opts.Model, "err", showErr)
 	}
 	numCtx := o.contextWindow(ctx, opts.Model, info)
+	if opts.MaxContext > 0 && (numCtx <= 0 || opts.MaxContext < numCtx) {
+		numCtx = opts.MaxContext // I4: the chat's own budget caps the model window
+	}
 	options := map[string]any{}
 	if numCtx > 0 {
 		options["num_ctx"] = numCtx
@@ -287,15 +290,21 @@ func (o *OpenAI) completeOllama(ctx context.Context, msgs []Message, tools []Too
 	if opts.MaxTokens > 0 {
 		options["num_predict"] = opts.MaxTokens
 	}
+	kept := sanitizeTools(o.name, tools)
+	// Ollama drops the oldest messages of an over-long prompt, which can be the
+	// user's request; make the prompt fit before it gets the chance.
+	msgs = fitToWindow(msgs, kept, opts.System, numCtx)
 	body := map[string]any{
 		"model": opts.Model, "stream": true,
 		"messages": ollamaMessages(msgs, opts.System),
 		"options":  options,
 	}
-	if opts.Thinking != nil && opts.Thinking.Type == "enabled" && info.has("thinking") {
+	wantThink := (opts.Thinking != nil && opts.Thinking.Type == "enabled") ||
+		(opts.Effort != "" && opts.Effort != "none") // I12: native thinks on/off only
+	if wantThink && info.has("thinking") {
 		body["think"] = true
 	}
-	if kept := sanitizeTools(o.name, tools); len(kept) > 0 {
+	if len(kept) > 0 {
 		var ts []map[string]any
 		for _, t := range kept {
 			fn := map[string]any{"name": t.Name, "parameters": t.InputSchema}
@@ -318,14 +327,15 @@ func (o *OpenAI) completeOllama(ctx context.Context, msgs []Message, tools []Too
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
-		o.streamOllama(emitter{ctx, ch}, resp.Body, opts.Model, numCtx)
+		o.streamOllama(emitter{ctx, ch}, resp.Body, opts.Model, numCtx, kept)
 	}()
 	return ch, nil
 }
 
-func (o *OpenAI) streamOllama(em emitter, body io.Reader, model string, numCtx int) {
+func (o *OpenAI) streamOllama(em emitter, body io.Reader, model string, numCtx int, tools []Tool) {
 	br := bufio.NewReaderSize(body, 64*1024)
 	nCalls := 0
+	var text, thinking strings.Builder // kept for recoverTextToolCalls
 	for {
 		line, rerr := br.ReadBytes('\n')
 		if line = bytes.TrimSpace(line); len(line) > 0 {
@@ -355,6 +365,8 @@ func (o *OpenAI) streamOllama(em emitter, body io.Reader, model string, numCtx i
 				em.fail(fmt.Errorf("%s: %s", o.name, c.Error))
 				return
 			}
+			text.WriteString(c.Message.Content)
+			thinking.WriteString(c.Message.Thinking)
 			if c.Message.Thinking != "" && !em.send(Delta{Type: DeltaThinking, Text: c.Message.Thinking}) {
 				return
 			}
@@ -373,6 +385,16 @@ func (o *OpenAI) streamOllama(em emitter, body io.Reader, model string, numCtx i
 				}
 			}
 			if c.Done {
+				if nCalls == 0 {
+					for _, tc := range recoverTextToolCalls(text.String(), thinking.String(), tools) {
+						slog.Warn("llm: recovered a tool call the model wrote as text", "model", model, "tool", tc.Name)
+						nCalls++
+						tc := tc
+						if !em.send(Delta{Type: DeltaToolCall, ContentIndex: nCalls, ToolCall: &tc}) {
+							return
+						}
+					}
+				}
 				u := &Usage{InputTokens: c.PromptEvalCount, OutputTokens: c.EvalCount, ContextWindow: numCtx}
 				if numCtx > 0 && c.PromptEvalCount >= numCtx {
 					u.Truncated = true
@@ -489,6 +511,8 @@ func (o *OpenAI) discoverOllama(ctx context.Context) ([]ModelSpec, error) {
 				}
 				spec.ContextWindow = info.ContextLength
 				if len(info.Capabilities) > 0 {
+					v := info.has("vision")
+					spec.SupportsImages = &v
 					b := info.has("tools")
 					spec.SupportsTools = &b
 				}

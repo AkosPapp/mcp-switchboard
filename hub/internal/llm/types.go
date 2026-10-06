@@ -3,7 +3,10 @@
 // integer-micro pricing, and a scripted fake for tests.
 package llm
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // Message roles.
 const (
@@ -52,7 +55,7 @@ func TextMessage(role, text string) Message {
 	return Message{Role: role, Content: []Block{{Type: BlockText, Text: text}}}
 }
 
-// Text concatenates the text blocks of a message.
+// Text joins the text blocks of a message with newlines.
 func (m Message) Text() string { return blocksText(m.Content) }
 
 // Block is one piece of content. Image blocks carry base64 Data and MediaType.
@@ -115,6 +118,15 @@ type Options struct {
 	Temperature *float64
 	Thinking    *Thinking
 	System      string
+	// Effort (I12) is the reasoning-effort request: "minimal", "low",
+	// "medium", "high" or "none"; empty means the model default. Providers
+	// without a reasoning control ignore it; "none" explicitly disables
+	// thinking where a toggle exists.
+	Effort string
+	// MaxContext (I4) caps the prompt window where the hub controls it
+	// (native Ollama num_ctx); other providers enforce their own window.
+	// 0 = no cap (use whatever the provider knows).
+	MaxContext int
 }
 
 // Usage counts tokens. InputTokens EXCLUDES cache reads and writes, so the four
@@ -169,15 +181,23 @@ type Provider interface {
 	Complete(ctx context.Context, msgs []Message, tools []Tool, opts Options) (<-chan Delta, error)
 }
 
-func blocksText(bs []Block) string {
-	var out string
+// BlocksText joins the text blocks with "\n". MCP tool results arrive as one
+// content block per list item (the SDK never joins them), so concatenating
+// without a separator silently destroyed line structure: a list of source
+// lines reached the model as one glued line (P0-A). Image and thinking blocks
+// are skipped entirely, not replaced by a blank line. Exported so the agents
+// package shares this one implementation instead of keeping a drifting copy.
+func BlocksText(bs []Block) string {
+	parts := make([]string, 0, len(bs))
 	for _, b := range bs {
 		if b.Type == BlockText {
-			out += b.Text
+			parts = append(parts, b.Text)
 		}
 	}
-	return out
+	return strings.Join(parts, "\n")
 }
+
+func blocksText(bs []Block) string { return BlocksText(bs) }
 
 // Collect drains a stream into its parts; handy for tests and non-streaming
 // consumers. The error is the "error" delta's, if any.

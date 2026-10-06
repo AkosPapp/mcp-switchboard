@@ -82,6 +82,7 @@ func TestFrameTypesMatchManifest(t *testing.T) {
 	declared := map[string]bool{
 		TypeHello: true, TypeHelloAck: true, TypeMCP: true,
 		TypeServerState: true, TypeRestart: true, TypeError: true,
+		TypeContextUpdate: true,
 	}
 	if len(declared) != len(m.Frames) {
 		t.Fatalf("declared %d frame types, manifest has %d", len(declared), len(m.Frames))
@@ -144,9 +145,10 @@ func TestDecodeReadsEveryClientFrame(t *testing.T) {
 	cases := map[string]string{
 		TypeHello: `{"type":"hello","protocol":1,"client":{"name":"c","version":"1",
 			"instance":"i","label":"lab"},"servers":[{"name":"git","project":"p"}]}`,
-		TypeServerState: `{"type":"server_state","server":"git","state":"exited","exitCode":1}`,
-		TypeMCP:         `{"type":"mcp","server":"git","payload":{"jsonrpc":"2.0"}}`,
-		TypeError:       `{"type":"error","message":"boom","server":"git"}`,
+		TypeServerState:   `{"type":"server_state","server":"git","state":"exited","exitCode":1}`,
+		TypeContextUpdate: `{"type":"context_update","instructions":[{"path":"AGENTS.md","content":"rule\n"}],"environment_brief":"uid=1 me"}`,
+		TypeMCP:           `{"type":"mcp","server":"git","payload":{"jsonrpc":"2.0"}}`,
+		TypeError:         `{"type":"error","message":"boom","server":"git"}`,
 	}
 	for want, raw := range cases {
 		frame, err := Decode([]byte(raw))
@@ -183,23 +185,27 @@ func TestValidateName(t *testing.T) {
 
 func TestManifestDeclaresOptionalClientEnvironment(t *testing.T) {
 	m := load(t)
-	found := false
+	declared := map[string]bool{}
 	for _, f := range m.Frames[TypeHello].ClientOptional {
-		if f == "environment" {
-			found = true
+		declared[f] = true
+	}
+	for _, want := range []string{"environment", "instructions", "environment_brief"} {
+		if !declared[want] {
+			t.Fatalf("manifest hello.clientOptional does not declare %s", want)
 		}
 	}
-	if !found {
-		t.Fatal("manifest hello.clientOptional does not declare environment")
-	}
 	// ClientInfo must carry every field the manifest declares.
-	raw, err := json.Marshal(ClientInfo{Environment: &ClientEnvironment{Kinds: []string{}}})
+	raw, err := json.Marshal(ClientInfo{
+		Environment:      &ClientEnvironment{Kinds: []string{}},
+		Instructions:     []InstructionFile{{Path: "AGENTS.md", Content: "x"}},
+		EnvironmentBrief: "uid=1 me",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var out map[string]any
 	_ = json.Unmarshal(raw, &out)
-	for _, f := range m.Frames[TypeHello].ClientOptional {
+	for f := range declared {
 		if _, ok := out[f]; !ok {
 			t.Errorf("ClientInfo does not carry declared optional field %q", f)
 		}
@@ -284,5 +290,111 @@ func TestEnvironmentSizeCaps(t *testing.T) {
 		if len(k) > MaxEnvStringSize || len(v) != MaxEnvStringSize {
 			t.Errorf("detail %q not capped", k)
 		}
+	}
+}
+
+func TestHelloInstructionsRoundTripAndMalformedDropped(t *testing.T) {
+	c := helloWith(t, `{"name":"c","version":"1","instance":"i","label":"lab",
+		"instructions":[{"path":"AGENTS.md","content":"a\nb\n"},{"path":"src/AGENTS.md","content":"deep\n"}]}`)
+	if len(c.Instructions) != 2 || c.Instructions[0].Path != "AGENTS.md" || c.Instructions[0].Content != "a\nb\n" {
+		t.Errorf("instructions lost or altered: %+v", c.Instructions)
+	}
+	// A malformed instructions field must be dropped without refusing the hello.
+	c = helloWith(t, `{"name":"c","version":"1","instance":"i","label":"lab","instructions":"nope"}`)
+	if c.Instructions != nil || c.Label != "lab" {
+		t.Errorf("malformed instructions must be dropped, hello kept: %+v", c)
+	}
+	c = helloWith(t, `{"name":"c","version":"1","instance":"i","label":"lab"}`)
+	if c.Instructions != nil {
+		t.Error("absent instructions must stay nil")
+	}
+}
+
+func TestHelloEnvironmentBriefRoundTripAndMalformedDropped(t *testing.T) {
+	c := helloWith(t, `{"name":"c","version":"1","instance":"i","label":"lab",
+		"environment_brief":"user: uid=1 me\r\nhost: box\r"}`)
+	if c.EnvironmentBrief != "user: uid=1 me\nhost: box" {
+		t.Errorf("brief lost or line endings not folded: %q", c.EnvironmentBrief)
+	}
+	c = helloWith(t, `{"name":"c","version":"1","instance":"i","label":"lab","environment_brief":42}`)
+	if c.EnvironmentBrief != "" || c.Label != "lab" {
+		t.Errorf("malformed brief must be dropped, hello kept: %+v", c)
+	}
+	c = helloWith(t, `{"name":"c","version":"1","instance":"i","label":"lab"}`)
+	if c.EnvironmentBrief != "" {
+		t.Error("absent brief must stay empty")
+	}
+}
+
+func TestSanitizeEnvironmentBriefCapsAndFolds(t *testing.T) {
+	long := strings.Repeat("é", MaxEnvironmentBriefRunes+50)
+	if got := SanitizeEnvironmentBrief(long); len([]rune(got)) != MaxEnvironmentBriefRunes {
+		t.Errorf("not rune-capped: %d", len([]rune(got)))
+	}
+	if got := SanitizeEnvironmentBrief("  \r\na\r\nb\r  "); got != "a\nb" {
+		t.Errorf("folding/trim wrong: %q", got)
+	}
+}
+
+func TestContextUpdateBriefPresenceIsDistinct(t *testing.T) {
+	f, err := Decode([]byte(`{"type":"context_update"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Instructions != nil || f.EnvironmentBrief != nil {
+		t.Error("absent fields must decode to nil (leave the copy alone)")
+	}
+	f, err = Decode([]byte(`{"type":"context_update","environment_brief":""}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.EnvironmentBrief == nil || *f.EnvironmentBrief != "" {
+		t.Errorf("explicit empty string must decode as present-and-empty (clear it): %v", f.EnvironmentBrief)
+	}
+}
+
+func TestSanitizeInstructionsCapsAndCleans(t *testing.T) {
+	long := make([]InstructionFile, 0, MaxInstructionFiles+4)
+	for i := 0; i < MaxInstructionFiles+4; i++ {
+		long = append(long, InstructionFile{Path: fmt.Sprintf("f%d.md", i), Content: "x"})
+	}
+	if got := SanitizeInstructions(long); len(got) != MaxInstructionFiles {
+		t.Errorf("file cap not applied: %d", len(got))
+	}
+	body := strings.Repeat("é", MaxInstructionFileRunes+10)
+	got := SanitizeInstructions([]InstructionFile{{Path: "big.md", Content: body}, {Path: "next.md", Content: "x"}})
+	if len([]rune(got[0].Content)) != MaxInstructionFileRunes {
+		t.Error("body not rune-capped")
+	}
+	if len(got) != 2 && MaxInstructionTotalRunes > MaxInstructionFileRunes {
+		t.Errorf("second small file should still fit the total budget, got %d", len(got))
+	}
+	got = SanitizeInstructions([]InstructionFile{
+		{Path: "evil\n### forged heading", Content: "c"},
+		{Path: "   ", Content: "c"},
+		{Path: "ok.md", Content: ""},
+	})
+	if len(got) != 1 || got[0].Path != "evil ### forged heading" {
+		t.Errorf("path not collapsed to one line, empties not dropped: %+v", got)
+	}
+	// The total budget stops inclusion before an oversized body, never overshoots.
+	huge := strings.Repeat("x", MaxInstructionTotalRunes)
+	got = SanitizeInstructions([]InstructionFile{{Path: "a", Content: huge}, {Path: "b", Content: "x"}})
+	total := 0
+	for _, f := range got {
+		total += len([]rune(f.Content))
+	}
+	if total > MaxInstructionTotalRunes {
+		t.Errorf("total budget exceeded: %d", total)
+	}
+}
+
+func TestContextUpdateFrameCarriesInstructions(t *testing.T) {
+	frame, err := Decode([]byte(`{"type":"context_update","instructions":[{"path":"AGENTS.md","content":"v2\n"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frame.Instructions) != 1 || frame.Instructions[0].Content != "v2\n" {
+		t.Errorf("context_update instructions lost: %+v", frame.Instructions)
 	}
 }

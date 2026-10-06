@@ -61,7 +61,7 @@ func agentRules(grants []store.Grant) []Rule {
 // pinned to one client), plus the switchboard.* tools the agent's
 // capabilities allow (M1), sorted by name; names invalid or duplicated are
 // dropped loudly.
-func (m *Manager) buildCatalog(ctx context.Context, agent *store.Agent) (*catalog, error) {
+func (m *Manager) buildCatalog(ctx context.Context, agent *store.Agent, chat *store.Chat) (*catalog, error) {
 	grants, err := m.st.ListGrants(ctx, agent.ID)
 	if err != nil {
 		return nil, err
@@ -90,7 +90,7 @@ func (m *Manager) buildCatalog(ctx context.Context, agent *store.Agent) (*catalo
 		}
 		for _, tool := range ch.Tools() {
 			name, ok := agentToolName(pinned, conn.Label, ch.Project, ch.Name, tool.Name)
-			if !ok {
+			if !ok || !toolAllowed(agent.ToolAllow, tool.Name) {
 				continue
 			}
 			schema := tool.InputSchema
@@ -101,17 +101,23 @@ func (m *Manager) buildCatalog(ctx context.Context, agent *store.Agent) (*catalo
 				Name: name, Desc: describeOrigin(tool.Description, conn.Label, ch.Project, ch.Name), Schema: schema,
 				Ann: tool.Annotations, AnnMCP: mcpAnnotations(tool.Annotations), Ref: ref, Upstream: tool.Name,
 				// H5a: only the stable origin fields; a connection id would change on reconnect.
-				Meta: mcp.Meta{"host": conn.Label, "project": ch.Project, "server": ch.Name, "upstreamName": tool.Name},
+				Meta: upstreamMeta(conn, ch, tool),
 			})
 		}
 	}
 	for _, sb := range sbTools {
-		if sb.visible(agent.Capabilities) {
+		if sb.shownTo(agent) {
 			add(&catalogTool{Name: sb.name, Desc: sb.desc, Schema: sb.schema, Ann: regAnnotations(sb.ann), AnnMCP: sb.ann, sb: sb})
 		}
 	}
 	if len(m.autoSkills(ctx)) > 0 {
 		t := skillLoadTool
+		add(&catalogTool{Name: t.name, Desc: t.desc, Schema: t.schema, Ann: regAnnotations(t.ann), AnnMCP: t.ann, sb: t})
+	}
+	for _, t := range m.extraTools() {
+		if t.needChat != nil && !t.needChat(chat) {
+			continue
+		}
 		add(&catalogTool{Name: t.name, Desc: t.desc, Schema: t.schema, Ann: regAnnotations(t.ann), AnnMCP: t.ann, sb: t})
 	}
 	sort.Slice(cat.tools, func(i, j int) bool { return cat.tools[i].Name < cat.tools[j].Name })
@@ -208,14 +214,21 @@ func (m *Manager) execTool(ctx context.Context, agent *store.Agent, rs *runState
 
 	if strings.HasPrefix(name, "switchboard.") {
 		sb := sbByName[name]
-		if name == skillLoadName {
+		switch {
+		case name == skillLoadName:
 			sb = skillLoadTool
+		case m.extraToolByName(name) != nil:
+			sb = m.extraToolByName(name)
 		}
-		if sb == nil || !sb.visible(agent.Capabilities) {
+		if sb == nil || !sb.shownTo(agent) {
 			return toolErr(fmt.Sprintf("unknown tool %q", name))
 		}
+		args = normalizeArgs(sb.schema, args)
 		req := calls.LocalRequest{Label: "switchboard", Server: "orchestrator", Tool: name, ExposedName: name,
 			Arguments: args, Source: store.SourceAgent, AgentID: aid, ChatID: cid, RunID: rid}
+		if msg := validateArgs(sb.schema, args); msg != "" {
+			return outcomeFromResult(m.disp.Local(ctx, req, func(context.Context) (any, error) { return nil, errors.New(msg) }))
+		}
 		var gateErr error
 		if ok, reason := m.gate(ctx, agent, rs, toolCallID, name, args, regAnnotations(sb.ann)); !ok {
 			gateErr = fmt.Errorf("%w: %s", calls.ErrDenied, reason)
@@ -240,16 +253,26 @@ func (m *Manager) execTool(ctx context.Context, agent *store.Agent, rs *runState
 		return toolErr(fmt.Sprintf("unknown tool %q: it is not offered by any connected server", name))
 	}
 	ref := ch.Ref()
+	var ann *registry.ToolAnnotations
+	var schema map[string]any
+	for _, t := range ch.Tools() {
+		if t.Name == upstream {
+			ann, schema = t.Annotations, t.InputSchema
+		}
+	}
+	args = normalizeArgs(schema, args)
 	req := calls.Request{Connection: conn, Channel: ch, Tool: upstream, ExposedName: name, Arguments: args,
 		Source: store.SourceAgent, AgentID: aid, ChatID: cid, RunID: rid}
 	if allowed, _ := Resolve(agentRules(grants), ref); !allowed {
 		return outcomeFromResult(m.disp.Deny(ctx, req, "not permitted: "+ref.String()))
 	}
-	var ann *registry.ToolAnnotations
-	for _, t := range ch.Tools() {
-		if t.Name == upstream {
-			ann = t.Annotations
-		}
+	if !toolAllowed(agent.ToolAllow, upstream) {
+		return outcomeFromResult(m.disp.Deny(ctx, req, fmt.Sprintf("not permitted: tool %q is not in this chat's allowed tools %v", upstream, agent.ToolAllow)))
+	}
+	if msg := validateArgs(schema, args); msg != "" {
+		lreq := calls.LocalRequest{Label: conn.Label, Server: ch.Name, Tool: upstream, ExposedName: name,
+			Arguments: args, Source: store.SourceAgent, AgentID: aid, ChatID: cid, RunID: rid}
+		return outcomeFromResult(m.disp.Local(ctx, lreq, func(context.Context) (any, error) { return nil, errors.New(msg) }))
 	}
 	if ok, reason := m.gate(ctx, agent, rs, toolCallID, name, args, ann); !ok {
 		return outcomeFromResult(m.disp.Deny(ctx, req, reason))
@@ -279,33 +302,75 @@ type pendingApproval struct {
 	expiresAt time.Time
 	createdAt time.Time
 	ch        chan approvalDecision
+	// reason explains an irreversible gate (W1a) to whoever answers it.
+	reason string
 	// questions is set when this entry is switchboard.user.ask waiting for the
 	// user rather than a call waiting for approval; it rides the same plumbing
 	// (pending list, stream frame, waiting run status) and differs in the reply.
 	questions []Question
 }
 
-// needsApproval is W1: never / always, or for "destructive" any tool whose
-// annotations say destructiveHint or openWorldHint true. Annotations are
-// advisory data from the upstream (W4): a missing annotation does not pause.
-func needsApproval(agent *store.Agent, ann *registry.ToolAnnotations) bool {
-	switch agent.Approval {
+// needsApproval is W1: never / always, or for "destructive" every tool that is
+// not provably harmless. Annotations are advisory data from the upstream (W4),
+// so a missing hint must not open the gate: per the MCP spec a tool that is not
+// readOnly defaults to destructiveHint=true and openWorldHint=true. Approval is
+// therefore skipped only when readOnlyHint is true, or when both destructiveHint
+// and openWorldHint are explicitly false. Nil annotations require approval.
+// upstreamMeta is the stable origin metadata the hub puts on every proxied
+// upstream tool (H5a), plus the W10 pass-through: a tool that declared itself
+// irreversible keeps that fact for downstream consumers of /mcp.
+func upstreamMeta(conn *registry.Connection, ch *registry.ServerChannel, tool registry.ToolInfo) mcp.Meta {
+	meta := mcp.Meta{"host": conn.Label, "project": ch.Project, "server": ch.Name, "upstreamName": tool.Name}
+	if tool.Annotations != nil && tool.Annotations.Irreversible {
+		meta["irreversible"] = true
+	}
+	return meta
+}
+
+func needsApproval(mode string, ann *registry.ToolAnnotations) bool {
+	// W10: an irreversible action gates even under approval=never — that mode
+	// is the user's decision about friction, not a licence to move a branch
+	// on someone else's machine unasked. (The chat's auto-approver, checked
+	// before this in gate, is the user's explicit answer to exactly that.)
+	if ann != nil && ann.Irreversible {
+		return true
+	}
+	switch mode {
 	case store.ApprovalAlways:
 		return true
 	case store.ApprovalDestructive:
-		return ann != nil && ((ann.Destructive != nil && *ann.Destructive) || (ann.OpenWorld != nil && *ann.OpenWorld))
+		if ann == nil {
+			return true
+		}
+		if ann.ReadOnly {
+			return false
+		}
+		explicitlyBenign := ann.Destructive != nil && !*ann.Destructive && ann.OpenWorld != nil && !*ann.OpenWorld
+		return !explicitlyBenign
 	}
 	return false
 }
 
 // gate runs the approval step of 5.3/5.8. It returns ok=false with the reason
-// to give the model when the call must not proceed.
+// to give the model when the call must not proceed. The chat's own preferences
+// apply first (I1, I3): the auto-approver resolves every call without waiting
+// — irreversible tools included, it being the user's explicit standing yes —
+// and a chat-level approval mode overrides the owning agent's.
 func (m *Manager) gate(ctx context.Context, agent *store.Agent, rs *runState, callID, tool string, args map[string]any, ann *registry.ToolAnnotations) (bool, string) {
-	if !needsApproval(agent, ann) {
+	mode := agent.Approval
+	if c := m.gateChat(ctx, rs); c != nil {
+		if c.AutoApprove {
+			return true, ""
+		}
+		mode = c.ApprovalMode(agent.Approval)
+	}
+	if !needsApproval(mode, ann) {
 		return true, ""
 	}
 	if rs == nil {
-		return false, "approval is required for this call but /mcp/agent has no run to pause; use the console"
+		return false, fmt.Sprintf(
+			"approval is required for this call (%s) but /mcp/agent has no run to pause; use the console (gate rule: %s)",
+			tool, approvalRuleNote(mode, ann))
 	}
 	timeout := time.Duration(m.set.ApprovalTimeout) * time.Second
 	if timeout <= 0 {
@@ -313,12 +378,17 @@ func (m *Manager) gate(ctx context.Context, agent *store.Agent, rs *runState, ca
 	}
 	now := time.Now().UTC()
 	pa := &pendingApproval{tool: tool, arguments: args, createdAt: now, expiresAt: now.Add(timeout), ch: make(chan approvalDecision, 1)}
+	frame := map[string]any{"callId": callID, "name": tool, "arguments": args, "expiresAt": store.FormatTime(pa.expiresAt)}
+	if ann != nil && ann.Irreversible && ann.Reason != "" {
+		pa.reason = ann.Reason
+		frame["reason"] = ann.Reason
+	}
 	m.mu.Lock()
 	rs.approvals[callID] = pa
 	m.mu.Unlock()
 
 	m.enterWait(rs, true)
-	m.frame(rs, "approval_required", map[string]any{"callId": callID, "name": tool, "arguments": args, "expiresAt": store.FormatTime(pa.expiresAt)})
+	m.frame(rs, "approval_required", frame)
 	m.publish(eventChat(rs))
 	m.publish(events.Event{Type: events.TypeAgent, AgentID: rs.agentID}) // /api/approvals changed
 	m.notifyPush(rs, push.KindApprovalRequired, fmt.Sprintf("wants to run %s", tool))
@@ -333,10 +403,12 @@ func (m *Manager) gate(ctx context.Context, agent *store.Agent, rs *runState, ca
 			outcome = "approved"
 		}
 	case <-timer.C:
-		dec = approvalDecision{reason: fmt.Sprintf("approval timed out after %s: the call was auto-denied", timeout.Round(time.Second))}
+		dec = approvalDecision{reason: fmt.Sprintf(
+			"approval timed out after %s: the call was auto-denied; this is retryable — calling again will ask again",
+			timeout.Round(time.Second))}
 		outcome = "timeout"
 	case <-ctx.Done():
-		dec = approvalDecision{reason: "cancelled while waiting for approval"}
+		dec = approvalDecision{reason: approvalCancelReason(ctx, m.set.CallTimeout)}
 		outcome = ""
 	}
 	m.mu.Lock()
@@ -353,14 +425,77 @@ func (m *Manager) gate(ctx context.Context, agent *store.Agent, rs *runState, ca
 	if dec.approved {
 		return true, ""
 	}
+	r := dec.reason
 	if outcome == "denied" {
-		r := "denied by the approver"
+		r = "denied by the approver"
 		if dec.reason != "" {
 			r += ": " + dec.reason
 		}
-		return false, r
+		r += "; calling again will ask the approver afresh"
 	}
-	return false, dec.reason
+	return false, fmt.Sprintf("%s (pending call: %s; gate rule: %s)", r, tool, approvalRuleNote(mode, ann))
+}
+
+// gateChat reads the chat whose run is calling, for the approval preferences
+// read at gate time (a toggle flips behaviour for the next call). Runs without
+// a chat (an agent reached over /mcp with no run) have none.
+func (m *Manager) gateChat(ctx context.Context, rs *runState) *store.Chat {
+	if rs == nil || rs.chatID == "" {
+		return nil
+	}
+	c, err := m.st.GetChat(ctx, rs.chatID)
+	if err != nil || c == nil {
+		return nil
+	}
+	return c
+}
+
+// approvalCancelReason turns a ctx cancellation during an approval wait into a
+// reason the model can act on. A bare "cancelled" made the hub's own
+// CALL_TIMEOUT indistinguishable from a human pressing deny (P1-B); ctx.Err()
+// separates them: a deadline here is the hub's clock (nobody denied it),
+// anything else is the run or its caller being stopped.
+func approvalCancelReason(ctx context.Context, callTimeout float64) string {
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return fmt.Sprintf(
+			"cancelled while waiting for approval: the hub's per-call deadline (CALL_TIMEOUT, %s) elapsed "+
+				"while the approval was still pending — nobody denied it; this is retryable, calling again starts a new wait",
+			formatSeconds(callTimeout))
+	default:
+		if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+			return fmt.Sprintf("cancelled while waiting for approval: %v (ctx: %v); the run or its caller was stopped; retryable once a run is active again", cause, ctx.Err())
+		}
+		return fmt.Sprintf("cancelled while waiting for approval: the run or its caller was cancelled (%v); retryable once a run is active again", ctx.Err())
+	}
+}
+
+// approvalRuleNote states, from data the hub actually holds, which rule
+// gated this call: the effective approval mode plus the annotation (or its
+// absence) that made the call non-harmless. The model sees this in the tool
+// error so a rejection is explainable, not a mystery "cancelled".
+func approvalRuleNote(mode string, ann *registry.ToolAnnotations) string {
+	if ann != nil && ann.Irreversible {
+		note := "the tool declares this action irreversible (no undo from this machine), which gates it even under approval mode '" + mode + "'"
+		if ann.Reason != "" {
+			note += ": " + ann.Reason
+		}
+		return note
+	}
+	switch mode {
+	case store.ApprovalAlways:
+		return "approval mode 'always' gates every tool call"
+	case store.ApprovalDestructive:
+		switch {
+		case ann == nil:
+			return "approval mode 'destructive' and the tool sent no annotations (absent hints default to destructive)"
+		case ann.Destructive == nil || *ann.Destructive:
+			return "approval mode 'destructive' and destructiveHint is true or missing"
+		case ann.OpenWorld == nil || *ann.OpenWorld:
+			return "approval mode 'destructive' and openWorldHint is true or missing"
+		}
+	}
+	return "the approval gate flagged this call"
 }
 
 // Approve answers a pending approval (W2).
@@ -453,7 +588,7 @@ func (m *Manager) AgentTools(ctx context.Context, agentID string) ([]*mcp.Tool, 
 		return nil, fmt.Errorf("%w: agent %s", ErrNotFound, agentID)
 	}
 	agent, _ = m.resolveAgent(ctx, agent)
-	cat, err := m.buildCatalog(ctx, agent)
+	cat, err := m.buildCatalog(ctx, agent, nil) // the /mcp surface has no chat context: unlock tools stay hidden
 	if err != nil {
 		return nil, err
 	}

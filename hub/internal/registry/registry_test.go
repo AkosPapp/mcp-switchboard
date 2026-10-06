@@ -460,3 +460,21 @@ func TestRegistryConcurrentReadsAndWrites(t *testing.T) {
 	wg.Wait()
 	cancel()
 }
+
+func TestAddOrReplaceConnectionEvictsSameLabel(t *testing.T) {
+	reg := New(nil)
+	a := NewConnection("a", "box", protocol.ClientInfo{}, time.Now(), nil)
+	b := NewConnection("b", "box", protocol.ClientInfo{}, time.Now(), nil)
+	if old := reg.AddOrReplaceConnection(a); old != nil {
+		t.Fatal("nothing to evict yet")
+	}
+	if old := reg.AddOrReplaceConnection(b); old != a {
+		t.Fatalf("evicted = %v, want a", old)
+	}
+	if got := reg.Connections(); len(got) != 1 || got[0] != b {
+		t.Fatal("registry should hold only b")
+	}
+	if reg.RemoveConnection("a") != nil || reg.Get("b") == nil {
+		t.Fatal("removing the evicted id must not touch b")
+	}
+}

@@ -10,7 +10,8 @@ import (
 )
 
 const chatCols = `id, agent_id, peer_agent_id, title, kind, active_leaf_id, tags, token_total,
-	cost_total_micros, created_at, updated_at, archived_at, profile_id, client_label, parent_chat_id`
+	cost_total_micros, created_at, updated_at, archived_at, profile_id, client_label, parent_chat_id,
+	model_pref, context_limit, approval, auto_approve, summarized_at, effort, summary, summarize_upto_msg, notes, optimize`
 
 func scanChat(sc scanner) (Chat, error) {
 	var (
@@ -18,15 +19,29 @@ func scanChat(sc scanner) (Chat, error) {
 		peer, leaf, archived   sql.NullString
 		profile, client        sql.NullString
 		parentChat             sql.NullString
+		modelPref, approval    sql.NullString
+		sumAt, effort          sql.NullString
+		notes                  string
+		optimize               int
+		summary, upto          sql.NullString
+		ctxLim                 sql.NullInt64
+		auto                   int
 		tags, created, updated string
 	)
 	err := sc.Scan(&c.ID, &c.AgentID, &peer, &c.Title, &c.Kind, &leaf, &tags, &c.TokenTotal,
-		&c.CostTotalMicros, &created, &updated, &archived, &profile, &client, &parentChat)
+		&c.CostTotalMicros, &created, &updated, &archived, &profile, &client, &parentChat,
+		&modelPref, &ctxLim, &approval, &auto, &sumAt, &effort, &summary, &upto, &notes, &optimize)
 	if err != nil {
 		return c, err
 	}
 	c.PeerAgentID, c.ActiveLeafID = optional(peer), optional(leaf)
 	c.ProfileID, c.ClientLabel, c.ParentChatID = optional(profile), optional(client), optional(parentChat)
+	c.ModelPref = json.RawMessage(modelPref.String)
+	c.Approval, c.AutoApprove, c.ContextLimit = approval.String, auto != 0, ctxLim.Int64
+	c.SummarizedAt, c.Effort = timePtr(sumAt), effort.String
+	c.Notes = notes
+	c.Optimize = optimize != 0
+	c.Summary, c.SummarizeUptoMsg = summary.String, upto.String
 	_ = json.Unmarshal([]byte(tags), &c.Tags)
 	if c.Tags == nil {
 		c.Tags = []string{}
@@ -54,6 +69,22 @@ func encodeTags(t []string) string {
 	return string(b)
 }
 
+// nullableInt stores non-positive chat limits as NULL (0 column value and
+// absent mean the same thing: no limit).
+func nullableInt(v int64) any {
+	if v <= 0 {
+		return nil
+	}
+	return v
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func (s *SQLiteStore) CreateChat(ctx context.Context, c Chat) (Chat, error) {
 	if c.ID == "" {
 		c.ID = NewID()
@@ -67,10 +98,14 @@ func (s *SQLiteStore) CreateChat(ctx context.Context, c Chat) (Chat, error) {
 		c.Tags = []string{}
 	}
 	_, err := s.write.ExecContext(ctx,
-		`INSERT INTO chats (`+chatCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?)`,
+		`INSERT INTO chats (id, agent_id, peer_agent_id, title, kind, active_leaf_id, tags, token_total,
+			cost_total_micros, created_at, updated_at, archived_at, profile_id, client_label, parent_chat_id,
+			model_pref, context_limit, approval, auto_approve, summarized_at, effort, summary, summarize_upto_msg)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,NULL,?,NULL,NULL)`,
 		c.ID, c.AgentID, strArg(c.PeerAgentID), c.Title, c.Kind, strArg(c.ActiveLeafID),
 		encodeTags(c.Tags), c.TokenTotal, c.CostTotalMicros, FormatTime(now), FormatTime(now),
-		strArg(c.ProfileID), strArg(c.ClientLabel), strArg(c.ParentChatID))
+		strArg(c.ProfileID), strArg(c.ClientLabel), strArg(c.ParentChatID), nullableString(string(c.ModelPref)),
+		nullableInt(c.ContextLimit), nullableString(c.Approval), b2i(c.AutoApprove), nullableString(c.Effort))
 	if err != nil {
 		return Chat{}, fmt.Errorf("store: creating chat: %w", err)
 	}
@@ -138,6 +173,28 @@ func (s *SQLiteStore) UpdateChat(ctx context.Context, id string, p ChatPatch) (C
 	if p.SetClient {
 		sets, args = append(sets, "client_label = ?"), append(args, strArg(p.ClientLabel))
 	}
+	if p.SetModelPref {
+		sets = append(sets, "model_pref = ?")
+		args = append(args, nullableString(string(p.ModelPref)))
+	}
+	if p.ContextLimit != nil {
+		sets, args = append(sets, "context_limit = ?"), append(args, nullableInt(*p.ContextLimit))
+	}
+	if p.SetApproval {
+		sets, args = append(sets, "approval = ?"), append(args, nullableString(p.Approval))
+	}
+	if p.AutoApprove != nil {
+		sets, args = append(sets, "auto_approve = ?"), append(args, b2i(*p.AutoApprove))
+	}
+	if p.Effort != nil {
+		sets, args = append(sets, "effort = ?"), append(args, nullableString(*p.Effort))
+	}
+	if p.Notes != nil {
+		sets, args = append(sets, "notes = ?"), append(args, *p.Notes)
+	}
+	if p.Optimize != nil {
+		sets, args = append(sets, "optimize = ?"), append(args, b2i(*p.Optimize))
+	}
 	args = append(args, id)
 	var out *Chat
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
@@ -155,6 +212,22 @@ func (s *SQLiteStore) UpdateChat(ctx context.Context, id string, p ChatPatch) (C
 		return Chat{}, fmt.Errorf("store: updating chat %s: %w", id, err)
 	}
 	return *out, nil
+}
+
+// SetChatSummary records a context compression: Summary stands in for every
+// active-path message up to and including uptoMsg (I11). Called by
+// Manager.compact; the turn builder applies it when assembling the prompt.
+func (s *SQLiteStore) SetChatSummary(ctx context.Context, id, summary, uptoMsg string) error {
+	res, err := s.write.ExecContext(ctx,
+		`UPDATE chats SET summary = ?, summarize_upto_msg = ?, summarized_at = ?, updated_at = ? WHERE id = ?`,
+		summary, uptoMsg, FormatTime(time.Now().UTC()), FormatTime(time.Now().UTC()), id)
+	if err != nil {
+		return fmt.Errorf("store: setting chat summary: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return notFound("chat", id)
+	}
+	return nil
 }
 
 func (s *SQLiteStore) DeleteChat(ctx context.Context, id string) error {
@@ -474,6 +547,10 @@ func (s *SQLiteStore) SearchMessages(ctx context.Context, q SearchQuery) ([]Sear
 	if q.AgentID != "" {
 		query += " AND c.agent_id = ?"
 		args = append(args, q.AgentID)
+	}
+	if q.ChatID != "" {
+		query += " AND m.chat_id = ?"
+		args = append(args, q.ChatID)
 	}
 	query += " ORDER BY messages_fts.rank LIMIT ?"
 	args = append(args, clampLimit(q.Limit))

@@ -288,8 +288,18 @@ func TestTheCallTimeoutIsEnforced(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Errorf("took %s, the timeout was not enforced", elapsed)
 	}
+	// P0-B: the message must name the limit, the elapsed time and the remedy,
+	// not the bare "context deadline exceeded" the model could only bisect.
+	for _, want := range []string{"CALL_TIMEOUT", "100ms", "wait_for_start", "wait_for_poll"} {
+		if !strings.Contains(result.Error, want) {
+			t.Errorf("deadline error %q does not mention %q", result.Error, want)
+		}
+	}
 	if rows := recorder.rows(); len(rows) != 1 {
 		t.Errorf("recorded %d rows, want 1", len(rows))
+	}
+	if row := recorder.rows()[0]; !strings.Contains(row.Error, "CALL_TIMEOUT") {
+		t.Errorf("recorded %q, want the explained deadline", row.Error)
 	}
 }
 

@@ -105,3 +105,26 @@ func TestPushEnabledConfig(t *testing.T) {
 		t.Fatal("settings with only the public key must not report push enabled")
 	}
 }
+
+func TestPushSubscribeRejectsUnsafeEndpoints(t *testing.T) {
+	for _, ep := range []string{
+		"http://push.example/abc",
+		"https://localhost/abc",
+		"https://intranet/abc",
+		"https://127.0.0.1/abc",
+		"https://[::1]/abc",
+		"https://10.0.0.5/abc",
+		"https://192.168.1.1/abc",
+		"https://169.254.169.254/latest",
+		"https://0.0.0.0/abc",
+		"ftp://push.example/abc",
+		"not a url",
+	} {
+		f := newFixture(t, withPushEnabled)
+		body := `{"endpoint":"` + ep + `","keys":{"p256dh":"p1","auth":"a1"}}`
+		requireStatus(t, f.do(t, "POST", "/api/push/subscribe", body), 400)
+		if len(f.store.subs) != 0 {
+			t.Errorf("%s: subscription was stored", ep)
+		}
+	}
+}

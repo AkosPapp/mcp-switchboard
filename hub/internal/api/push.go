@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/AkosPapp/mcp-switchboard/hub/internal/push"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/store"
 )
 
@@ -59,6 +60,10 @@ func (h *Handler) pushSubscribe(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Endpoint == "" || body.Keys.P256dh == "" || body.Keys.Auth == "" {
 		writeError(w, http.StatusBadRequest, "endpoint and keys.p256dh and keys.auth are required")
+		return
+	}
+	if err := push.ValidateEndpoint(body.Endpoint); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 

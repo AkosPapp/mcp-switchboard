@@ -167,6 +167,16 @@ func (d *Dispatcher) Call(ctx context.Context, req Request) (*Result, error) {
 	case err != nil:
 		record.Status = store.StatusError
 		record.Error = err.Error()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			// The call hit the hub's own per-call limit, not the caller's
+			// cancellation. Say so, name the configured value, and give the
+			// remedy, instead of the bare "context deadline exceeded" that
+			// agents could only bisect by burning long turns (P0-B).
+			record.Error = fmt.Sprintf(
+				"hub call deadline: killed after %s (the hub's CALL_TIMEOUT, per call), elapsed %.1fs. The upstream may still be running; its output was lost. Do not retry a longer blocking call — this limit is deployment config and binds before any tool's own timeout. For waits beyond it use wait_for_start/wait_for_poll (or read with offset), or raise CALL_TIMEOUT in the hub deployment.",
+				d.timeout, time.Since(started).Seconds(),
+			)
+		}
 		d.finish(ctx, &record)
 		return &Result{CallID: record.ID, Error: record.Error, IsError: true}, nil
 	case result.IsError:

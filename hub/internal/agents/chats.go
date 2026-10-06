@@ -140,6 +140,9 @@ func (m *Manager) CreateChat(ctx context.Context, in CreateChatInput) (*store.Ch
 	if _, err := normModel(in.Model); err != nil {
 		return nil, err
 	}
+	if err := validChatPrefs(in.Approval, in.Effort, in.ContextLimit); err != nil {
+		return nil, err
+	}
 	// Prompt source: profile, own text, or (nothing said at all) the default profile.
 	switch {
 	case in.ProfileID != "":
@@ -161,8 +164,52 @@ func (m *Manager) CreateChat(ctx context.Context, in CreateChatInput) (*store.Ch
 	if err != nil {
 		return nil, err
 	}
+	// Initial conversation preferences (I1–I4, I12). The chosen model is the
+	// chat's default over the profile's, not an edit of the profile itself.
+	var pref store.ChatPatch
+	if len(in.Model) > 0 && string(in.Model) != "null" {
+		pref.SetModelPref, pref.ModelPref = true, in.Model
+	}
+	if in.ContextLimit > 0 {
+		limit := in.ContextLimit
+		pref.ContextLimit = &limit
+	}
+	if in.Approval != "" {
+		pref.SetApproval, pref.Approval = true, in.Approval
+	}
+	if in.AutoApprove {
+		pref.AutoApprove = &in.AutoApprove
+	}
+	if in.Effort != "" {
+		pref.Effort = &in.Effort
+	}
+	if pref.SetModelPref || pref.ContextLimit != nil || pref.SetApproval || pref.AutoApprove != nil || pref.Effort != nil {
+		updated, err := m.st.UpdateChat(ctx, chat.ID, pref)
+		if err != nil {
+			return nil, err
+		}
+		chat = &updated
+	}
 	m.publish(events.Event{Type: events.TypeChat, ChatID: chat.ID, AgentID: chat.AgentID})
 	return chat, nil
+}
+
+// validChatPrefs validates the preference part of chat create/update.
+func validChatPrefs(mode, effort string, limit int64) error {
+	switch mode {
+	case "", store.ApprovalNever, store.ApprovalDestructive, store.ApprovalAlways:
+	default:
+		return fmt.Errorf("%w: approval must be never, destructive or always", ErrInvalid)
+	}
+	switch effort {
+	case "", "low", "medium", "high", "none":
+	default:
+		return fmt.Errorf("%w: effort must be low, medium, high or none", ErrInvalid)
+	}
+	if limit < 0 {
+		return fmt.Errorf("%w: contextLimit must not be negative", ErrInvalid)
+	}
+	return nil
 }
 
 // UpdateChat implements Service.
@@ -186,6 +233,44 @@ func (m *Manager) UpdateChat(ctx context.Context, id string, in ChatUpdate) (*st
 	if in.ClientSet {
 		patch.SetClient, patch.ClientLabel = true, in.ClientLabel
 	}
+	// Preference part (chat-owned columns): approval applies to the chat's
+	// runs without touching the agent, so the user can switch modes at any
+	// time (I3) and flip the auto-approver (I1).
+	effort, limit, limitSet := "", int64(0), false
+	if in.Effort != nil {
+		effort = *in.Effort
+	}
+	if in.ContextLimit != nil {
+		limit, limitSet = *in.ContextLimit, true
+	}
+	if limitSet && limit < 0 {
+		return nil, ErrInvalid
+	}
+	if err := validChatPrefs(in.Approval, effort, 0); err != nil {
+		return nil, err
+	}
+	if in.SetModelPref && len(in.ModelPref) > 0 && string(in.ModelPref) != "null" {
+		if _, err := normModel(in.ModelPref); err != nil {
+			return nil, err
+		}
+	}
+	var pref store.ChatPatch
+	if in.SetModelPref {
+		pref.SetModelPref, pref.ModelPref = true, in.ModelPref
+	}
+	if in.ContextLimit != nil {
+		pref.ContextLimit = in.ContextLimit
+	}
+	if in.SetApproval {
+		pref.SetApproval, pref.Approval = true, in.Approval
+	}
+	if in.AutoApprove != nil {
+		pref.AutoApprove = in.AutoApprove
+	}
+	if in.Effort != nil {
+		pref.Effort = in.Effort
+	}
+	hasPrefs := pref.SetModelPref || pref.ContextLimit != nil || pref.SetApproval || pref.AutoApprove != nil || pref.Effort != nil
 	if patch.SetProfile || patch.SetClient || patch.SystemPrompt != nil {
 		updated, err := m.UpdateAgent(ctx, agent.ID, patch)
 		if err != nil {
@@ -200,6 +285,12 @@ func (m *Manager) UpdateChat(ctx context.Context, id string, in ChatUpdate) (*st
 		if err := m.mirrorChatScope(ctx, agent.ID, patch); err != nil {
 			return nil, err
 		}
+	}
+	if hasPrefs {
+		if _, err := m.st.UpdateChat(ctx, chat.ID, pref); err != nil {
+			return nil, err
+		}
+		m.publish(events.Event{Type: events.TypeChat, ChatID: chat.ID, AgentID: chat.AgentID})
 	}
 	fresh, err := m.st.GetChat(ctx, chat.ID)
 	if err != nil || fresh == nil {

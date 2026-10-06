@@ -34,7 +34,19 @@ type sbTool struct {
 	schema  map[string]any
 	ann     *mcp.ToolAnnotations
 	visible func(store.Capabilities) bool
-	run     func(m *Manager, ctx context.Context, cc *callCtx, args map[string]any) (any, error)
+	// visibleAgent, when set, further restricts who is offered the tool
+	// (chat.report: only a chat that has a parent). Use sb.shownTo.
+	visibleAgent func(*store.Agent) bool
+	// needChat, when set, hides the tool unless it returns true for the chat
+	// whose catalog is being built (the /optimize_skills unlock). A call
+	// without chat context never sees it.
+	needChat func(*store.Chat) bool
+	run      func(m *Manager, ctx context.Context, cc *callCtx, args map[string]any) (any, error)
+}
+
+// shownTo is whether the tool is offered to this agent.
+func (t *sbTool) shownTo(a *store.Agent) bool {
+	return t.visible(a.Capabilities) && (t.visibleAgent == nil || t.visibleAgent(a))
 }
 
 var (
@@ -68,37 +80,64 @@ func init() {
 	noApproval := &mcp.ToolAnnotations{DestructiveHint: bp(false), OpenWorldHint: bp(false)}
 	sbTools = []*sbTool{
 		{name: "switchboard.chat.spawn",
-			desc: "Create a child chat of the current chat. Grants, capabilities and approval are bounded by your own (you can never give more than you hold); omit them to pass on what you have. An optional first message is delivered to the child as its task, and its final answer comes back to you as a message.",
+			desc: "Create a child chat to do a sub-task for you. Its grants, capabilities and approval can only be narrower than yours (omit them to pass on what you have). " +
+				"To delegate: (1) set `message` to the task, and tell the child to send its result back to you when it is finished, either with switchboard.chat.report (preferred: it gives you a fixed-format status and summary) or with switchboard.chat.send; " +
+				"(2) then END YOUR TURN: stop and write your reply, do not poll and do not call chat.list in a loop. There is no wait tool. When the child answers, its message arrives here as a new message and wakes you up to continue. " +
+				"The child's final answer to `message` is also delivered to you automatically, but that only covers its first run; an explicit report or send is the reliable way. " +
+				"Set `allowed_tools` (upstream tool name patterns such as [\"file_read\", \"git_*\"]) to limit which tools the child may call; it can only narrow your own list. " +
+				"Example: chat.spawn {title: \"Summarise README\", system_prompt: \"You are a careful summariser.\", message: \"Read README.md and summarise it in 5 bullets. When done, call switchboard.chat.report with status done and the summary.\"}, then end your turn.",
 			schema: obj([]string{"title", "system_prompt"}, map[string]any{
 				"title":         typ("string", "what the child chat is for; shown as its title"),
 				"model":         map[string]any{"type": "object", "description": "{provider, model}; defaults to yours"},
 				"system_prompt": typ("string", "the child chat's system prompt"),
 				"grants":        map[string]any{"type": "array", "items": grantItem},
-				"budget":        map[string]any{"type": "object", "description": "per-run budget overrides"},
+				"allowed_tools": map[string]any{"type": "array", "items": map[string]any{"type": "string"},
+					"description": "glob patterns on the upstream tool name (e.g. file_read, git_*); the child may call only matching tools. Must be within your own list if you have one. switchboard.* tools are unaffected"},
+				"budget": map[string]any{"type": "object", "description": "per-run budget overrides"},
 				"capabilities": map[string]any{"type": "object", "description": "{can_spawn, can_message}; at most what you hold",
 					"properties": map[string]any{"can_spawn": map[string]any{"type": "boolean"}, "can_message": map[string]any{"type": "boolean"}}},
 				"approval": map[string]any{"type": "string", "enum": []string{"never", "destructive", "always"}, "description": "at least as strict as yours"},
-				"message":  typ("string", "the child's first task, delivered as a message from this chat")}),
+				"message":  typ("string", "the child's task. Include: what to do, and \"send the result back to me with switchboard.chat.report when finished\"")}),
 			ann:     noApproval,
 			visible: canSpawn, run: (*Manager).toolSpawn},
 		{name: "switchboard.chat.send",
-			desc: "Send a message to another chat you can reach: your parent, a child, or one connected to you (see chat.list). It is delivered into that chat as a message from this chat and wakes it. Always fire-and-forget: there is no wait and no synchronous reply. If the recipient wants to answer, it sends a message back to you the same way.",
+			desc: "Send a message to another chat you can reach: your parent, a child, or one connected to you (see chat.list). " +
+				"It is fire-and-forget: you get no reply from this call, it returns at once with a message id. The message is delivered into the recipient chat and wakes it up. " +
+				"After sending, END YOUR TURN if you are waiting for an answer: do not poll. The recipient's reply arrives later as a new message that wakes you. " +
+				"To answer a message you received, send back to the sender's name shown in that message. " +
+				"Example: chat.send {to: \"Summarise README · a1b2c3\", message: \"Also include the license section.\"}",
 			schema: obj([]string{"to", "message"}, map[string]any{
-				"to": typ("string", "recipient's name, as returned by chat.list"), "message": typ("string", "the message")}),
+				"to": typ("string", "recipient's name, exactly as returned by chat.list"), "message": typ("string", "the message")}),
 			ann:     noApproval,
 			visible: canMessage, run: (*Manager).toolSend},
+		{name: "switchboard.chat.report",
+			desc: "For a chat that was spawned by another: hand your result back to your parent chat in a fixed format, and wake it. Use this when your task is finished, failed, or blocked; it is the preferred way to return results. " +
+				"Fire-and-forget, like chat.send. After reporting, end your turn. " +
+				"Example: chat.report {status: \"done\", summary: \"README describes a Go hub and a Python client.\", artifacts: [\"notes/readme.md\"]}",
+			schema: obj([]string{"status", "summary"}, map[string]any{
+				"status":    map[string]any{"type": "string", "enum": []string{"done", "failed", "blocked"}, "description": "done: task complete; failed: could not do it; blocked: need something from the parent"},
+				"summary":   typ("string", "one to three sentences: the outcome"),
+				"details":   typ("string", "optional longer explanation or the full result"),
+				"artifacts": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "optional file paths or URLs the work produced"}}),
+			ann:          noApproval,
+			visible:      func(store.Capabilities) bool { return true },
+			visibleAgent: func(a *store.Agent) bool { return a.ParentID != nil },
+			run:          (*Manager).toolReport},
 		{name: "switchboard.chat.list",
-			desc:    "List every chat you can currently message: your parent and children, and every chat joined to you by an edge.",
+			desc: "List the chats you can message: your parent, your children, and chats connected to you. Returns each one's name (use it as `to` in chat.send), title, status and relation. " +
+				"Use it to find a name, not to wait for anyone. Example: chat.list {}",
 			schema:  obj(nil, map[string]any{}),
 			ann:     &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: bp(false)},
 			visible: canEither, run: (*Manager).toolList},
 		{name: "switchboard.chat.stop",
-			desc:    "Cancel the runs of one of your descendant chats.",
-			schema:  obj([]string{"chat_id"}, map[string]any{"chat_id": typ("string", "descendant chat id")}),
+			desc:    "Cancel the running work of one of your descendant chats (a child you spawned, or its children). Use it when a child is no longer needed or is stuck. Example: chat.stop {chat_id: \"<chat_id returned by chat.spawn>\"}",
+			schema:  obj([]string{"chat_id"}, map[string]any{"chat_id": typ("string", "descendant chat id, as returned by chat.spawn or chat.list")}),
 			ann:     write,
 			visible: canSpawn, run: (*Manager).toolStop},
 		{name: "switchboard.user.ask",
-			desc: "Ask the user one to four questions and wait for the answers, e.g. to choose between approaches or settle a detail you cannot decide alone. Give each question short options when it has clear choices (the user can always type their own answer instead). Prefer this to guessing on something that matters; do not use it for things you can find out yourself. The answers are returned to you.",
+			desc: "Ask the user one to four questions and wait for the answers. Use it to choose between approaches or settle a detail you cannot decide alone, and not for things you can find out yourself. " +
+				"Give a question short `options` when it has clear choices (the user can always type their own answer instead). The answers are returned to you. " +
+				"Example: user.ask {questions: [{question: \"Which database should I use?\", header: \"Database\", options: [{label: \"SQLite\"}, {label: \"Postgres\"}]}]}",
 			schema: obj([]string{"questions"}, map[string]any{
 				"questions": map[string]any{"type": "array", "minItems": 1, "maxItems": maxQuestions, "items": obj([]string{"question"}, map[string]any{
 					"question": typ("string", "the full question"),
@@ -111,7 +150,7 @@ func init() {
 			ann:     &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: bp(false)},
 			visible: func(store.Capabilities) bool { return true }, run: (*Manager).toolAsk},
 		{name: "switchboard.mcp.list_tools",
-			desc:    "List the tools you may call right now, grouped by MCP server, with each server's connection state.",
+			desc:    "List the tools you may call right now, grouped by MCP server, with each server's connection state and each tool's exact name. Use it when unsure what tools exist or why a tool is missing. Example: mcp.list_tools {}",
 			schema:  obj(nil, map[string]any{}),
 			ann:     &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: bp(false)},
 			visible: canEither, run: (*Manager).toolListTools},
@@ -226,14 +265,29 @@ func (m *Manager) toolSpawn(ctx context.Context, cc *callCtx, args map[string]an
 			in.Grants = append(in.Grants, store.Grant{Label: argStr(g, "label"), Project: argStr(g, "project"), Server: argStr(g, "server"), Allowed: allowed})
 		}
 	}
+	if raw, ok := args["allowed_tools"].([]any); ok {
+		for _, it := range raw {
+			p, ok := it.(string)
+			if !ok {
+				return nil, fmt.Errorf("%w: allowed_tools must be strings", ErrInvalid)
+			}
+			in.ToolAllow = append(in.ToolAllow, p)
+		}
+		if _, err := deriveToolAllow(cc.agent.ToolAllow, in.ToolAllow); err != nil {
+			return nil, err
+		}
+	}
 	in.withChat = true
 	agent, chat, err := m.createAgent(ctx, in, true)
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]any{"chat_id": chat.ID}
+	if len(agent.ToolAllow) > 0 {
+		out["allowed_tools"] = agent.ToolAllow
+	}
 	if msg := argStr(args, "message"); msg != "" {
-		// The child's answer comes back into this chat as a reply message; nobody waits.
+		// The child's final answer to this first message comes back into this chat as a reply message; nobody waits.
 		route := &replyRoute{senderID: cc.agent.ID, recipient: agent.ID, senderChat: parentChat.ID, recipientChat: chat.ID}
 		if _, _, err := m.deliverChatMessage(ctx, cc.agent, parentChat, agent, chat, msg, SenderSpawn, route); err != nil {
 			out["note"] = "the chat was created, but its first message could not be delivered: " + err.Error()
@@ -344,10 +398,21 @@ func (m *Manager) toolSend(ctx context.Context, cc *callCtx, args map[string]any
 	if to == nil {
 		return nil, denied("no chat named %q is reachable; call switchboard.chat.list", toName)
 	}
+	return m.sendTo(ctx, cc, to, message)
+}
+
+// sendTo delivers message to `to` from the caller's chat, fire-and-forget, and
+// wakes it. chat.send and chat.report both go through here.
+func (m *Manager) sendTo(ctx context.Context, cc *callCtx, to *store.Agent, message string) (any, error) {
 	toChat, err := m.primaryChat(ctx, to, true)
 	if err != nil {
 		return nil, err
 	}
+	return m.sendToChat(ctx, cc, to, toChat, message)
+}
+
+func (m *Manager) sendToChat(ctx context.Context, cc *callCtx, to *store.Agent, toChat *store.Chat, message string) (any, error) {
+	caller := cc.agent
 	outChat, err := m.callerChat(ctx, cc) // whose message this is, for sender metadata
 	if err != nil {
 		return nil, err
@@ -374,6 +439,69 @@ func (m *Manager) toolSend(ctx context.Context, cc *callCtx, args map[string]any
 		out["note"] = "the recipient has exhausted its lifetime budget; no run was started"
 	}
 	return out, nil
+}
+
+// reportText is the fixed format chat.report delivers.
+func reportText(status, summary, details string, artifacts []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[report status=%s]\n%s", status, summary)
+	if details != "" {
+		fmt.Fprintf(&b, "\n\nDetails:\n%s", details)
+	}
+	if len(artifacts) > 0 {
+		b.WriteString("\n\nArtifacts:")
+		for _, a := range artifacts {
+			b.WriteString("\n- " + a)
+		}
+	}
+	return b.String()
+}
+
+func (m *Manager) toolReport(ctx context.Context, cc *callCtx, args map[string]any) (any, error) {
+	status, summary := argStr(args, "status"), strings.TrimSpace(argStr(args, "summary"))
+	switch status {
+	case "done", "failed", "blocked":
+	default:
+		return nil, fmt.Errorf("%w: status must be done, failed or blocked", ErrInvalid)
+	}
+	if summary == "" {
+		return nil, fmt.Errorf("%w: summary is required", ErrInvalid)
+	}
+	var artifacts []string
+	if raw, ok := args["artifacts"].([]any); ok {
+		for _, it := range raw {
+			s, ok := it.(string)
+			if !ok {
+				return nil, fmt.Errorf("%w: artifacts must be strings", ErrInvalid)
+			}
+			if s = strings.TrimSpace(s); s != "" {
+				artifacts = append(artifacts, s)
+			}
+		}
+	}
+	if cc.agent.ParentID == nil {
+		return nil, denied("this chat has no parent to report to")
+	}
+	parent, err := m.st.GetAgent(ctx, *cc.agent.ParentID)
+	if err != nil {
+		return nil, err
+	}
+	if parent == nil || parent.DeletedAt != nil {
+		return nil, denied("the parent chat no longer exists")
+	}
+	// The parent chat is the one this chat was spawned from.
+	var toChat *store.Chat
+	if mine, err := m.callerChat(ctx, cc); err == nil && mine != nil && mine.ParentChatID != nil {
+		if c, err := m.st.GetChat(ctx, *mine.ParentChatID); err == nil && c != nil && c.AgentID == parent.ID {
+			toChat = c
+		}
+	}
+	if toChat == nil {
+		if toChat, err = m.primaryChat(ctx, parent, true); err != nil {
+			return nil, err
+		}
+	}
+	return m.sendToChat(ctx, cc, parent, toChat, reportText(status, summary, strings.TrimSpace(argStr(args, "details")), artifacts))
 }
 
 func ifText(prefix, s string) string {
@@ -584,7 +712,7 @@ func (m *Manager) toolListTools(ctx context.Context, cc *callCtx, _ map[string]a
 			r.connected = true
 			for _, ti := range e.Channel.Tools() {
 				name, ok := agentToolName(pinned, ref.Label, ref.Project, ref.Server, ti.Name)
-				if !ok {
+				if !ok || !toolAllowed(cc.agent.ToolAllow, ti.Name) {
 					continue
 				}
 				r.tools = append(r.tools, map[string]any{"name": name, "description": ti.Description})

@@ -72,16 +72,48 @@ func (h *Handler) ws(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	send := func(m wsOut) {
-		b, err := json.Marshal(m)
-		if err != nil {
-			h.log.Warn("could not encode a websocket message", "error", err)
-			return
+	// All socket writes run on ONE goroutine behind a bounded queue.
+	// coder/websocket serializes concurrent writes internally, so the old
+	// direct-send design meant one slow reader (a phone tab throttled in the
+	// background reads its socket slowly) blocked every producer of BOTH
+	// feeds — thinking stopped mid-stream and approval/question cards
+	// appeared only after seconds or a remount, worst with a second tab
+	// open (a mobile-network read can stall the write lock near the write
+	// timeout). Producers here never block; a client lagging more than a
+	// queue behind is dropped outright — its chat frames are replayable from
+	// its last event id by the resubscribe path, which is the honest
+	// recovery for a client that cannot keep up.
+	outbox := make(chan wsOut, 512)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case m, ok := <-outbox:
+				if !ok {
+					return
+				}
+				b, err := json.Marshal(m)
+				if err != nil {
+					h.log.Warn("could not encode a websocket message", "error", err)
+					continue
+				}
+				wctx, done := context.WithTimeout(ctx, wsWriteTimeout)
+				err = c.Write(wctx, websocket.MessageText, b)
+				done()
+				if err != nil {
+					cancel() // a client that cannot take a write is gone, or too slow to be served
+					return
+				}
+			}
 		}
-		wctx, done := context.WithTimeout(ctx, wsWriteTimeout)
-		defer done()
-		if err := c.Write(wctx, websocket.MessageText, b); err != nil {
-			cancel() // a client that cannot take a write is gone, or too slow to be served
+	}()
+	send := func(m wsOut) {
+		select {
+		case outbox <- m:
+		default:
+			h.log.Debug("console websocket outbox full; closing the connection")
+			cancel()
 		}
 	}
 

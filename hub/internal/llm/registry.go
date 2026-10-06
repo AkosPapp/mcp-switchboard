@@ -60,13 +60,21 @@ type ModelSpec struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	Prices   Price  `json:"prices"`
-	Priced   bool   `json:"-"`
+	// Priced is true when the models file declared a "prices" entry. The
+	// console hides the cost figures for an unpriced model (a genuinely free
+	// local model shows "free" instead of a misleading $0/$0 budget).
+	Priced bool `json:"priced"`
 
 	// ContextWindow: in the models file, the per-model num_ctx override
 	// (context_window); on discovered models, the model's own maximum.
 	ContextWindow int   `json:"contextWindow,omitempty"`
 	SupportsTools *bool `json:"supportsTools,omitempty"`
-	Discovered    bool  `json:"discovered,omitempty"`
+	// SupportsImages (item 13): the model accepts image content blocks. nil
+	// = unknown (the console allows the upload but warns); ollama discovery
+	// sets it from the "vision" capability, the models file from
+	// supportsImages/supports_image.
+	SupportsImages *bool `json:"supportsImages,omitempty"`
+	Discovered     bool  `json:"discovered,omitempty"`
 }
 
 // UnmarshalJSON records whether a price entry was present.
@@ -79,12 +87,18 @@ func (m *ModelSpec) UnmarshalJSON(b []byte) error {
 		ContextWindow  int   `json:"contextWindow"`
 		ContextWindow2 int   `json:"context_window"`
 		SupportsTools  *bool `json:"supportsTools"`
+		SupportsImages *bool `json:"supportsImages"`
+		SupportsImg2   *bool `json:"supports_image"`
 	}
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return err
 	}
 	m.Provider, m.Model = raw.Provider, raw.Model
 	m.ContextWindow, m.SupportsTools = raw.ContextWindow, raw.SupportsTools
+	m.SupportsImages = raw.SupportsImages
+	if raw.SupportsImg2 != nil {
+		m.SupportsImages = raw.SupportsImg2
+	}
 	if raw.ContextWindow2 > 0 {
 		m.ContextWindow = raw.ContextWindow2
 	}
@@ -267,6 +281,9 @@ func (r *Registry) mergedLocked() []ModelSpec {
 				}
 				if m.SupportsTools == nil {
 					m.SupportsTools = d.SupportsTools
+				}
+				if m.SupportsImages == nil {
+					m.SupportsImages = d.SupportsImages
 				}
 				if !m.Priced && d.Priced {
 					m.Priced, m.Prices = true, d.Prices

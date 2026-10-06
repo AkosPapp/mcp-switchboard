@@ -150,6 +150,12 @@ type ToolAnnotations struct {
 	ReadOnly    bool
 	Destructive *bool
 	OpenWorld   *bool
+	// Irreversible marks a tool declared (via tool _meta, "switchboard.irreversible")
+	// as performing an action this machine cannot undo — a push, not a commit.
+	// The hub gates such calls even under approval=never (W10); Reason is the
+	// server's explanation for the approver.
+	Irreversible bool
+	Reason       string
 }
 
 // ServerChannel is one local MCP server, reached through one connection.
@@ -251,20 +257,78 @@ type Connection struct {
 	// call that is cancelled must not leave a writer blocked on a dead socket.
 	Send func(ctx context.Context, frame any) error
 
+	// Evict tears this connection's transport down. The registry's owner calls
+	// it when a newer connection claims the same label; it may be nil.
+	Evict func()
+
 	mu      sync.RWMutex
 	servers map[string]*ServerChannel
+
+	// instructions is the live set from hello's client.instructions, replaced
+	// by any context_update frame. Client.Instructions keeps the hello-time
+	// snapshot; this mutex-guarded copy is the one the agent model reads.
+	instructions []protocol.InstructionFile
+
+	// brief is the live environment brief from hello's client.environment_brief,
+	// replaced by context_update; briefAt is when it was last (re)ceived from the
+	// client, so the agent model can flag a brief that has gone stale instead of
+	// trusting it.
+	brief   string
+	briefAt time.Time
+}
+
+// SetInstructions replaces this connection's live instruction files (already
+// sanitized by the caller via protocol.SanitizeInstructions).
+func (c *Connection) SetInstructions(files []protocol.InstructionFile) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.instructions = files
+}
+
+// Instructions snapshots this connection's live instruction files.
+func (c *Connection) Instructions() []protocol.InstructionFile {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]protocol.InstructionFile(nil), c.instructions...)
+}
+
+// SetBrief replaces this connection's live environment brief (already sanitized
+// by the caller) and stamps the moment it was received. A client that keeps
+// refreshing resets the stamp; one that vanishes lets it age.
+func (c *Connection) SetBrief(brief string, at time.Time) {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.brief = brief
+	c.briefAt = at
+}
+
+// Brief snapshots this connection's live environment brief and the moment it
+// was last received (zero time when there is none).
+func (c *Connection) Brief() (string, time.Time) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.brief, c.briefAt
 }
 
 // NewConnection returns a connection with no servers yet.
 func NewConnection(id, label string, client protocol.ClientInfo, connectedAt time.Time, send func(context.Context, any) error) *Connection {
-	return &Connection{
-		ID:          id,
-		Label:       label,
-		Client:      client,
-		ConnectedAt: connectedAt,
-		Send:        send,
-		servers:     make(map[string]*ServerChannel),
+	c := &Connection{
+		ID:           id,
+		Label:        label,
+		Client:       client,
+		ConnectedAt:  connectedAt,
+		Send:         send,
+		servers:      make(map[string]*ServerChannel),
+		instructions: client.Instructions,
 	}
+	if client.EnvironmentBrief != "" {
+		c.brief = client.EnvironmentBrief
+		c.briefAt = connectedAt
+	}
+	return c
 }
 
 // AddServer registers a server channel under its name, replacing any previous
@@ -365,6 +429,32 @@ func (r *Registry) AddConnection(connection *Connection) {
 
 	slog.Info("connection up", "label", connection.Label, "connection", shortID(connection.ID))
 	r.PublishChange()
+}
+
+// AddOrReplaceConnection registers a connection, evicting any connection that
+// already holds the same label. The label check and the insert happen under one
+// lock, so two simultaneous hellos can never both end up registered. The evicted
+// connection (or nil) is returned and removed from the registry; the caller is
+// responsible for tearing its transport down (see Connection.Evict).
+func (r *Registry) AddOrReplaceConnection(connection *Connection) *Connection {
+	r.mu.Lock()
+	var evicted *Connection
+	for id, existing := range r.connections {
+		if existing.Label == connection.Label && id != connection.ID {
+			evicted = existing
+			delete(r.connections, id)
+			break
+		}
+	}
+	r.connections[connection.ID] = connection
+	r.mu.Unlock()
+
+	if evicted != nil {
+		slog.Info("connection replaced", "label", connection.Label, "old", shortID(evicted.ID), "new", shortID(connection.ID))
+	}
+	slog.Info("connection up", "label", connection.Label, "connection", shortID(connection.ID))
+	r.PublishChange()
+	return evicted
 }
 
 // RemoveConnection drops a connection, returning it if it was registered.

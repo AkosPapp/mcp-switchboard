@@ -30,6 +30,10 @@ func requiresOf(t *sbTool) string {
 	spawn := t.visible(store.Capabilities{CanSpawn: true})
 	msg := t.visible(store.Capabilities{CanMessage: true})
 	switch {
+	case t.visibleAgent != nil:
+		return "hasParent"
+	case t.needChat != nil:
+		return "after /optimize_skills"
 	case t.visible(store.Capabilities{}):
 		return "always"
 	case spawn && msg:
@@ -47,6 +51,9 @@ func (m *Manager) HubTools() []HubTool {
 	for _, t := range sbTools {
 		out = append(out, HubTool{Name: t.name, Description: t.desc, InputSchema: t.schema, Annotations: annView(t.ann), Requires: requiresOf(t)})
 	}
+	for _, t := range m.extraTools() {
+		out = append(out, HubTool{Name: t.name, Description: t.desc, InputSchema: t.schema, Annotations: annView(t.ann), Requires: requiresOf(t)})
+	}
 	return out
 }
 
@@ -59,7 +66,7 @@ func (m *Manager) ChatTools(ctx context.Context, chatID string) (*ChatToolsView,
 		return nil, err
 	}
 	eff, prof := m.resolveAgent(ctx, agent)
-	plan, err := m.planTurn(ctx, eff, prof)
+	plan, err := m.planTurn(ctx, eff, prof, chat)
 	if err != nil {
 		return nil, err
 	}
@@ -75,6 +82,10 @@ func (m *Manager) ChatTools(ctx context.Context, chatID string) (*ChatToolsView,
 	}
 	for _, t := range cat.tools {
 		ann := annView(t.AnnMCP)
+		if t.Ann != nil && t.Ann.Irreversible {
+			yes := true
+			ann.IrreversibleHint = &yes
+		}
 		ct := ChatTool{Name: t.Name, Description: t.Desc, Origin: "hub", InputSchema: t.Schema, Annotations: &ann}
 		if t.sb == nil {
 			ct.Origin = "mcp"

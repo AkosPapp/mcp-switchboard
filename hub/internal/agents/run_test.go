@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,36 @@ import (
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/registry"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/store"
 )
+
+// alwaysOnExtras are the hub tools every chat is offered whatever its
+// capabilities and grants. Tests about capabilities and grants look past them.
+var alwaysOnExtras = map[string]bool{
+	"switchboard.calc": true, "switchboard.time.now": true, "switchboard.todo.read": true,
+	"switchboard.todo.write": true, "switchboard.web.fetch": true,
+	"switchboard.note.read": true, "switchboard.note.append": true,
+	"switchboard.calls.stats": true, "switchboard.chat.search": true,
+}
+
+// dropExtras removes the always-on extras from a list of tool names, whether
+// dotted (MCP) or provider-safe (underscored).
+func dropExtras(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if !alwaysOnExtras[strings.ReplaceAll(n, "_", ".")] && !alwaysOnExtras[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func sortedExtras() string {
+	var out []string
+	for n := range alwaysOnExtras {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
+}
 
 func TestRunHappyPathWithRealToolCall(t *testing.T) {
 	e := newEnv(t)
@@ -57,7 +88,13 @@ func TestRunHappyPathWithRealToolCall(t *testing.T) {
 	}
 	// Second request saw the tool result, and the tool list was sent.
 	calls := prov.Calls()
-	if len(calls) != 2 || len(calls[0].Tools) != 2 || calls[0].Tools[0].Name != "box__demo__echo" {
+	var offered []string
+	if len(calls) > 0 {
+		for _, tl := range calls[0].Tools {
+			offered = append(offered, tl.Name)
+		}
+	}
+	if len(calls) != 2 || len(dropExtras(offered)) != 2 || calls[0].Tools[0].Name != "box__demo__echo" {
 		t.Fatalf("provider calls: %+v", calls)
 	}
 	last := calls[1].Messages[len(calls[1].Messages)-1]
@@ -123,7 +160,7 @@ func TestCatalogIsGrantsIntersectLiveAndStable(t *testing.T) {
 	a := e.agent("w", chain(withModel("p"), func(in *CreateAgentInput) {
 		in.Grants = []store.Grant{{Label: "*", Project: "*", Server: "*", Allowed: true}, {Label: "nas", Project: "*", Server: "files", Allowed: false}}
 	}))
-	cat, err := e.m.buildCatalog(context.Background(), a)
+	cat, err := e.m.buildCatalog(context.Background(), a, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,6 +168,7 @@ func TestCatalogIsGrantsIntersectLiveAndStable(t *testing.T) {
 	for _, tl := range cat.tools {
 		names = append(names, tl.Name)
 	}
+	names = dropExtras(names)
 	if strings.Join(names, ",") != "box__demo__a,box__demo__b,switchboard.user.ask" {
 		t.Fatalf("catalog = %v", names)
 	}
@@ -149,6 +187,19 @@ func TestSwitchboardToolVisibilityFollowsCapabilities(t *testing.T) {
 		}
 		return out
 	}
+	// The always-on extras are offered to every chat, whatever its capabilities.
+	var gotExtras []string
+	for _, n := range names(e.agent("plain", caps(false, false))) {
+		if alwaysOnExtras[n] {
+			gotExtras = append(gotExtras, n)
+		}
+	}
+	sort.Strings(gotExtras)
+	if strings.Join(gotExtras, ",") != sortedExtras() {
+		t.Errorf("a chat with no capabilities is offered extras %v, want %s", gotExtras, sortedExtras())
+	}
+	names0 := names
+	names = func(a *store.Agent) []string { return dropExtras(names0(a)) }
 	// switchboard.user.ask needs no capability: any chat may ask its user.
 	if got := strings.Join(names(e.agent("leaf", caps(false, false))), ","); got != "switchboard.user.ask" {
 		t.Errorf("leaf sees %v", got)
@@ -163,7 +214,7 @@ func TestSwitchboardToolVisibilityFollowsCapabilities(t *testing.T) {
 	}
 	// The catalog offered to the model uses provider-safe names.
 	a := e.agent("both", caps(true, true))
-	cat, _ := e.m.buildCatalog(context.Background(), a)
+	cat, _ := e.m.buildCatalog(context.Background(), a, nil)
 	for _, tl := range cat.llmTools() {
 		if strings.Contains(tl.Name, ".") {
 			t.Errorf("provider tool name %q has a dot", tl.Name)
@@ -586,7 +637,7 @@ func TestPinnedAgentSeesShortToolNamesAndCanCallThem(t *testing.T) {
 	for _, tl := range prov.Calls()[0].Tools {
 		names = append(names, tl.Name)
 	}
-	if got := strings.Join(names, ","); got != "fetch__fetch,run_command,switchboard_user_ask" {
+	if got := strings.Join(dropExtras(names), ","); got != "fetch__fetch,run_command,switchboard_user_ask" {
 		t.Errorf("tool names offered = %s", got)
 	}
 	rows := e.callRows(store.CallFilter{Source: store.SourceAgent})
@@ -682,5 +733,161 @@ func TestAllPendingApprovalsTimeout(t *testing.T) {
 	list, err := e.m.AllPendingApprovals(context.Background())
 	if err != nil || list == nil || len(list) != 0 {
 		t.Fatalf("after timeout: %#v %v", list, err)
+	}
+}
+
+func TestNeedsApprovalDestructiveMode(t *testing.T) {
+	f, tr := bptr(false), bptr(true)
+	ag := &store.Agent{Approval: store.ApprovalDestructive}
+	for name, tc := range map[string]struct {
+		ann  *registry.ToolAnnotations
+		want bool
+	}{
+		"nil annotations":        {nil, true},
+		"empty annotations":      {&registry.ToolAnnotations{}, true},
+		"readOnly":               {&registry.ToolAnnotations{ReadOnly: true}, false},
+		"readOnly + openWorld":   {&registry.ToolAnnotations{ReadOnly: true, OpenWorld: tr}, false},
+		"both explicit false":    {&registry.ToolAnnotations{Destructive: f, OpenWorld: f}, false},
+		"destructive false only": {&registry.ToolAnnotations{Destructive: f}, true},
+		"openWorld false only":   {&registry.ToolAnnotations{OpenWorld: f}, true},
+		"destructive true":       {&registry.ToolAnnotations{Destructive: tr, OpenWorld: f}, true},
+		"openWorld true":         {&registry.ToolAnnotations{Destructive: f, OpenWorld: tr}, true},
+	} {
+		if got := needsApproval(ag.Approval, tc.ann); got != tc.want {
+			t.Errorf("%s: needsApproval = %v, want %v", name, got, tc.want)
+		}
+	}
+	if needsApproval(store.ApprovalNever, nil) {
+		t.Error("never mode must not pause")
+	}
+	// W10: irreversibility overrides the mode, even "never", and even a
+	// tool whose standard hints look benign.
+	irr := &registry.ToolAnnotations{Irreversible: true, ReadOnly: true, Destructive: f, OpenWorld: f}
+	for _, mode := range []string{store.ApprovalNever, store.ApprovalDestructive, store.ApprovalAlways} {
+		if !needsApproval(mode, irr) {
+			t.Errorf("mode %s: irreversible call not gated", mode)
+		}
+	}
+	note := approvalRuleNote(store.ApprovalNever,
+		&registry.ToolAnnotations{Irreversible: true, Reason: "cannot be undone from here"})
+	for _, want := range []string{"irreversible", "never", "cannot be undone"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("rule note missing %q: %s", want, note)
+		}
+	}
+	if !needsApproval(store.ApprovalAlways, &registry.ToolAnnotations{ReadOnly: true}) {
+		t.Error("always mode must pause")
+	}
+}
+
+// The console's meter reads the run row, so it must hold the running totals
+// while the run is still going - here paused on an approval after one turn -
+// and report how full the context window is, not just the running sum.
+func TestRunUsageIsSavedAfterEveryTurn(t *testing.T) {
+	e := newEnv(t)
+	e.addServer("box", "", "harness", destructiveTool())
+	e.scripted("p",
+		llm.CallTool("box__harness__danger", map[string]any{"x": 1}).WithUsage(1200, 30),
+		llm.Say("finished").WithUsage(1500, 10))
+	a := e.agent("careful", chain(withModel("p"), func(in *CreateAgentInput) { in.Approval = store.ApprovalDestructive }))
+	res := e.post(a.ID, "do it")
+	e.waitStatus(res.RunID, store.RunWaiting)
+
+	mid, err := e.st.GetRun(context.Background(), res.RunID)
+	if err != nil || mid == nil {
+		t.Fatalf("get run: %v", err)
+	}
+	var u map[string]any
+	if err := json.Unmarshal(mid.Usage, &u); err != nil {
+		t.Fatalf("usage %s: %v", mid.Usage, err)
+	}
+	if u["turns"] != float64(1) || u["tokens"] != float64(1230) || u["contextTokens"] != float64(1200) {
+		t.Fatalf("mid-run usage = %s", mid.Usage)
+	}
+
+	pend := e.m.PendingApprovals(res.RunID)
+	if err := e.m.Approve(context.Background(), res.RunID, pend[0].CallID, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	done := e.waitRun(res.RunID)
+	json.Unmarshal(done.Usage, &u)
+	if u["turns"] != float64(2) || u["tokens"] != float64(2740) || u["contextTokens"] != float64(1500) {
+		t.Fatalf("final usage = %s", done.Usage)
+	}
+}
+
+func TestApprovalCancellationIsExplained(t *testing.T) {
+	deadline, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	<-deadline.Done()
+	got := approvalCancelReason(deadline, 120)
+	for _, want := range []string{"CALL_TIMEOUT", "120s", "nobody denied", "retryable"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("deadline reason missing %q: %s", want, got)
+		}
+	}
+	stopped, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	got = approvalCancelReason(stopped, 120)
+	if !strings.Contains(got, "cancelled") || strings.Contains(got, "CALL_TIMEOUT") {
+		t.Errorf("plain cancellation misread as a deadline: %s", got)
+	}
+}
+
+func TestApprovalRuleNoteNamesTheTrigger(t *testing.T) {
+	destructive := true
+	cases := []struct {
+		agent  string
+		ann    *registry.ToolAnnotations
+		expect string
+	}{
+		{store.ApprovalAlways, nil, "mode 'always'"},
+		{store.ApprovalDestructive, nil, "no annotations"},
+		{store.ApprovalDestructive, &registry.ToolAnnotations{Destructive: &destructive}, "destructiveHint"},
+		{store.ApprovalDestructive, &registry.ToolAnnotations{}, "destructiveHint is true or missing"},
+	}
+	for _, c := range cases {
+		if note := approvalRuleNote(c.agent, c.ann); !strings.Contains(note, c.expect) {
+			t.Errorf("mode %v ann %+v: note %q does not name %q", c.agent, c.ann, note, c.expect)
+		}
+	}
+}
+
+// W10: an irreversible tool (a push) pauses even an approval=never agent; a
+// normal tool for the same agent does not.
+func TestIrreversibleGatesEvenUnderApprovalNever(t *testing.T) {
+	e := newEnv(t)
+	tr := true
+	e.addServer("box", "", "harness",
+		registry.ToolInfo{Name: "push", Annotations: &registry.ToolAnnotations{
+			Destructive: &tr, Irreversible: true, Reason: "moves remote history",
+		}},
+		registry.ToolInfo{Name: "status", Annotations: &registry.ToolAnnotations{ReadOnly: true}})
+	e.scripted("p",
+		llm.CallTool("box__harness__status", map[string]any{}),
+		llm.CallTool("box__harness__push", map[string]any{}),
+		llm.Say("pushed"))
+	a := e.agent("loose", chain(withModel("p"), func(in *CreateAgentInput) { in.Approval = store.ApprovalNever }))
+	res := e.post(a.ID, "ship it")
+	e.waitStatus(res.RunID, store.RunWaiting)
+	pend := e.m.PendingApprovals(res.RunID)
+	if len(pend) != 1 || pend[0].Tool != "box__harness__push" {
+		t.Fatalf("pending = %+v (status should not have gated)", pend)
+	}
+	if pend[0].Reason != "moves remote history" {
+		t.Errorf("approval card must carry the server's irreversible reason, got %q", pend[0].Reason)
+	}
+	if err := e.m.Approve(context.Background(), res.RunID, pend[0].CallID, false, "not yet"); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.waitRun(res.RunID); r.Status != store.RunDone {
+		t.Fatalf("run = %+v", r)
+	}
+	rows := e.callRows(store.CallFilter{Status: store.StatusDenied})
+	if len(rows) != 1 || !strings.Contains(rows[0].Error, "irreversible") || !strings.Contains(rows[0].Error, "moves remote history") {
+		t.Fatalf("denial must name the irreversible rule: %+v", rows)
+	}
+	if rows := e.callRows(store.CallFilter{Status: store.StatusOK}); len(rows) != 1 || rows[0].Tool != "status" {
+		t.Fatalf("read-only call should have run: %+v", rows)
 	}
 }

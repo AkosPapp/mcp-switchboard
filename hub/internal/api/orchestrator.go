@@ -53,6 +53,8 @@ type OrchestratorReader interface {
 	GetDraft(ctx context.Context, chatID string) (store.Draft, error)
 	SetDraft(ctx context.Context, chatID, content string) (store.Draft, error)
 
+	ListTodos(ctx context.Context, chatID string) ([]store.Todo, error)
+
 	GetRun(ctx context.Context, id string) (*store.Run, error)
 	ListRuns(ctx context.Context, f store.RunFilter) ([]store.Run, error)
 }
@@ -89,6 +91,7 @@ func (h *Handler) registerOrchestrator() {
 	m.HandleFunc("GET /api/chats/{id}/export", h.exportChat)
 	m.HandleFunc("GET /api/chats/{id}/draft", h.getDraft)
 	m.HandleFunc("PUT /api/chats/{id}/draft", h.putDraft)
+	m.HandleFunc("GET /api/chats/{id}/todos", h.getTodos)
 	if h.opts.Streams != nil {
 		m.HandleFunc("GET /api/chats/{id}/stream", h.chatStream)
 	}
@@ -597,6 +600,11 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 		ClientLabel  json.RawMessage `json:"clientLabel"` // absent, null or a string
 		Model        json.RawMessage `json:"model"`
 		ParentChatID string          `json:"parentChatId"`
+		// Initial preferences (docs/improvements.md I1–I4, I12).
+		ContextLimit int64  `json:"contextLimit"`
+		AutoApprove  bool   `json:"autoApprove"`
+		Approval     string `json:"approval"`
+		Effort       string `json:"effort"`
 		// Legacy attach form.
 		AgentID string `json:"agentId"`
 		Kind    string `json:"kind"`
@@ -607,6 +615,7 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(b.AgentID) == "" {
 		in := agents.CreateChatInput{
 			Title: b.Title, SystemPrompt: b.SystemPrompt, Model: b.Model, ParentChatID: strings.TrimSpace(b.ParentChatID),
+			ContextLimit: b.ContextLimit, AutoApprove: b.AutoApprove, Approval: b.Approval, Effort: b.Effort,
 		}
 		profile, present, err := clientField(b.ProfileID)
 		if err != nil {
@@ -692,6 +701,13 @@ func (h *Handler) patchChat(w http.ResponseWriter, r *http.Request) {
 		ProfileID    json.RawMessage `json:"profileId"`
 		SystemPrompt *string         `json:"systemPrompt"`
 		ClientLabel  json.RawMessage `json:"clientLabel"`
+		// Conversation preferences (I1–I4, I12). model: object or null (absent =
+		// unchanged); contextLimit: 0 clears; approval "" resets to the agent.
+		Model        *json.RawMessage `json:"model"`
+		ContextLimit *int64           `json:"contextLimit"`
+		Approval     *string          `json:"approval"`
+		AutoApprove  *bool            `json:"autoApprove"`
+		Effort       *string          `json:"effort"`
 	}
 	if !h.readBody(w, r, &b) {
 		return
@@ -727,6 +743,18 @@ func (h *Handler) patchChat(w http.ResponseWriter, r *http.Request) {
 		rebind.ClientSet, rebind.ClientLabel = true, l
 	}
 	rebind.SystemPrompt = b.SystemPrompt
+	if b.Model != nil {
+		rebind.SetModelPref = true
+		if raw := string(*b.Model); raw != "null" {
+			rebind.ModelPref = *b.Model
+		}
+	}
+	rebind.ContextLimit = b.ContextLimit
+	rebind.AutoApprove = b.AutoApprove
+	rebind.Effort = b.Effort
+	if b.Approval != nil {
+		rebind.SetApproval, rebind.Approval = true, *b.Approval
+	}
 	if b.ActiveLeafID != nil {
 		if err := h.rd.SetActiveLeaf(ctx, c.ID, *b.ActiveLeafID); err != nil {
 			h.writeErr(w, err)
@@ -754,6 +782,13 @@ func (h *Handler) patchChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	prefsTouched := b.Model != nil || b.ContextLimit != nil || b.Approval != nil || b.AutoApprove != nil || b.Effort != nil
+	if prefsTouched {
+		if _, err := h.opts.Agents.UpdateChat(ctx, c.ID, rebind); err != nil {
+			h.writeErr(w, err)
+			return
+		}
+	}
 	updated := *c
 	if b.Title != nil || b.Tags != nil || b.Archived != nil {
 		u, err := h.rd.UpdateChat(ctx, c.ID, store.ChatPatch{Title: b.Title, Tags: b.Tags, Archived: b.Archived})
@@ -763,7 +798,7 @@ func (h *Handler) patchChat(w http.ResponseWriter, r *http.Request) {
 		}
 		updated = u
 	}
-	if b.ActiveLeafID != nil || b.SelectMessageID != nil || rebind.ProfileSet || rebind.ClientSet || rebind.SystemPrompt != nil {
+	if b.ActiveLeafID != nil || b.SelectMessageID != nil || rebind.ProfileSet || rebind.ClientSet || rebind.SystemPrompt != nil || prefsTouched {
 		fresh, err := h.rd.GetChat(ctx, c.ID)
 		if err != nil || fresh == nil {
 			h.writeErr(w, fmt.Errorf("re-reading chat: %w", firstErr(err, store.ErrNotFound)))
@@ -1324,6 +1359,19 @@ func (h *Handler) getDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, draftView(d))
+}
+
+func (h *Handler) getTodos(w http.ResponseWriter, r *http.Request) {
+	c := h.loadChat(w, r)
+	if c == nil {
+		return
+	}
+	ts, err := h.rd.ListTodos(r.Context(), c.ID)
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"todos": ts})
 }
 
 func (h *Handler) putDraft(w http.ResponseWriter, r *http.Request) {

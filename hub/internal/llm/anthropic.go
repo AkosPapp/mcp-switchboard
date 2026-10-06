@@ -178,8 +178,18 @@ func (a *Anthropic) Complete(ctx context.Context, msgs []Message, tools []Tool, 
 		}
 		body["tools"] = ts
 	}
-	if opts.Thinking != nil && opts.Thinking.Type == "enabled" {
-		body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": opts.Thinking.BudgetTokens}
+	// I12: Effort is the caller-facing knob; on Anthropic it means "enable
+	// thinking with a budget". Explicit Thinking still wins; "none" forces
+	// thinking off (and lets temperature through).
+	thinking := opts.Thinking
+	if thinking == nil && opts.Effort != "" && opts.Effort != "none" {
+		thinking = &Thinking{Type: "enabled", BudgetTokens: effortBudget(opts.Effort)}
+	}
+	if thinking != nil && thinking.Type == "enabled" && opts.Effort != "none" {
+		body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": thinking.BudgetTokens}
+		if mt, ok := body["max_tokens"].(int); ok && mt <= thinking.BudgetTokens {
+			body["max_tokens"] = thinking.BudgetTokens + 1024 // budget must stay below max_tokens
+		}
 	} else if opts.Temperature != nil {
 		body["temperature"] = *opts.Temperature // thinking forbids setting it
 	}
@@ -350,5 +360,18 @@ func mapAnthropicStop(r string) string {
 		return FinishMaxTokens
 	default:
 		return FinishStop
+	}
+}
+
+// effortBudget maps the reasoning-effort vocabulary to Anthropic thinking
+// budgets (tokens).
+func effortBudget(effort string) int {
+	switch effort {
+	case "low", "minimal":
+		return 1024
+	case "high":
+		return 16384
+	default: // medium and anything unspecified
+		return 4096
 	}
 }

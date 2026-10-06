@@ -37,6 +37,74 @@ func sseServer(t *testing.T, events []string, capture *map[string]any, hdr *http
 	return srv
 }
 
+func TestBlocksTextJoinsWithNewlines(t *testing.T) {
+	bs := []Block{
+		{Type: BlockText, Text: "A"},
+		{Type: BlockText, Text: "B"},
+	}
+	if got := blocksText(bs); got != "A\nB" {
+		t.Errorf("two blocks: got %q, want %q", got, "A\nB")
+	}
+	if got := blocksText([]Block{{Type: BlockText, Text: "only"}}); got != "only" {
+		t.Errorf("one block: got %q, want %q", got, "only")
+	}
+	if got := blocksText(nil); got != "" {
+		t.Errorf("no blocks: got %q, want empty", got)
+	}
+	if got := blocksText([]Block{{Type: BlockImage, Text: "x"}}); got != "" {
+		t.Errorf("non-text only: got %q, want empty", got)
+	}
+	if got := blocksText([]Block{{Type: BlockImage}, {Type: BlockText, Text: "A"}, {Type: BlockThinking}, {Type: BlockText, Text: "B"}}); got != "A\nB" {
+		t.Errorf("mixed blocks: got %q, want %q", got, "A\nB")
+	}
+}
+
+func TestOpenAIListItemToolResultKeepsLines(t *testing.T) {
+	// Regression for P0-A: the MCP SDK turns a list-of-strings tool result
+	// into one text block per item; the OpenAI-compatible path used to glue
+	// those blocks with no separator, so four lines reached the model as one.
+	msgs := []Message{{
+		Role: RoleTool,
+		ToolResults: []ToolResult{{ToolCallID: "c1", Content: []Block{
+			{Type: BlockText, Text: "ALPHA"},
+			{Type: BlockText, Text: "BRAVO"},
+			{Type: BlockText, Text: "CHARLIE"},
+			{Type: BlockText, Text: "DELTA"},
+		}}},
+	}}
+	out := openaiMessages(msgs, "")
+	if len(out) != 1 {
+		t.Fatalf("got %d messages, want 1", len(out))
+	}
+	if got, want := out[0]["content"], "ALPHA\nBRAVO\nCHARLIE\nDELTA"; got != want {
+		t.Errorf("tool content = %q, want %q", got, want)
+	}
+}
+
+func TestOllamaListItemToolResultKeepsLines(t *testing.T) {
+	// Same P0-A regression on the native Ollama path (also feeds the model).
+	msgs := []Message{{
+		Role: RoleTool,
+		ToolResults: []ToolResult{{ToolCallID: "c1", Content: []Block{
+			{Type: BlockText, Text: "ALPHA"},
+			{Type: BlockText, Text: "BRAVO"},
+		}}},
+	}}
+	out := ollamaMessages(msgs, "")
+	var found bool
+	for _, m := range out {
+		if m["role"] == "tool" {
+			found = true
+			if got, want := m["content"], "ALPHA\nBRAVO"; got != want {
+				t.Errorf("tool content = %q, want %q", got, want)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no tool message emitted")
+	}
+}
+
 func TestPriceCost(t *testing.T) {
 	p := Price{InputMicrosPerMTok: 3_000_000, OutputMicrosPerMTok: 15_000_000, CacheReadMicrosPerMTok: 300_000, CacheWriteMicrosPerMTok: 3_750_000}
 	got := p.Cost(Usage{InputTokens: 1000, OutputTokens: 500, CacheReadTokens: 2000, CacheWriteTokens: 100})

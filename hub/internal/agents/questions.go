@@ -49,7 +49,7 @@ type QuestionAnswer struct {
 
 func (pa *pendingApproval) view(callID string) PendingApproval {
 	return PendingApproval{CallID: callID, Tool: pa.tool, Arguments: pa.arguments,
-		ExpiresAt: store.FormatTime(pa.expiresAt), Questions: pa.questions}
+		ExpiresAt: store.FormatTime(pa.expiresAt), Questions: pa.questions, Reason: pa.reason}
 }
 
 // parseQuestions reads the tool's `questions` argument, which arrives as
@@ -135,7 +135,13 @@ func (m *Manager) toolAsk(ctx context.Context, cc *callCtx, args map[string]any)
 	case <-timer.C:
 		stop = fmt.Errorf("the user did not answer within %s", timeout.Round(time.Second))
 	case <-ctx.Done():
-		stop = errors.New("cancelled while waiting for the user")
+		// Distinguish the hub's own deadline from the run being stopped, as in gate().
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			stop = fmt.Errorf("cancelled while waiting for the user: the hub's per-call deadline elapsed "+
+				"while the question was still open — the user did not decline; asking again starts a new wait (%v)", ctx.Err())
+		} else {
+			stop = fmt.Errorf("cancelled while waiting for the user: the run or its caller was cancelled (%v)", ctx.Err())
+		}
 	}
 	m.mu.Lock()
 	delete(rs.approvals, cc.callID)

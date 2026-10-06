@@ -596,6 +596,13 @@ func TestChatSearchFTS5(t *testing.T) {
 	if len(hits) != 1 || hits[0].ChatID != c2.ID {
 		t.Errorf("agent-scoped hits = %+v", hits)
 	}
+	// Chat-scoped: one chat's DAG only (switchboard.chat.search).
+	if hits, _ := s.SearchMessages(ctx, SearchQuery{Text: "deploy", ChatID: c1.ID}); len(hits) != 1 || hits[0].ChatID != c1.ID {
+		t.Errorf("chat-scoped hits = %+v", hits)
+	}
+	if hits, _ := s.SearchMessages(ctx, SearchQuery{Text: "deploy", ChatID: "nope"}); len(hits) != 0 {
+		t.Errorf("unknown chat scoped hits = %+v", hits)
+	}
 	if hits, _ = s.SearchMessages(ctx, SearchQuery{Text: "secretword"}); len(hits) != 0 {
 		t.Errorf("tool_result text was indexed")
 	}

@@ -3,6 +3,8 @@ package tunnel
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -438,8 +440,9 @@ func TestHelloValidation(t *testing.T) {
 	}
 }
 
-// Two machines claiming one label would silently shadow each other's tools.
-func TestDuplicateLabelIsRefused(t *testing.T) {
+// A reconnecting client must not be locked out by its own stale connection: the
+// newer hello evicts the older one.
+func TestDuplicateLabelEvictsTheOldConnection(t *testing.T) {
 	srv, reg := newTestHub(t)
 
 	first, err := dial(t, srv, testToken)
@@ -449,6 +452,7 @@ func TestDuplicateLabelIsRefused(t *testing.T) {
 	first.serve()
 	first.hello(protocol.ServerDecl{Name: "git"})
 	waitFor(t, "the first client", func() bool { return len(reg.Connections()) == 1 })
+	oldID := reg.Connections()[0].ID
 
 	second, err := dial(t, srv, testToken)
 	if err != nil {
@@ -457,20 +461,85 @@ func TestDuplicateLabelIsRefused(t *testing.T) {
 	second.serve()
 	second.hello(protocol.ServerDecl{Name: "fs"})
 
-	select {
-	case frame, ok := <-second.inbox:
-		if !ok || frame.Type != protocol.TypeError {
-			t.Fatal("the second client should have been refused with an error frame")
+	waitFor(t, "the second client to replace the first", func() bool {
+		conns := reg.Connections()
+		return len(conns) == 1 && conns[0].ID != oldID
+	})
+	// The old socket is closed, which ends its inbox.
+	waitFor(t, "the old socket to close", func() bool {
+		select {
+		case _, ok := <-first.inbox:
+			return !ok
+		default:
+			return false
 		}
-		if !strings.Contains(frame.Message, "already connected") {
-			t.Errorf("error = %q, want it to explain the label clash", frame.Message)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("no error frame arrived")
+	})
+	// Old teardown must not remove the new registration.
+	time.Sleep(200 * time.Millisecond)
+	conns := reg.Connections()
+	if len(conns) != 1 || conns[0].Server("fs") == nil {
+		t.Fatalf("registry should hold only the new connection, got %d", len(conns))
+	}
+}
+
+func TestOnMCPNeverBlocksOnAFullBuffer(t *testing.T) {
+	c := &clientConn{
+		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		channels: map[string]*channelOwner{},
+	}
+	owner := &channelOwner{incoming: make(chan json.RawMessage, 64), done: make(chan struct{})}
+	c.channels["s"] = owner
+	frame := &protocol.Frame{Type: protocol.TypeMCP, Server: "s", Payload: json.RawMessage(`{}`)}
+
+	// Not accepting: dropped, never buffered.
+	c.onMCP(frame)
+	if len(owner.incoming) != 0 {
+		t.Fatal("frames while no session is open must be dropped")
 	}
 
-	if len(reg.Connections()) != 1 {
-		t.Errorf("registry holds %d connections, want the original only", len(reg.Connections()))
+	owner.startAccepting()
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 500; i++ {
+			c.onMCP(frame)
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onMCP blocked on a full buffer")
+	}
+	if len(owner.incoming) != 64 {
+		t.Errorf("buffer holds %d, want 64", len(owner.incoming))
+	}
+
+	owner.stopAccepting()
+	if len(owner.incoming) != 0 {
+		t.Error("retiring a session must flush stale frames")
+	}
+}
+
+func TestAuthorizedIsCaseInsensitiveOnScheme(t *testing.T) {
+	h := NewHandler(registry.New(events.NewBus()), Options{Token: testToken})
+	cases := map[string]bool{
+		"Bearer " + testToken:       true,
+		"bearer " + testToken:       true,
+		"BEARER " + testToken:       true,
+		"Bearer wrong":              false,
+		"Bearer " + testToken + "x": false,
+		"Basic " + testToken:        false,
+		"":                          false,
+		"Bearer":                    false,
+	}
+	for header, want := range cases {
+		r := httptest.NewRequest("GET", "/", nil)
+		if header != "" {
+			r.Header.Set("Authorization", header)
+		}
+		if got := h.authorized(r); got != want {
+			t.Errorf("authorized(%q) = %v, want %v", header, got, want)
+		}
 	}
 }
 
@@ -607,5 +676,67 @@ func TestOneChannelDoesNotStallAnother(t *testing.T) {
 	waitFor(t, "fs to come up while git hangs", func() bool {
 		channel := reg.FindServer(connID, "fs")
 		return channel != nil && channel.Ready() && len(channel.Tools()) == 1
+	})
+}
+
+func TestHelloCarriesAndContextUpdateReplacesInstructions(t *testing.T) {
+	srv, reg := newTestHub(t)
+	client, err := dial(t, srv, testToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.send(map[string]any{
+		"type":     protocol.TypeHello,
+		"protocol": protocol.Version,
+		"client": map[string]any{
+			"name": "fake", "version": "0", "instance": "i", "label": "box",
+			"instructions":      []map[string]string{{"path": "AGENTS.md", "content": "v1\n"}},
+			"environment_brief": "host: box\n",
+		},
+		"servers": []protocol.ServerDecl{{Name: "git"}},
+	})
+	client.serve()
+
+	waitFor(t, "registration", func() bool { return len(reg.Connections()) == 1 })
+	conn := reg.Connections()[0]
+	if files := conn.Instructions(); len(files) != 1 || files[0].Content != "v1\n" {
+		t.Fatalf("hello instructions lost: %+v", files)
+	}
+	if brief, at := conn.Brief(); brief != "host: box" || at.IsZero() {
+		t.Fatalf("hello brief lost or untimestamped: %q %v", brief, at)
+	}
+
+	// A brief-only frame replaces the brief and leaves the instructions alone.
+	client.send(map[string]any{"type": protocol.TypeContextUpdate, "environment_brief": "host: hub-vm\n"})
+	waitFor(t, "the brief swap", func() bool {
+		brief, _ := conn.Brief()
+		return brief == "host: hub-vm"
+	})
+	if files := conn.Instructions(); len(files) != 1 || files[0].Content != "v1\n" {
+		t.Fatalf("brief-only frame disturbed the instructions: %+v", files)
+	}
+
+	client.send(map[string]any{
+		"type":         protocol.TypeContextUpdate,
+		"instructions": []map[string]string{{"path": "AGENTS.md", "content": "v2\n"}},
+	})
+	waitFor(t, "the instruction swap", func() bool {
+		files := conn.Instructions()
+		return len(files) == 1 && files[0].Content == "v2\n"
+	})
+
+	// Oversized sets are capped, not fatal, and still replace the live set.
+	long := make([]map[string]string, protocol.MaxInstructionFiles+3)
+	for i := range long {
+		long[i] = map[string]string{"path": "f.md", "content": "x"}
+	}
+	client.send(map[string]any{"type": protocol.TypeContextUpdate, "instructions": long})
+	waitFor(t, "capped instructions", func() bool { return len(conn.Instructions()) == protocol.MaxInstructionFiles })
+
+	// A junk frame is dropped; the connection and the live set survive.
+	client.send(map[string]any{"type": protocol.TypeContextUpdate, "instructions": "nope"})
+	client.hello(protocol.ServerDecl{Name: "late"}) // proves the connection is still serving frames
+	waitFor(t, "the next frame to be processed", func() bool {
+		return len(conn.Instructions()) == protocol.MaxInstructionFiles
 	})
 }

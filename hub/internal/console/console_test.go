@@ -3,6 +3,7 @@ package console
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -133,5 +134,27 @@ func TestOnlyReads(t *testing.T) {
 	Handler(testAssets()).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want 405", rec.Code)
+	}
+}
+
+func TestSetsSecurityHeaders(t *testing.T) {
+	h := Handler(testAssets())
+	for _, target := range []string{"/", "/assets/index-a1b2c3.js", "/sw.js", "/chat/abc", "/missing.png"} {
+		rec := get(t, h, target)
+		for k, want := range map[string]string{
+			"X-Content-Type-Options": "nosniff",
+			"Referrer-Policy":        "no-referrer",
+			"X-Frame-Options":        "DENY",
+		} {
+			if got := rec.Header().Get(k); got != want {
+				t.Errorf("%s %s = %q, want %q", target, k, got, want)
+			}
+		}
+		csp := rec.Header().Get("Content-Security-Policy")
+		for _, want := range []string{"default-src 'self'", "script-src 'self'", "worker-src 'self'", "frame-ancestors 'none'", "img-src 'self' data: blob:", "connect-src 'self' ws://example.com wss://example.com", "object-src 'none'"} {
+			if !strings.Contains(csp, want) {
+				t.Errorf("%s CSP missing %q: %s", target, want, csp)
+			}
+		}
 	}
 }

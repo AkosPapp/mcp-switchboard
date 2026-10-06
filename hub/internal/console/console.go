@@ -33,6 +33,7 @@ const (
 // asking for the assets of a build that is no longer in the binary.
 func Handler(assets fs.FS) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		securityHeaders(w, r)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -88,6 +89,41 @@ func Handler(assets fs.FS) http.Handler {
 		}
 		http.ServeContent(w, r, name, info.ModTime(), seeker)
 	})
+}
+
+// securityHeaders sets the browser-side hardening headers on every console
+// response. The console is a same-origin SPA with no third-party resources, so
+// the policy is tight: everything from 'self', with three deliberate holes:
+// style-src allows inline styles (React style={} attributes and the inline
+// styles mermaid puts in its SVG), img-src allows data:/blob: (inline icons and
+// rendered diagrams), and connect-src names ws:/wss: for this host explicitly
+// because not every browser treats 'self' as covering WebSocket schemes.
+// worker-src 'self' is for the service worker (sw.js); frame-ancestors and
+// X-Frame-Options forbid embedding the console (clickjacking). Not verified in
+// a browser here: KaTeX fonts (font-src 'self' data:) and mermaid rendering.
+func securityHeaders(w http.ResponseWriter, r *http.Request) {
+	h := w.Header()
+	connect := "'self'"
+	if host := r.Host; host != "" && !strings.ContainsAny(host, " ;,'\"") {
+		connect += " ws://" + host + " wss://" + host
+	}
+	h.Set("Content-Security-Policy", strings.Join([]string{
+		"default-src 'self'",
+		"script-src 'self'",
+		"style-src 'self' 'unsafe-inline'",
+		"img-src 'self' data: blob:",
+		"font-src 'self' data:",
+		"connect-src " + connect,
+		"worker-src 'self'",
+		"manifest-src 'self'",
+		"object-src 'none'",
+		"base-uri 'self'",
+		"form-action 'self'",
+		"frame-ancestors 'none'",
+	}, "; "))
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("X-Frame-Options", "DENY")
 }
 
 func serveIndex(w http.ResponseWriter, r *http.Request, assets fs.FS) {

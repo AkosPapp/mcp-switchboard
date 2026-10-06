@@ -226,7 +226,7 @@ func TestInjectedMessageRendering(t *testing.T) {
 		{Role: store.RoleUser, Content: mustJSON([]llm.Block{{Type: llm.BlockImage, Data: "x", MediaType: "image/png"}}),
 			Sender: mustJSON(senderMeta{ChatID: "abc", Kind: SenderReply})},
 	}
-	got := toLLMMessages(path)
+	got := toLLMMessages(path, 0)
 	if blocksText(got[0].Content) != "plain" {
 		t.Errorf("human message changed: %q", blocksText(got[0].Content))
 	}
@@ -293,7 +293,10 @@ func TestCreateChatForms(t *testing.T) {
 	if cs, _ := e.st.ListChats(ctx, store.ChatFilter{AgentID: a.ID}); len(cs) != 1 {
 		t.Fatalf("record must be 1:1, has %d chats", len(cs))
 	}
-	if v, _ := e.m.ChatSystemPrompt(ctx, c.ID); v.Source != "profile" || v.SystemPrompt != "you code" {
+	// The agent's own prompt is the verbatim start; the hub appends only the
+	// environment brief section (W8) because this chat's client is labelled.
+	if v, _ := e.m.ChatSystemPrompt(ctx, c.ID); v.Source != "profile" ||
+		!strings.HasPrefix(v.SystemPrompt, "you code") || !strings.Contains(v.SystemPrompt, "Environment brief") {
 		t.Errorf("prompt view = %+v", v)
 	}
 	// Own prompt: explicit profileId null.
@@ -461,7 +464,19 @@ func TestHubToolsSpeakOfChatsOnly(t *testing.T) {
 	e := newEnv(t)
 	want := map[string]bool{
 		"switchboard.chat.spawn": true, "switchboard.chat.send": true, "switchboard.chat.list": true, "switchboard.chat.stop": true,
-		"switchboard.mcp.list_tools": true, "switchboard.user.ask": true,
+		"switchboard.mcp.list_tools": true, "switchboard.user.ask": true, "switchboard.chat.report": true,
+	}
+	for n := range alwaysOnExtras {
+		want[n] = true
+	}
+	// The gated tools are still DEFINED here (the endpoint is the catalog;
+	// buildCatalog is what hides them from a locked chat).
+	for _, gated := range []string{
+		"switchboard.optimize.chats_list", "switchboard.optimize.chat_read", "switchboard.optimize.prompts_list",
+		"switchboard.optimize.prompt_set", "switchboard.optimize.skills_list", "switchboard.optimize.skill_set",
+		"switchboard.optimize.skill_delete",
+	} {
+		want[gated] = true
 	}
 	for _, ht := range e.m.HubTools() {
 		if !want[ht.Name] {

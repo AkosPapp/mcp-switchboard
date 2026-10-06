@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -137,7 +138,15 @@ func (o *OpenAI) Complete(ctx context.Context, msgs []Message, tools []Tool, opt
 	if opts.Temperature != nil {
 		body["temperature"] = *opts.Temperature
 	}
-	if kept := sanitizeTools(o.name, tools); len(kept) > 0 {
+	// I12: reasoning effort passes through to the chat-completions field of
+	// the same name; "none" means "think less than default" and is expressed
+	// as the API's minimal rung where unknown, so it is skipped entirely —
+	// a server that validates strictly must never see an invalid enum.
+	if opts.Effort != "" && opts.Effort != "none" {
+		body["reasoning_effort"] = opts.Effort
+	}
+	kept := sanitizeTools(o.name, tools)
+	if len(kept) > 0 {
 		var ts []map[string]any
 		for _, t := range kept {
 			fn := map[string]any{"name": t.Name, "parameters": t.InputSchema}
@@ -160,7 +169,7 @@ func (o *OpenAI) Complete(ctx context.Context, msgs []Message, tools []Tool, opt
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
-		o.stream(emitter{ctx, ch}, resp)
+		o.stream(emitter{ctx, ch}, resp, kept)
 	}()
 	return ch, nil
 }
@@ -170,8 +179,9 @@ type oaiCall struct {
 	args     strings.Builder
 }
 
-func (o *OpenAI) stream(em emitter, resp *http.Response) {
+func (o *OpenAI) stream(em emitter, resp *http.Response, tools []Tool) {
 	var usage *Usage
+	var text, thinking strings.Builder // kept for recoverTextToolCalls
 	finish := ""
 	calls := map[int]*oaiCall{}
 	sawDone := false
@@ -229,6 +239,8 @@ func (o *OpenAI) stream(em emitter, resp *http.Response) {
 			if think == "" {
 				think = d.Reason2
 			}
+			text.WriteString(d.Content)
+			thinking.WriteString(think)
 			if think != "" && !em.send(Delta{Type: DeltaThinking, Text: think}) {
 				return context.Canceled
 			}
@@ -278,6 +290,16 @@ func (o *OpenAI) stream(em emitter, resp *http.Response) {
 		tc := &ToolCall{ID: id, Name: st.name, Arguments: parseArgs(st.args.String())}
 		if !em.send(Delta{Type: DeltaToolCall, ContentIndex: i + 1, ToolCall: tc}) {
 			return
+		}
+	}
+	if len(calls) == 0 {
+		for n, tc := range recoverTextToolCalls(text.String(), thinking.String(), tools) {
+			slog.Warn("llm: recovered a tool call the model wrote as text", "provider", o.name, "tool", tc.Name)
+			tc := tc
+			calls[len(calls)] = &oaiCall{} // counted so the finish reason below is tool_use
+			if !em.send(Delta{Type: DeltaToolCall, ContentIndex: n + 1, ToolCall: &tc}) {
+				return
+			}
 		}
 	}
 	if usage != nil && !em.send(Delta{Type: DeltaUsage, Usage: usage}) {

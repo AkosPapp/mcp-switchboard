@@ -98,7 +98,13 @@ type HTTPError struct {
 }
 
 func (e *HTTPError) Error() string {
-	return fmt.Sprintf("llm: provider returned HTTP %d: %s", e.Status, e.Body)
+	msg := fmt.Sprintf("llm: provider returned HTTP %d: %s", e.Status, e.Body)
+	if strings.Contains(e.Body, "No user query found") {
+		// The chat template found no user message: the server dropped the oldest
+		// messages of a prompt that did not fit its context window.
+		msg += " (hint: the prompt overflowed the model's context window and the server dropped the first user message; raise LLM_OLLAMA_NUM_CTX or reduce tool output)"
+	}
+	return msg
 }
 
 // emitter sends deltas, giving up when ctx is cancelled.

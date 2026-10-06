@@ -11,20 +11,21 @@ import (
 
 const agentCols = `id, parent_id, name, description, project, model, system_prompt, depth, status,
 	budget, capabilities, approval, auto_wake, token_total, cost_total_micros,
-	created_at, updated_at, last_activity_at, deleted_at, profile_id, origin, client_label`
+	created_at, updated_at, last_activity_at, deleted_at, profile_id, origin, client_label, tool_allow`
 
 func scanAgent(sc scanner) (Agent, error) {
 	var (
 		a                          Agent
 		parent, project, deleted   sql.NullString
 		profile, clientLabel       sql.NullString
+		toolAllow                  sql.NullString
 		model, budget, caps        string
 		autoWake                   int
 		created, updated, activity string
 	)
 	err := sc.Scan(&a.ID, &parent, &a.Name, &a.Description, &project, &model, &a.SystemPrompt,
 		&a.Depth, &a.Status, &budget, &caps, &a.Approval, &autoWake, &a.TokenTotal,
-		&a.CostTotalMicros, &created, &updated, &activity, &deleted, &profile, &a.Origin, &clientLabel)
+		&a.CostTotalMicros, &created, &updated, &activity, &deleted, &profile, &a.Origin, &clientLabel, &toolAllow)
 	if err != nil {
 		return a, err
 	}
@@ -43,11 +44,22 @@ func scanAgent(sc scanner) (Agent, error) {
 	a.DeletedAt = timePtr(deleted)
 	a.ProfileID = optional(profile)
 	a.ClientLabel = optional(clientLabel)
+	if toolAllow.Valid && toolAllow.String != "" {
+		_ = json.Unmarshal([]byte(toolAllow.String), &a.ToolAllow)
+	}
 	return a, nil
 }
 
 func encodeCaps(c Capabilities) string {
 	b, _ := json.Marshal(map[string]bool{"can_spawn": c.CanSpawn, "can_message": c.CanMessage})
+	return string(b)
+}
+
+func encodeToolAllow(t []string) any {
+	if len(t) == 0 {
+		return nil
+	}
+	b, _ := json.Marshal(t)
 	return string(b)
 }
 
@@ -102,12 +114,12 @@ func (s *SQLiteStore) CreateAgent(ctx context.Context, a Agent, grants []Grant) 
 			a.Depth = parent.Depth + 1
 		}
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO agents (`+agentCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?)`,
+			`INSERT INTO agents (`+agentCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?)`,
 			a.ID, strArg(a.ParentID), a.Name, a.Description, projectArg(a.Project),
 			rawArg(a.Model, "{}"), a.SystemPrompt, a.Depth, a.Status, rawArg(a.Budget, "{}"),
 			encodeCaps(a.Capabilities), a.Approval, boolInt(a.AutoWake), a.TokenTotal,
 			a.CostTotalMicros, FormatTime(now), FormatTime(now), FormatTime(now), strArg(a.ProfileID),
-			a.Origin, strArg(a.ClientLabel))
+			a.Origin, strArg(a.ClientLabel), encodeToolAllow(a.ToolAllow))
 		if isUnique(err) {
 			return fmt.Errorf("%w: %q", ErrNameTaken, a.Name)
 		}

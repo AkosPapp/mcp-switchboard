@@ -170,3 +170,26 @@ func TestSendContinuesAfterOneSubscriberFails(t *testing.T) {
 		t.Fatal("the second subscriber should still have been sent to")
 	}
 }
+
+func TestValidateEndpoint(t *testing.T) {
+	for ep, ok := range map[string]bool{
+		"https://fcm.googleapis.com/fcm/send/x": true,
+		"https://8.8.8.8/x":                     true,
+		"http://push.example/x":                 false,
+		"https://localhost/x":                   false,
+		"https://a.localhost/x":                 false,
+		"https://intranet/x":                    false,
+		"https://127.0.0.1/x":                   false,
+		"https://[::1]/x":                       false,
+		"https://[::ffff:127.0.0.1]/x":          false,
+		"https://10.1.2.3/x":                    false,
+		"https://172.16.0.1/x":                  false,
+		"https://169.254.169.254/x":             false,
+		"https://0.0.0.0/x":                     false,
+		"":                                      false,
+	} {
+		if err := ValidateEndpoint(ep); (err == nil) != ok {
+			t.Errorf("%q: err = %v, want ok=%v", ep, err, ok)
+		}
+	}
+}

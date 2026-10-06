@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/events"
+	"github.com/AkosPapp/mcp-switchboard/hub/internal/protocol"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/store"
 )
 
@@ -94,19 +97,158 @@ type turnPlan struct {
 }
 
 // planTurn builds the plan for an already resolved agent (see resolveAgent).
-func (m *Manager) planTurn(ctx context.Context, eff *store.Agent, prof *store.Profile) (*turnPlan, error) {
-	cat, err := m.buildCatalog(ctx, eff)
+func (m *Manager) planTurn(ctx context.Context, eff *store.Agent, prof *store.Profile, chat *store.Chat) (*turnPlan, error) {
+	cat, err := m.buildCatalog(ctx, eff, chat)
 	if err != nil {
 		return nil, err
 	}
 	system := systemPromptFor(eff)
-	if listing := skillsPrompt(m.autoSkills(ctx)); listing != "" {
+	for _, injectable := range []string{
+		skillsPrompt(m.autoSkills(ctx)), m.instructionsPrompt(cat), m.environmentBriefPrompt(cat), notePrompt(chat),
+	} {
+		if injectable == "" {
+			continue
+		}
 		if system != "" {
 			system += "\n\n"
 		}
-		system += listing
+		system += injectable
 	}
 	return &turnPlan{agent: eff, profile: prof, cat: cat, system: system}, nil
+}
+
+// instructionsPrompt renders the instruction files the hub saw from the client
+// host(s) whose tools this agent can actually reach this turn (P1-A: a repo's
+// AGENTS.md is the highest-value content on the machine and was never loaded).
+// All found files are injected — the client cannot predict which paths the
+// agent will touch — ordered root-first per host, each labelled with its path,
+// with the refine/conflict rule stated so nested files are not silent
+// last-wins. The text goes through planTurn's documented extension point, so
+// GET /api/chats/{id}/system-prompt shows exactly what the model saw.
+func (m *Manager) instructionsPrompt(cat *catalog) string {
+	wanted := map[string]bool{}
+	for _, t := range cat.tools {
+		if t.Ref.Label != "" {
+			wanted[t.Ref.Label] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return ""
+	}
+	type host struct {
+		label string
+		files []protocol.InstructionFile
+	}
+	var hosts []host
+	for _, conn := range m.reg.Connections() {
+		if !wanted[conn.Label] {
+			continue
+		}
+		if files := conn.Instructions(); len(files) > 0 {
+			hosts = append(hosts, host{conn.Label, files})
+		}
+	}
+	if len(hosts) == 0 {
+		return ""
+	}
+	sort.Slice(hosts, func(i, j int) bool { return hosts[i].label < hosts[j].label })
+	var b strings.Builder
+	b.WriteString("## Instruction files (from the client host)\n\n" +
+		"Text files the project carries as agent instructions (AGENTS.md, CLAUDE.md, ...), read from the " +
+		"client host that serves the tools marked with that host below, verbatim, and re-read whenever they " +
+		"change. Follow them as the user's own instructions for that repository. When several apply, they " +
+		"are listed root-first and a file deeper in the tree refines the ones above it for work under its " +
+		"directory: on a conflict, the deeper file wins for that subtree.\n")
+	for _, h := range hosts {
+		for _, f := range h.files {
+			fmt.Fprintf(&b, "\n### %s:%s\n\n%s\n", h.label, f.Path, f.Content)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// briefStaleAfter is how old a client's environment brief may get before the
+// hub marks it stale instead of letting the agent trust it silently: the
+// client refreshes every ~15 s, so this is a generous line under "the client
+// is gone and did not say goodbye".
+const briefStaleAfter = 5 * time.Minute
+
+// environmentBriefPrompt renders the W8 environment brief: what the agent
+// needs to know about where its tools actually run before its first tool call.
+// Hub facts come from config (only the hub knows the effective call deadline
+// and push state); host facts come from each client whose tools this agent can
+// reach, verbatim, stamped with their age — a brief older than
+// briefStaleAfter is flagged, never silently trusted.
+func (m *Manager) environmentBriefPrompt(cat *catalog) string {
+	wanted := map[string]bool{}
+	for _, t := range cat.tools {
+		if t.Ref.Label != "" {
+			wanted[t.Ref.Label] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return ""
+	}
+	type host struct {
+		label string
+		brief string
+		age   time.Duration
+	}
+	var hosts []host
+	for _, conn := range m.reg.Connections() {
+		if !wanted[conn.Label] {
+			continue
+		}
+		brief, at := conn.Brief()
+		if brief == "" {
+			continue
+		}
+		hosts = append(hosts, host{conn.Label, brief, time.Since(at)})
+	}
+	sort.Slice(hosts, func(i, j int) bool { return hosts[i].label < hosts[j].label })
+	var b strings.Builder
+	b.WriteString("## Environment brief\n\n" +
+		"Where the tools in this list actually run. Collected by the client at connect and on every refresh " +
+		"(never mid-question), and by the hub from its own config. Network reachability is NOT probed — " +
+		"addresses and resolvers are local facts only. A stale brief is marked as such: treat it as a hint, " +
+		"re-check cheaply before relying on it.\n")
+	fmt.Fprintf(&b, "\n### hub\n\nHub tool-call deadline: %s (CALL_TIMEOUT) — a call that runs longer is cancelled by the hub; harness-side waits (wait_for_start/wait_for_poll) exist for longer work. User push notifications: ",
+		formatSeconds(m.set.CallTimeout))
+	if m.set.PushEnabled() {
+		b.WriteString("configured.")
+	} else {
+		b.WriteString("not configured (a finished watch cannot reach the user unasked; use switchboard_user_ask in-turn).")
+	}
+	if len(hosts) == 0 {
+		b.WriteString("\n\nNo client host brief was sent (older client, or brief disabled with --no-env-brief).")
+	}
+	for _, h := range hosts {
+		fmt.Fprintf(&b, "\n### %s\n\n", h.label)
+		b.WriteString(h.brief)
+		if h.age > briefStaleAfter {
+			fmt.Fprintf(&b, "\n\n[STALE: last refreshed %s ago — the client may be gone or the facts changed; re-verify before acting]", roundAge(h.age))
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func formatSeconds(s float64) string {
+	if s == float64(int64(s)) {
+		return fmt.Sprintf("%ds", int64(s))
+	}
+	return fmt.Sprintf("%.1fs", s)
+}
+
+func roundAge(d time.Duration) string {
+	switch {
+	case d >= time.Hour:
+		return fmt.Sprintf("%.0fh", d.Hours())
+	case d >= time.Minute:
+		return fmt.Sprintf("%.0fm", d.Minutes())
+	default:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
 }
 
 // systemPromptFor is THE function that produces the system prompt sent to the
@@ -119,12 +261,12 @@ func systemPromptFor(agent *store.Agent) string { return agent.SystemPrompt }
 
 // ChatSystemPrompt implements Service.
 func (m *Manager) ChatSystemPrompt(ctx context.Context, chatID string) (*SystemPromptView, error) {
-	_, agent, err := m.liveAgentForChat(ctx, chatID)
+	chat, agent, err := m.liveAgentForChat(ctx, chatID)
 	if err != nil {
 		return nil, err
 	}
 	eff, prof := m.resolveAgent(ctx, agent)
-	plan, err := m.planTurn(ctx, eff, prof)
+	plan, err := m.planTurn(ctx, eff, prof, chat)
 	if err != nil {
 		return nil, err
 	}

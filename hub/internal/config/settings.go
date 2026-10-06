@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -66,6 +67,18 @@ type Settings struct {
 	// the hub must keep working with no LLM configured at all (E7).
 	AgentsEnabled bool
 
+	// SearxngURL is the base URL of a SearXNG instance (which must have the
+	// json format enabled); when set, chats are offered switchboard.web.search.
+	SearxngURL string
+
+	// WebFetchDisabled turns off switchboard.web.fetch (WEB_FETCH=false); the
+	// tool is otherwise always offered.
+	WebFetchDisabled bool
+
+	// HTTPGetAllowlist holds the hostnames or host:port pairs switchboard.http.get
+	// may call, private hosts included. Empty means the tool is not offered.
+	HTTPGetAllowlist []string
+
 	// LLMModelsPath is the models JSON file (L4); empty means none declared.
 	LLMModelsPath string
 
@@ -89,6 +102,11 @@ type Settings struct {
 	AgentMaxChildren          int
 	AgentMaxConcurrentRuns    int
 	AgentMaxParallelToolCalls int
+
+	// ToolResultMaxChars caps how much of one tool result the model is shown each
+	// turn (head and tail kept, the middle replaced by a marker); the stored
+	// result and the console keep the whole thing. 0 disables the cap.
+	ToolResultMaxChars int
 
 	AgentDefaultBudget AgentBudget
 	AgentDefaultGrants []GrantSpec
@@ -297,6 +315,32 @@ func loadAgentSettings(s *Settings) error {
 	if s.LLMModelsPath, err = Get("LLM_MODELS", "", false); err != nil {
 		return err
 	}
+	searx, err := Get("SEARXNG_URL", "", false)
+	if err != nil {
+		return err
+	}
+	s.SearxngURL = strings.TrimRight(strings.TrimSpace(searx), "/")
+	if s.SearxngURL != "" {
+		u, perr := url.Parse(s.SearxngURL)
+		if perr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+			return fmt.Errorf("%sSEARXNG_URL must be an http(s) URL with a host, got %q", Prefix, s.SearxngURL)
+		}
+	}
+	webFetch, err := GetBool("WEB_FETCH", true)
+	if err != nil {
+		return err
+	}
+	s.WebFetchDisabled = !webFetch
+	allow, err := Get("HTTP_GET_ALLOWLIST", "", false)
+	if err != nil {
+		return err
+	}
+	s.HTTPGetAllowlist = nil
+	for _, h := range strings.Split(allow, ",") {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			s.HTTPGetAllowlist = append(s.HTTPGetAllowlist, h)
+		}
+	}
 	for _, p := range []struct {
 		name         string
 		key, baseURL *string
@@ -338,6 +382,7 @@ func loadAgentSettings(s *Settings) error {
 		{"AGENT_MAX_CHILDREN", &s.AgentMaxChildren, 8},
 		{"AGENT_MAX_CONCURRENT_RUNS", &s.AgentMaxConcurrentRuns, 16},
 		{"AGENT_MAX_PARALLEL_TOOL_CALLS", &s.AgentMaxParallelToolCalls, 8},
+		{"AGENT_TOOL_RESULT_MAX_CHARS", &s.ToolResultMaxChars, 30000},
 		{"AGENT_REPLY_TIMEOUT", &s.AgentReplyTimeout, 300},
 		{"APPROVAL_TIMEOUT", &s.ApprovalTimeout, 3600},
 		{"INBOX_RETENTION_DAYS", &s.InboxRetentionDays, 7},
