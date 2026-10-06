@@ -76,10 +76,10 @@ describe("TruncationWarning", () => {
       />,
     );
     const meters = screen.getAllByRole("meter").map((m) => m.getAttribute("aria-label"));
-    expect(meters).toEqual(["context", "tokens", "cost"]);
+    expect(meters).toEqual(["context", "budget", "cost"]);
     expect(screen.getByRole("meter", { name: "cost" }).getAttribute("aria-valuenow")).toBe("2500000");
     expect(screen.getByRole("meter", { name: "context" }).getAttribute("aria-valuenow")).toBe("23600");
-    expect(screen.getByRole("meter", { name: "tokens" }).getAttribute("aria-valuenow")).toBe("126000");
+    expect(screen.getByRole("meter", { name: "budget" }).getAttribute("aria-valuenow")).toBe("126000");
     expect(screen.queryByText(/turns/)).toBeNull();
   });
   it("the truncation warning names the last prompt's size", () => {

@@ -483,7 +483,17 @@ func (m *Manager) Post(ctx context.Context, chatID string, in PostInput) (*PostR
 			res := &PostResult{RunID: existing, Deduplicated: true}
 			if path, err := m.st.ActivePath(ctx, chatID); err == nil {
 				for _, msg := range path {
-					if msg.RunID != nil && *msg.RunID == existing && msg.ParentID != nil {
+					if msg.RunID == nil || *msg.RunID != existing {
+						continue
+					}
+					if msg.Role == store.RoleUser {
+						// The trigger user message now carries the runId itself.
+						res.MessageID = msg.ID
+						break
+					}
+					if msg.ParentID != nil {
+						// Runs from before user messages were stamped: the
+						// first model message of the run points at its trigger.
 						res.MessageID = *msg.ParentID
 						break
 					}
@@ -492,7 +502,9 @@ func (m *Manager) Post(ctx context.Context, chatID string, in PostInput) (*PostR
 			return res, nil
 		}
 	}
-	msg := &store.Message{ID: store.NewID(), ChatID: chatID, Role: store.RoleUser, Content: mustJSON(in.Content)}
+	// The trigger message carries the run it starts (M10): a run that dies
+	// before writing any assistant message is still findable from history.
+	msg := &store.Message{ID: store.NewID(), ChatID: chatID, Role: store.RoleUser, Content: mustJSON(in.Content), RunID: &runID}
 	explicit := false
 	if in.ParentID != "" {
 		parent, err := m.st.GetMessage(ctx, in.ParentID)
@@ -542,8 +554,9 @@ func (m *Manager) Branch(ctx context.Context, chatID string, in BranchInput) (*P
 	switch {
 	case from.Role == store.RoleUser && len(in.Content) > 0:
 		// Edit and resend: a user sibling, then a run.
-		msg := &store.Message{ID: store.NewID(), ChatID: chatID, ParentID: from.ParentID, Role: store.RoleUser, Content: mustJSON(in.Content)}
-		run, err := m.submit(ctx, submission{agent: agent, chat: chat, trigger: store.TriggerHuman, msg: msg, parentExplicit: true, modelOverride: in.Model})
+		runID := store.NewID()
+		msg := &store.Message{ID: store.NewID(), ChatID: chatID, ParentID: from.ParentID, Role: store.RoleUser, Content: mustJSON(in.Content), RunID: &runID}
+		run, err := m.submit(ctx, submission{agent: agent, chat: chat, trigger: store.TriggerHuman, msg: msg, parentExplicit: true, modelOverride: in.Model, runID: runID})
 		if err != nil {
 			return nil, err
 		}

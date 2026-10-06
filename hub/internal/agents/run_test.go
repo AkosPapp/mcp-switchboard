@@ -543,6 +543,34 @@ func TestProviderErrorFinishesWithError(t *testing.T) {
 	}
 }
 
+func TestFailedRunRemainsFindableFromHistory(t *testing.T) {
+	e := newEnv(t)
+	e.scripted("p", llm.Fail(errors.New("upstream 500")), llm.Fail(errors.New("upstream 500")))
+	a := e.agent("a", withModel("p"))
+	res := e.post(a.ID, "x")
+	if run := e.waitRun(res.RunID); run.Status != store.RunError {
+		t.Fatalf("run = %+v", run)
+	}
+	// The run wrote no reply, so the console can only find it through
+	// history: the trigger user message must carry its id (M10).
+	chat := e.chatOf(a.ID)
+	p := e.path(chat)
+	if len(p) != 1 || p[0].Role != store.RoleUser || p[0].RunID == nil || *p[0].RunID != res.RunID {
+		t.Fatalf("path = %+v", p)
+	}
+	// The edit-and-resend branch stamps its trigger message the same way.
+	res2, err := e.m.Branch(context.Background(), chat, BranchInput{FromMessageID: p[0].ID, Content: say("y")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitRun(res2.RunID)
+	p = e.path(chat)
+	tip := p[len(p)-1]
+	if tip.Role != store.RoleUser || tip.RunID == nil || *tip.RunID != res2.RunID {
+		t.Fatalf("tip = %+v", tip)
+	}
+}
+
 func TestStartupInterruptsStaleRuns(t *testing.T) {
 	e := newEnv(t)
 	a := e.agent("a", nil)

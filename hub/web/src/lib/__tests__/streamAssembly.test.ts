@@ -119,7 +119,14 @@ describe("streamAssembly", () => {
     expect(s.tools[0]).toMatchObject({ name: "echo", done: true, result: "ok" });
     s = feed([frame("run_done", 4, { status: "done" })], s);
     expect(s.approvals).toHaveLength(0);
-    expect(s.lastRun).toEqual({ runId: "r1", status: "done" });
+    expect(s.lastRun).toEqual({ runId: "r1", status: "done", finishReason: "", error: "", limit: "" });
+  });
+
+  it("keeps a quiet stop's explanation on lastRun (budget, error)", () => {
+    let s = feed([frame("run_done", 1, { status: "done", finishReason: "budget", limit: "max_tokens" })]);
+    expect(s.lastRun).toEqual({ runId: "r1", status: "done", finishReason: "budget", error: "", limit: "max_tokens" });
+    s = feed([frame("run_done", 1, { status: "error", finishReason: "error", error: "provider down" })]);
+    expect(s.lastRun).toMatchObject({ status: "error", error: "provider down" });
   });
 
   it("overflow discards assembled state and the resume position", () => {

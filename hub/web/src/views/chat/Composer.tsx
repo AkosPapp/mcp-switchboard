@@ -113,7 +113,7 @@ export function BudgetMeter({
       ) : null}
       {tokens ? (
         <Meter
-          label="tokens"
+          label="budget"
           used={usedTokens}
           max={tokens}
           format={formatTokens}
@@ -123,6 +123,57 @@ export function BudgetMeter({
       {cost ? <Meter label="cost" used={pick(usage, "costMicros", "cost_micros")} max={cost} format={formatCost} /> : null}
     </div>
   );
+}
+
+/** A finished run's outcome, from whichever source knows best: the live
+ * run_done frame while it is fresh, else the fetched run row. Errors are left
+ * to the "run failed" line; this is for the quiet stops (budget, cancel). */
+export interface RunOutcome {
+  status: string;
+  finishReason: string;
+  limit: string;
+}
+
+export function stoppedRunNotice(
+  lastRun: { runId: string; status: string; finishReason: string; limit: string } | null,
+  fetched: { id: string; status: string; finishReason: string | null; usage: Record<string, unknown> } | null | undefined,
+): RunOutcome | null {
+  if (lastRun) return { status: lastRun.status, finishReason: lastRun.finishReason, limit: lastRun.limit };
+  if (fetched && fetched.status !== "queued" && fetched.status !== "running" && fetched.status !== "waiting") {
+    const limit = typeof fetched.usage.limit === "string" ? fetched.usage.limit : "";
+    return { status: fetched.status, finishReason: fetched.finishReason ?? "", limit };
+  }
+  return null;
+}
+
+/** Why the run stopped when the model itself didn't end the turn, or null. */
+export function runStoppedText(o: RunOutcome, budget: Record<string, unknown> | undefined): string | null {
+  const b = budget ?? {};
+  const cap = (key: string, fmt: (n: number) => string): string => {
+    const v = num(b[key]);
+    return v > 0 ? ` (${fmt(v)})` : "";
+  };
+  if (o.status === "error") return null;
+  if (o.finishReason === "budget") {
+    const keepGoing = ` Send "continue" to keep going, or raise the budget in chat settings.`;
+    switch (o.limit) {
+      case "max_cost_micros":
+        return `stopped: cost budget${cap("max_cost_micros", formatCost)} spent.${keepGoing}`;
+      case "max_turns":
+        return `stopped: the run hit its turn limit${cap("max_turns", String)}.${keepGoing}`;
+      case "max_tool_calls":
+        return `stopped: the run hit its tool-call limit${cap("max_tool_calls", String)}.${keepGoing}`;
+      case "max_wall_seconds":
+        return `stopped: the run hit its time limit${cap("max_wall_seconds", (n) => `${n}s`)}.${keepGoing}`;
+      case "max_lifetime_cost_micros":
+        return "stopped: this agent's lifetime cost budget is spent; the hub operator must raise or reset it.";
+      default:
+        return `stopped: token budget${cap("max_tokens", formatTokens)} spent — the whole conversation is re-sent every turn, so this grows much faster than the chat itself.${keepGoing}`;
+    }
+  }
+  if (o.status === "cancelled" || o.finishReason === "cancelled") return "stopped: run cancelled.";
+  if (o.finishReason === "interrupted") return `stopped: ${o.status === "interrupted" ? "the hub restarted while this run was in progress" : "interrupted"}.`;
+  return null;
 }
 
 /** Non-modal notice when the run's prompt filled the model's context window. */

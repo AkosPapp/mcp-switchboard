@@ -61,8 +61,9 @@ export interface StreamState {
   overflow: string | null;
   /** count of frames that arrived with a hole before them */
   gaps: number;
-  /** last finished run's status, for the UI */
-  lastRun: { runId: string; status: string } | null;
+  /** last finished run's outcome, for the UI: a run that ends without a
+   * message (budget stop, error) must still be able to explain itself */
+  lastRun: { runId: string; status: string; finishReason: string; error: string; limit: string } | null;
 }
 
 export const initialStream: StreamState = {
@@ -191,7 +192,13 @@ function applyFrame(state: StreamState, frame: FrameBase): StreamState {
         ...state,
         activeRuns: state.activeRuns.filter((r) => r !== frame.runId),
         approvals: state.approvals.filter((a) => a.runId !== frame.runId),
-        lastRun: { runId: frame.runId, status: String(frame.status ?? "") },
+        lastRun: {
+          runId: frame.runId,
+          status: String(frame.status ?? ""),
+          finishReason: String(frame.finishReason ?? ""),
+          error: String(frame.error ?? ""),
+          limit: String(frame.limit ?? ""),
+        },
       };
     case "error":
       return { ...state, error: String(frame.message ?? "stream error") };

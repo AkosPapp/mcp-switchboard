@@ -369,8 +369,12 @@ func (m *Manager) deliverChatMessage(ctx context.Context, from *store.Agent, fro
 	if kind == SenderSpawn {
 		trigger = store.TriggerSpawn
 	}
+	// M10: the trigger message carries the run it starts, so a run that dies
+	// before writing a reply is still findable from chat history.
+	runID := store.NewID()
+	msg.RunID = &runID
 	fromID := from.ID
-	run, err := m.submit(ctx, submission{agent: to, chat: toChat, trigger: trigger, triggeredBy: &fromID, msg: msg, reply: route, enqueuedAt: time.Now()})
+	run, err := m.submit(ctx, submission{agent: to, chat: toChat, trigger: trigger, triggeredBy: &fromID, msg: msg, reply: route, enqueuedAt: time.Now(), runID: runID})
 	return msgID, run, err
 }
 

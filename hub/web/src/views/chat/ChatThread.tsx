@@ -28,7 +28,7 @@ import {
   useSystemPrompt,
 } from "./api";
 import ChatDialog from "./ChatDialog";
-import Composer, { TruncationWarning } from "./Composer";
+import Composer, { runStoppedText, stoppedRunNotice, TruncationWarning } from "./Composer";
 import { modelLabel } from "./format";
 import { newKey } from "./idempotency";
 import MessageView, { DraftView, type MessageActions } from "./MessageView";
@@ -111,6 +111,10 @@ export default function ChatThread({
   const run = useRun(lastRunId);
   const runActive =
     state.activeRuns.length > 0 || (run.data ? ACTIVE_RUN.includes(run.data.status) : false);
+  const stoppedText = useMemo(() => {
+    const outcome = stoppedRunNotice(state.lastRun, run.data);
+    return outcome ? runStoppedText(outcome, run.data?.budgetSnapshot ?? agent.data?.budget) : null;
+  }, [state.lastRun, run.data, agent.data]);
 
   const results = useMemo(() => resultsByCall(messages), [messages]);
   const pathCallIds = useMemo(
@@ -537,8 +541,19 @@ export default function ChatThread({
         ) : null}
         {state.error ? <p className="text-sm text-danger">{state.error}</p> : null}
         <TruncationWarning usage={run.data?.usage} />
+        {!runActive && stoppedText ? (
+          <p
+            role="status"
+            data-testid="run-stopped"
+            className="rounded border border-warn/50 bg-warn/10 px-3 py-2 text-sm text-warn"
+          >
+            {stoppedText}
+          </p>
+        ) : null}
         {!runActive && run.data && run.data.status === "error" && run.data.error ? (
           <p className="text-sm text-danger">run failed: {run.data.error}</p>
+        ) : !runActive && state.lastRun?.error && run.data?.id !== state.lastRun.runId ? (
+          <p className="text-sm text-danger">run failed: {state.lastRun.error}</p>
         ) : null}
       </div>
 
