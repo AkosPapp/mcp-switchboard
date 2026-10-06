@@ -12,14 +12,22 @@
 # One flag belongs to this script and is consumed here rather than forwarded:
 #
 #   --editor=code|none   set up the OpenCode TUI inside VS Code (default none).
-#                        Installs the sst-dev.opencode extension and points
-#                        OpenCode at this hub's /mcp endpoint. Best-effort: a
+#                        Installs the sst-dev.opencode extension and creates
+#                        (merging, never clobbering) the global opencode.json
+#                        entry that points OpenCode at the hub's /mcp endpoint -
+#                        worked out from --hub-url: a loopback hub URL means the
+#                        private listener right here (127.0.0.1:8099), anything
+#                        else gets /mcp on the same origin. Best-effort: a
 #                        missing or unwritable editor never stops the client
 #                        from starting. MCP_SWITCHBOARD_MCP_URL overrides the
-#                        endpoint written into the config.
+#                        endpoint. Implies --opencode.
 #
-# Note the deliberate omission: --editor does NOT install opencode itself. See
-# setup_editor for why.
+#   --opencode           make sure OpenCode itself exists, so `opencode` works
+#                        in any terminal, VS Code or not. The official
+#                        per-user installer (~/.opencode/bin, no sudo) runs
+#                        only when none is found: an existing copy - a Nix-
+#                        managed one very likely - is left completely alone.
+#                        The /mcp config merge applies here too.
 #
 # POSIX sh only - no bashisms. Safe to re-run. Fails loudly rather than
 # falling through to a broken `uvx` invocation.
@@ -193,11 +201,61 @@ OPENCODE_EXTENSION="sst-dev.opencode"
 # because a hub URL describes this machine, not one repository.
 EDITOR_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
 
+# The endpoint written into opencode.json when nothing better is known.
 DEFAULT_MCP_URL="http://127.0.0.1:8099/mcp"
 
-# Set by main's argument loop; `set -u` means it has to exist even when no
-# --editor flag was given.
+# Peeked (never consumed) from --hub-url by main's argument loop, so the
+# config merge can work out the endpoint from the hub the user already named.
+HUB_URL_PEEKED=""
+
+# resolved_mcp_url: what endpoint opencode should dial, best guess last.
+#   1. MCP_SWITCHBOARD_MCP_URL - explicit wins, always.
+#   2. A loopback tunnel URL means a hub right here: use its private port
+#      directly (8097 is the tunnel listener, which does not serve /mcp).
+#   3. Any other host - a proxy/gateway in front of the hub - reuse that
+#      origin, keeping its path prefix: /mcp hangs off the same front door.
+#   4. No --hub-url at all: the local default.
+resolved_mcp_url() {
+    [ -n "${MCP_SWITCHBOARD_MCP_URL:-}" ] && { printf '%s\n' "$MCP_SWITCHBOARD_MCP_URL"; return; }
+    if [ -z "$HUB_URL_PEEKED" ]; then
+        printf '%s\n' "$DEFAULT_MCP_URL"
+        return
+    fi
+    _u=$HUB_URL_PEEKED
+    _scheme=${_u%%://*}
+    _rest=${_u#*://}
+    case "$_scheme" in
+        ws) _http=http ;;
+        wss) _http=https ;;
+        *) _http=$_scheme ;;
+    esac
+    _hostport=${_rest%%/*}
+    case "$_hostport" in
+        127.0.0.1:* | 127.0.0.1 | localhost:* | localhost | "[::1]:*" | "[::1]")
+            printf 'http://127.0.0.1:8099/mcp\n'
+            return
+            ;;
+    esac
+    case "$_rest" in
+        */*)
+            _path=${_rest#*/}
+            _path=${_path%/}
+            if [ -n "$_path" ]; then
+                printf '%s\n' "$_http://$_hostport/$_path/mcp"
+            else
+                printf '%s\n' "$_http://$_hostport/mcp"
+            fi
+            ;;
+        *)
+            printf '%s\n' "$_http://$_rest/mcp"
+            ;;
+    esac
+}
+
+# Set by main's argument loop; `set -u` means they have to exist even when no
+# flags were given.
 EDITOR_TARGET=""
+OPENCODE_WANTED=0
 
 # find_editor_cli: the first VS Code flavoured CLI that can actually install an
 # extension. Cursor is not in that list on purpose: its `cursor` command here
@@ -319,28 +377,70 @@ PY
     fi
 }
 
-# setup_editor: --editor=code. Runs before the client launches, because it is
-# one-time host setup; the client itself stays what it is - a tunnel that
-# listens on nothing and touches only what mcp.json names.
-#
-# Why opencode is detected but never installed: it is very likely already
-# managed declaratively (on this project's author's machine it comes from the
-# NixOS system closure), and ~/.local/bin sits ahead of /run/current-system/sw
-# bin, so a per-user install would silently shadow the managed copy - and
-# `opencode upgrade` would then mutate the wrong binary while nixos-rebuild
-# quietly disagreed about which one was current. Reporting beats installing.
+# ensure_opencode: --opencode (implied by --editor=code). Detect first, install
+# second. The detect step is the whole point and must never be dropped: an
+# existing opencode is likely managed declaratively (on this project's author's
+# machine it comes from the NixOS system closure), and per-user PATH entries
+# sit ahead of system ones - installing over that would silently shadow the
+# managed copy, and `opencode upgrade` would then mutate the wrong binary while
+# nixos-rebuild quietly disagreed about which one was current. So: report an
+# existing copy, touch nothing of it; run the official per-user installer
+# (~/.opencode/bin, no sudo, edits the user's shell rc for PATH) only where the
+# binary is absent entirely.
+ensure_opencode() {
+    if has_cmd opencode; then
+        log "opencode found: $(command -v opencode)"
+        return 0
+    fi
+    if ! has_cmd curl; then
+        log "WARNING: opencode is not installed and curl is required for its installer; install it by hand (https://opencode.ai/docs)"
+        return 0
+    fi
+    # The installer is a bash script; on hosts where sh is not bash, piping it
+    # straight into sh would break on bash-isms, so prefer bash when present.
+    if has_cmd bash; then
+        # shellcheck disable=SC2209  # deliberately the name of a shell to run
+        _shell=bash
+    else
+        # shellcheck disable=SC2209
+        _shell=sh
+    fi
+    log "opencode not found; installing the official per-user build into ~/.opencode/bin (this never replaces an existing copy)"
+    if curl -fsSL https://opencode.ai/install | "$_shell" >/dev/null 2>&1; then
+        log "installed opencode"
+        case ":$PATH:" in
+            *":$HOME/.opencode/bin:"*) ;;
+            *) log "note: add \$HOME/.opencode/bin to PATH (the installer edits your shell config for future shells)" ;;
+        esac
+    else
+        log "WARNING: the opencode installer failed; install it by hand (https://opencode.ai/docs)"
+    fi
+    has_cmd opencode || has_cmd "$HOME/.opencode/bin/opencode" ||
+        log "note: Nix users can get a managed copy instead with 'nix profile install nixpkgs#opencode'"
+}
+
+# setup_editor: --editor=code (and the opencode-only half of --opencode). Runs
+# before the client launches, because it is one-time host setup; the client
+# itself stays what it is - a tunnel that listens on nothing and touches only
+# what mcp.json names.
 setup_editor() {
     case "$EDITOR_TARGET" in
-        "" | none) return 0 ;;
+        "" | none)
+            if [ "$OPENCODE_WANTED" -eq 1 ]; then
+                # Standalone TUI hosts: no editor involved, but the same global
+                # opencode.json merge still applies, so `opencode` in any
+                # terminal reaches the hub's /mcp without VS Code.
+                ensure_opencode
+                merge_opencode_config "$(resolved_mcp_url)"
+                log "run 'opencode' in any terminal; it talks to the hub through the switchboard entry just configured"
+            fi
+            return 0
+            ;;
         code) ;;
         *) die "--editor must be 'code' or 'none' (got '$EDITOR_TARGET')" ;;
     esac
 
-    if has_cmd opencode; then
-        log "opencode found: $(command -v opencode)"
-    else
-        log "opencode not found - install it for this machine (with Nix: 'nix profile install nixpkgs#opencode'); not installing it from here, so a declaratively managed copy is never shadowed"
-    fi
+    ensure_opencode
 
     _cli=$(find_editor_cli) || {
         log "WARNING: no VS Code CLI with --install-extension found; skipped the extension"
@@ -350,10 +450,13 @@ setup_editor() {
         install_editor_extension "$_cli"
     fi
 
-    merge_opencode_config "${MCP_SWITCHBOARD_MCP_URL:-$DEFAULT_MCP_URL}"
+    _mcp=$(resolved_mcp_url)
+    merge_opencode_config "$_mcp"
 
     log "in VS Code: Ctrl+Escape opens the OpenCode TUI and shares your current selection; use @File#L37-42 to pin a range"
-    log "narrow the endpoint to this machine only if you prefer: ${MCP_SWITCHBOARD_MCP_URL:-$DEFAULT_MCP_URL}/host/$(hostname 2>/dev/null || echo '<label>')"
+    # The per-host narrowing is the point when one hub fronts many machines:
+    # each client's tools then only appear to its own chats.
+    log "one hub, many machines? narrow this entry to this machine: $_mcp/host/$(hostname 2>/dev/null || echo '<label>')"
     # Plain expansion, deliberately: $(...) would *run* the CLI, and `code`
     # with no arguments opens an editor window instead of printing a revert hint.
     _revert_cli=${_cli:-code}
@@ -383,6 +486,21 @@ main() {
                 ;;
             --editor=*)
                 EDITOR_TARGET=${_arg#--editor=}
+                ;;
+            --opencode)
+                OPENCODE_WANTED=1
+                ;;
+            --hub-url)
+                # Peek, do not consume: both the flag and its value are still
+                # forwarded to the client. The value is this iteration's $1;
+                # the flag goes back on the tail and the value follows when
+                # the loop reaches it.
+                HUB_URL_PEEKED=${1:-}
+                set -- "$@" --hub-url
+                ;;
+            --hub-url=*)
+                HUB_URL_PEEKED=${_arg#*=}
+                set -- "$@" "$_arg"
                 ;;
             *)
                 set -- "$@" "$_arg"

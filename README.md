@@ -145,16 +145,34 @@ The installer only makes sure `npx` and `uvx` exist (via `nix shell` if you have
 Nix, otherwise per-user installs with no sudo) and then hands off to `uvx`.
 
 Pass `--editor=code` to also set up the [OpenCode](https://opencode.ai) TUI inside
-VS Code: it installs the `sst-dev.opencode` extension and merges this hub's `/mcp`
-endpoint into `~/.config/opencode/opencode.json` (merging, never overwriting; it
-prints the snippet instead if that file is not valid JSON). It deliberately never
-installs `opencode` itself — a per-user install would silently shadow a
-Nix-managed one — and a missing editor only warns; the client still starts:
+VS Code: it installs the `sst-dev.opencode` extension and creates (merging, never
+clobbering; invalid JSON gets a printed snippet instead) the global
+`~/.config/opencode/opencode.json` entry for this hub's `/mcp`. The endpoint comes
+straight from `--hub-url`: a loopback URL maps to the private listener
+(`http://127.0.0.1:8099/mcp`), anything else gets `/mcp` on the same origin
+(a path prefix is kept), and `MCP_SWITCHBOARD_MCP_URL` overrides both. A missing
+editor only warns; the client still starts:
 
 ```sh
 curl -fsSL https://akospapp.github.io/mcp-switchboard/install.sh | sh -s -- \
   --editor=code --hub-url wss://switchboard.example.com --token "$TOKEN"
 ```
+
+`--editor=code` implies `--opencode`, which is also usable on its own — for hosts
+where you just want `opencode` in any terminal, no VS Code:
+
+```sh
+curl -fsSL https://akospapp.github.io/mcp-switchboard/install.sh | sh -s -- \
+  --opencode --hub-url wss://switchboard.example.com --token "$TOKEN"
+```
+
+Either flag makes sure `opencode` exists, **detect-first**: an existing copy — a
+Nix-managed one, typically — is reported and left completely alone (a per-user
+install would silently shadow it); the official installer runs only where the
+binary is entirely absent, into `~/.opencode/bin`, per-user, no sudo. Because the
+`/mcp` entry goes into the *global* opencode config, `opencode` reaches the hub's
+tools from any directory and any terminal — the VS Code extension only adds the
+selection/tab sharing.
 
 Related editor tooling lives in this repo: [`editor/vscode`](editor/vscode) quotes
 the current selection into a chat's draft, and `.vscode/tasks.json`,
