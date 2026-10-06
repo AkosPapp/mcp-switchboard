@@ -237,6 +237,17 @@ def test_find_symbol_uses_ctags_when_available(code, tmp_path, monkeypatch):
 # --- run_tests -----------------------------------------------------------------------
 
 
+def _python_has_pytest():
+    """Whether the plain `python` on PATH can import pytest.
+
+    These tests hand that exact interpreter to the tool under test (rather
+    than an auto-detected one), so where the ambient venv keeps pytest on a
+    different binary they skip - like the go end-to-end test below skips
+    without go. Failing here would test the shell, not the tool.
+    """
+    return subprocess.run(["python", "-c", "import pytest"], capture_output=True).returncode == 0
+
+
 def test_run_tests_pytest(tmp_path):
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
     (tmp_path / "test_x.py").write_text(
@@ -255,6 +266,8 @@ def test_run_tests_pytest(tmp_path):
 
 
 def test_run_tests_pytest_default_tb_fallback(tmp_path):
+    if not _python_has_pytest():
+        pytest.skip("plain `python` on PATH has no pytest")
     (tmp_path / "test_y.py").write_text("def test_bad():\n    x = 1\n    assert x == 2\n")
     r = run(h.run_tests(command="python -m pytest -q --tb=short -rN"))
     assert r.framework == "pytest" and r.failed == 1
@@ -537,6 +550,8 @@ def _git(tmp_path, *args):
 
 
 def test_run_tests_changed_only_scopes_to_dirty_packages(tmp_path, monkeypatch):
+    if not _python_has_pytest():
+        pytest.skip("plain `python` on PATH has no pytest")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / ".gitconfig"))
     (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n")
     (tmp_path / "tests").mkdir()

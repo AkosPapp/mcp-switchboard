@@ -133,7 +133,11 @@ test("New chat with a Custom prompt sends its own text and no profile", async ({
   await openHeaderAction(page, "System prompt");
   const panel = page.getByRole("dialog", { name: "system prompt for this chat" });
   await expect(panel.getByTestId("prompt-source")).toHaveText("this chat's own prompt");
-  await expect(panel.getByTestId("prompt-text")).toHaveText(text);
+  // The chat's own text comes first; the injected Environment brief section
+  // (which follows it) is environment-dependent and not this test's subject.
+  await expect(panel.getByTestId("prompt-text")).toHaveText(
+    new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+  );
 });
 
 test("a client group's + chat preselects that client", async ({ page, request }) => {

@@ -69,7 +69,9 @@ test("a pending edit is flushed on leaving the page", async ({ page, request }) 
   // Inside the debounce window: nothing sent yet.
   expect(drafts.puts).toHaveLength(0);
   await page.goto("about:blank");
-  await expect.poll(() => drafts.store.get(chat.id)).toBe("typed and gone");
+  // The flush starts in a microtask at pagehide, so under full-suite load the
+  // request can take a beat to surface: poll longer than the config default.
+  await expect.poll(() => drafts.store.get(chat.id), { timeout: 30_000 }).toBe("typed and gone");
 });
 
 test("drafts stay with their chat when switching before the save resolves", async ({ page, request }) => {

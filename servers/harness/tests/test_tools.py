@@ -378,19 +378,22 @@ def test_cleanup_kills_background_process_groups():
 
     async def go():
         started = await h.process_start("sleep 60 & sleep 60")
-        return started.pid
-
-    pid = run(go())
-    os.killpg(pid, 0)  # group alive
-    h._kill_all_processes()
-    for _ in range(50):
-        try:
-            os.killpg(pid, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.1)
-    else:
+        # The kill and the wait must happen while the loop runs: reaping the
+        # direct child is the loop's job, and a zombie keeps the group id
+        # reserved, so killpg(0) would answer "alive" forever after.
+        os.killpg(started.pid, 0)  # group alive
+        h._kill_all_processes()
+        m = h._processes[started.id]
+        await m.proc.wait()
+        for _ in range(50):
+            try:
+                os.killpg(started.pid, 0)
+            except ProcessLookupError:
+                return started.pid
+            await asyncio.sleep(0.1)
         raise AssertionError("process group still alive")
+
+    run(go())
 
 
 def test_dir_list_recursive_skips_dependency_trees_and_honours_limit(tmp_path):

@@ -14,34 +14,44 @@ SERVER = [sys.executable, "-m", "mcp_switchboard_server_harness"]
 def converse(root, calls):
     """Send initialize + the given (id, method, params) requests; return {id: reply}.
 
+    Requests go out in lockstep — each after its predecessor's reply — because
+    the server dispatches pending requests concurrently: a batched send would
+    let `run_command "cat a.txt"` race the `file_write` that created the file.
+
     stdin stays open until every reply has arrived: closing it early makes the
     server shut down and abandon calls still in flight.
     """
-    frames = [
-        {"jsonrpc": "2.0", "id": 0, "method": "initialize",
-         "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}},
-        {"jsonrpc": "2.0", "method": "notifications/initialized"},
-        *({"jsonrpc": "2.0", "id": i, "method": m, "params": p} for i, m, p in calls),
-    ]
-    wanted = {0, *(i for i, _, _ in calls)}
     env = {**os.environ, "TMPDIR": str(root)}  # keep the temp allowance away from the real /tmp
     proc = subprocess.Popen(
         SERVER + ["--root", str(root)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         env=env,
     )
-    replies = {}
-    try:
-        proc.stdin.write("\n".join(json.dumps(f) for f in frames) + "\n")
+
+    def send(frame):
+        proc.stdin.write(json.dumps(frame) + "\n")
         proc.stdin.flush()
+
+    def recv(want):
         deadline = time.time() + 30
-        while wanted - replies.keys() and time.time() < deadline:
+        while time.time() < deadline:
             line = proc.stdout.readline()
             if not line:
                 break
             msg = json.loads(line)
-            if "id" in msg:
-                replies[msg["id"]] = msg
+            if msg.get("id") == want:
+                return msg
+        raise AssertionError(f"no reply to request {want}")
+
+    replies = {0: None}
+    try:
+        send({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+              "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}})
+        replies[0] = recv(0)
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        for i, m, p in calls:
+            send({"jsonrpc": "2.0", "id": i, "method": m, "params": p})
+            replies[i] = recv(i)
     finally:
         proc.kill()
         proc.wait()
