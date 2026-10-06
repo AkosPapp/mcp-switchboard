@@ -144,6 +144,24 @@ uvx mcp-switchboard-client --hub-url wss://switchboard.example.com --token "$TOK
 The installer only makes sure `npx` and `uvx` exist (via `nix shell` if you have
 Nix, otherwise per-user installs with no sudo) and then hands off to `uvx`.
 
+Pass `--editor=code` to also set up the [OpenCode](https://opencode.ai) TUI inside
+VS Code: it installs the `sst-dev.opencode` extension and merges this hub's `/mcp`
+endpoint into `~/.config/opencode/opencode.json` (merging, never overwriting; it
+prints the snippet instead if that file is not valid JSON). It deliberately never
+installs `opencode` itself — a per-user install would silently shadow a
+Nix-managed one — and a missing editor only warns; the client still starts:
+
+```sh
+curl -fsSL https://akospapp.github.io/mcp-switchboard/install.sh | sh -s -- \
+  --editor=code --hub-url wss://switchboard.example.com --token "$TOKEN"
+```
+
+Related editor tooling lives in this repo: [`editor/vscode`](editor/vscode) quotes
+the current selection into a chat's draft, and `.vscode/tasks.json`,
+"Switchboard: agent reads" runs `tools/agent-reads.py`, which rewrites
+`.harness/agent-reads.md` from the hub's call log so a Markdown preview shows
+which files the agent reads.
+
 ### `mcp.json`
 
 The usual shape, as used by Claude Desktop, Cursor and VS Code:

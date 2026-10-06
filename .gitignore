@@ -13,3 +13,5 @@ result
 result-*
 .direnv/
 hub/mcp-switchboard-hub
+# Harness sandbox scratch + generated views (tools/agent-reads.py writes here)
+.harness/

@@ -327,7 +327,7 @@ def collect_instructions(cwd: Path) -> List[Dict[str, str]]:
 BRIEF_MAX_CHARS = 6 * 1024  # wire comfort; the hub caps the field on its side
 BRIEF_MAX_LINES = 30
 
-BRIEF_TOOLS = ("git", "rg", "ctags", "python3", "node", "go", "docker", "kubectl", "sbatch", "ruff", "pytest")
+BRIEF_TOOLS = ("git", "rg", "ctags", "python3", "node", "go", "docker", "kubectl", "sbatch", "ruff", "pytest", "opencode")
 
 _CRED_IN_URL = re.compile(r"//[^/@\s]*:[^/@\s]*@")
 

@@ -9,6 +9,18 @@
 # changes), then hands off entirely to the real tool via `uvx`, forwarding
 # every argument this script received, unmodified.
 #
+# One flag belongs to this script and is consumed here rather than forwarded:
+#
+#   --editor=code|none   set up the OpenCode TUI inside VS Code (default none).
+#                        Installs the sst-dev.opencode extension and points
+#                        OpenCode at this hub's /mcp endpoint. Best-effort: a
+#                        missing or unwritable editor never stops the client
+#                        from starting. MCP_SWITCHBOARD_MCP_URL overrides the
+#                        endpoint written into the config.
+#
+# Note the deliberate omission: --editor does NOT install opencode itself. See
+# setup_editor for why.
+#
 # POSIX sh only - no bashisms. Safe to re-run. Fails loudly rather than
 # falling through to a broken `uvx` invocation.
 
@@ -166,35 +178,249 @@ ensure_ca_bundle() {
     done
 }
 
+# ---------------------------------------------------------------------------
+# editor integration (--editor)
+# ---------------------------------------------------------------------------
+
+# The official OpenCode extension. Its whole payload is a terminal launcher:
+# openTerminal / openNewTerminal / addFilepathToTerminal, plus ctrl+Escape and
+# the selection-and-tab sharing the TUI picks up from the active editor. It is
+# 5 KiB and contributes no view of its own, so it is not a hub console - it is
+# the piece that makes "run opencode in VS Code" behave like an integration.
+OPENCODE_EXTENSION="sst-dev.opencode"
+
+# Where the config merge below writes. Global rather than project-level
+# because a hub URL describes this machine, not one repository.
+EDITOR_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+
+DEFAULT_MCP_URL="http://127.0.0.1:8099/mcp"
+
+# Set by main's argument loop; `set -u` means it has to exist even when no
+# --editor flag was given.
+EDITOR_TARGET=""
+
+# find_editor_cli: the first VS Code flavoured CLI that can actually install an
+# extension. Cursor is not in that list on purpose: its `cursor` command here
+# is the agent CLI, which refuses to report a version and offers no
+# --install-extension, so probing it would install nothing and say nothing.
+find_editor_cli() {
+    for _candidate in code codium; do
+        if has_cmd "$_candidate" &&
+            "$_candidate" --help 2>&1 | grep -qi -- "--install-extension"; then
+            echo "$_candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+install_editor_extension() {
+    _cli=$1
+    # --list-extensions prints lowercase ids; match exactly, case-insensitively,
+    # so a longer id that merely starts with ours does not read as installed.
+    if "$_cli" --list-extensions 2>/dev/null | grep -qix -- "$OPENCODE_EXTENSION"; then
+        log "$OPENCODE_EXTENSION already installed in $_cli"
+        return 0
+    fi
+    log "installing $OPENCODE_EXTENSION into $_cli..."
+    if "$_cli" --install-extension "$OPENCODE_EXTENSION" >/dev/null 2>&1; then
+        log "installed $OPENCODE_EXTENSION - reload the window (Ctrl+Shift+P -> Reload Window) to activate it"
+    else
+        # The usual cause is an editor whose extensions directory is managed
+        # elsewhere (a Nix vscode-with-extensions derivation), where a CLI
+        # install cannot write. Not fatal: opencode also self-installs this
+        # extension the first time it runs in the integrated terminal.
+        log "WARNING: $_cli could not install $OPENCODE_EXTENSION; install it from the Extensions view, or just run 'opencode' in the integrated terminal"
+    fi
+}
+
+# merge_opencode_config: add/refresh the hub's mcp entry in the global
+# opencode.json without touching any other key. Merging rather than writing the
+# file is the whole point - that file carries the user's providers, agents and
+# plugins, and overwriting it would be exactly the host damage this script
+# promises not to do. Round-tripping JSON reflows formatting and key order.
+merge_opencode_config() {
+    _url=$1
+    _dir=$EDITOR_CONFIG_DIR
+    _file="$_dir/opencode.json"
+
+    mkdir -p "$_dir" 2>/dev/null || {
+        log "WARNING: cannot create $_dir; skipping the MCP wiring"
+        return 0
+    }
+    [ -f "$_file" ] || printf '{}' >"$_file" 2>/dev/null || {
+        log "WARNING: cannot write $_file; skipping the MCP wiring"
+        return 0
+    }
+
+    _out=$(mktemp) || return 0
+    # The token is only forwarded when the caller already exported it; the
+    # private listener is unauthenticated by default, and writing a secret into
+    # a config file is not something to do unasked.
+    OPENCODE_MCP_URL="$_url" \
+    OPENCODE_MCP_TOKEN="${MCP_SWITCHBOARD_PRIVATE_TOKEN:-}" \
+        _merge_json "$_file" "$_out" || {
+        rm -f "$_out"
+        log "WARNING: could not merge $_file (it may not be valid JSON); leaving it untouched"
+        log "  add this by hand under \"mcp\": {\"switchboard\": {\"type\": \"remote\", \"url\": \"$_url\", \"enabled\": true}}"
+        return 0
+    }
+    if cat "$_out" >"$_file" 2>/dev/null; then
+        log "wired opencode -> $_url ($_file)"
+    else
+        log "WARNING: could not write $_file"
+    fi
+    rm -f "$_out"
+}
+
+# _merge_json: pick whichever interpreter is on PATH. Both exist in this
+# script's normal environment (node is what it bootstraps), but the nix-shell
+# path keeps node inside the nix shell rather than on our PATH, so python3 is
+# the fallback and printing the snippet is the last resort.
+_merge_json() {
+    _in=$1
+    _out=$2
+    if has_cmd node; then
+        node -e '
+            const fs = require("fs");
+            const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) throw new Error("not an object");
+            cfg.mcp = (cfg.mcp && typeof cfg.mcp === "object") ? cfg.mcp : {};
+            const entry = { type: "remote", url: process.env.OPENCODE_MCP_URL, enabled: true };
+            if (process.env.OPENCODE_MCP_TOKEN) entry.headers = { Authorization: "Bearer " + process.env.OPENCODE_MCP_TOKEN };
+            cfg.mcp.switchboard = entry;
+            fs.writeFileSync(process.argv[2], JSON.stringify(cfg, null, 2) + "\n");
+        ' "$_in" "$_out" 2>/dev/null
+    elif has_cmd python3; then
+        python3 - "$_in" "$_out" <<'PY' 2>/dev/null
+import json, os, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+except Exception:
+    sys.exit(1)
+if not isinstance(cfg, dict):
+    sys.exit(1)
+mcp = cfg.get("mcp")
+if not isinstance(mcp, dict):
+    mcp = {}
+entry = {"type": "remote", "url": os.environ["OPENCODE_MCP_URL"], "enabled": True}
+token = os.environ.get("OPENCODE_MCP_TOKEN") or ""
+if token:
+    entry["headers"] = {"Authorization": f"Bearer {token}"}
+mcp["switchboard"] = entry
+cfg["mcp"] = mcp
+with open(sys.argv[2], "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PY
+    else
+        return 1
+    fi
+}
+
+# setup_editor: --editor=code. Runs before the client launches, because it is
+# one-time host setup; the client itself stays what it is - a tunnel that
+# listens on nothing and touches only what mcp.json names.
+#
+# Why opencode is detected but never installed: it is very likely already
+# managed declaratively (on this project's author's machine it comes from the
+# NixOS system closure), and ~/.local/bin sits ahead of /run/current-system/sw
+# bin, so a per-user install would silently shadow the managed copy - and
+# `opencode upgrade` would then mutate the wrong binary while nixos-rebuild
+# quietly disagreed about which one was current. Reporting beats installing.
+setup_editor() {
+    case "$EDITOR_TARGET" in
+        "" | none) return 0 ;;
+        code) ;;
+        *) die "--editor must be 'code' or 'none' (got '$EDITOR_TARGET')" ;;
+    esac
+
+    if has_cmd opencode; then
+        log "opencode found: $(command -v opencode)"
+    else
+        log "opencode not found - install it for this machine (with Nix: 'nix profile install nixpkgs#opencode'); not installing it from here, so a declaratively managed copy is never shadowed"
+    fi
+
+    _cli=$(find_editor_cli) || {
+        log "WARNING: no VS Code CLI with --install-extension found; skipped the extension"
+        _cli=""
+    }
+    if [ -n "$_cli" ]; then
+        install_editor_extension "$_cli"
+    fi
+
+    merge_opencode_config "${MCP_SWITCHBOARD_MCP_URL:-$DEFAULT_MCP_URL}"
+
+    log "in VS Code: Ctrl+Escape opens the OpenCode TUI and shares your current selection; use @File#L37-42 to pin a range"
+    log "narrow the endpoint to this machine only if you prefer: ${MCP_SWITCHBOARD_MCP_URL:-$DEFAULT_MCP_URL}/host/$(hostname 2>/dev/null || echo '<label>')"
+    # Plain expansion, deliberately: $(...) would *run* the CLI, and `code`
+    # with no arguments opens an editor window instead of printing a revert hint.
+    _revert_cli=${_cli:-code}
+    log "revert: $_revert_cli --uninstall-extension $OPENCODE_EXTENSION, and delete the switchboard entry from $EDITOR_CONFIG_DIR/opencode.json"
+}
+
 main() {
     ensure_ca_bundle
+
+    # Consume this script's own --editor flag; every other argument is kept,
+    # in order, for the client CLI at the end, whose parser rejects anything it
+    # does not know. POSIX sh has no arrays, so surviving arguments are rotated
+    # onto the tail of the positional list while the head is examined - and it
+    # has to happen here rather than in a helper, because a function receives
+    # its own "$@" and the caller's list would come back unfiltered.
+    _remaining=$#
+    while [ "$_remaining" -gt 0 ]; do
+        _arg=$1
+        shift
+        _remaining=$((_remaining - 1))
+        case "$_arg" in
+            --editor)
+                EDITOR_TARGET=${1:-}
+                [ -n "$EDITOR_TARGET" ] || die "--editor requires a value (code, none)"
+                shift
+                _remaining=$((_remaining - 1))
+                ;;
+            --editor=*)
+                EDITOR_TARGET=${_arg#--editor=}
+                ;;
+            *)
+                set -- "$@" "$_arg"
+                ;;
+        esac
+    done
 
     # Releases are rolling dev builds published from every commit to main (no
     # tags), so pre-release resolution has to be allowed explicitly or uvx
     # will refuse to consider any version at all.
+    _via_nix=0
     if has_cmd npx && has_cmd uvx; then
         log "npx and uvx already on PATH, nothing to bootstrap"
-        exec uvx --prerelease allow "$PACKAGE_NAME" "$@"
+    elif has_cmd nix; then
+        log "npx and/or uvx missing; using 'nix shell' to provide them for this run only"
+        _via_nix=1
+    else
+        log "nix not available; installing missing tools natively (no sudo, per-user only)"
+
+        if ! has_cmd uvx; then
+            install_uv_natively
+        fi
+
+        if ! has_cmd npx; then
+            install_node_natively
+        fi
+
+        has_cmd npx || die "npx still not available after installation attempts"
+        has_cmd uvx || die "npx still not available after installation attempts"
     fi
 
-    if has_cmd nix; then
-        log "npx and/or uvx missing; using 'nix shell' to provide them for this run only"
+    # After the bootstrap, so node exists for the config merge where possible,
+    # and before the exec, so it happens even on a first-ever run.
+    setup_editor
+
+    if [ "$_via_nix" -eq 1 ]; then
         exec nix shell nixpkgs#nodejs nixpkgs#uv --command uvx --prerelease allow "$PACKAGE_NAME" "$@"
     fi
-
-    log "nix not available; installing missing tools natively (no sudo, per-user only)"
-
-    if ! has_cmd uvx; then
-        install_uv_natively
-    fi
-
-    if ! has_cmd npx; then
-        install_node_natively
-    fi
-
-    has_cmd npx || die "npx still not available after installation attempts"
-    has_cmd uvx || die "uvx still not available after installation attempts"
-
     exec uvx --prerelease allow "$PACKAGE_NAME" "$@"
 }
 

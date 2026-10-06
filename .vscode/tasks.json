@@ -99,6 +99,16 @@
       "detail": "The acceptance suite runs a real client against the compiled hub, so it builds the binary first."
     },
     {
+      "label": "Switchboard: agent reads",
+      "type": "shell",
+      "command": "direnv exec \"${workspaceFolder}\" bash -c 'python3 tools/agent-reads.py'",
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "panel": "dedicated", "group": "switchboard" },
+      "detail": "Polls the hub's call log and rewrites .harness/agent-reads.md: open that file in a Markdown preview to watch which files the agent reads. Needs the hub task running."
+    },
+    {
       "label": "Build: container image",
       "type": "shell",
       "command": "docker build -t mcp-switchboard-hub:dev .",

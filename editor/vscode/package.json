@@ -1,0 +1,53 @@
+{
+  "name": "switchboard-citations",
+  "displayName": "Switchboard: selection to chat",
+  "description": "Sends the current editor selection into a Switchboard chat's draft as an attributed citation. Talks to the hub's local console API directly.",
+  "version": "0.0.1",
+  "publisher": "mcp-switchboard-local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.94.0"
+  },
+  "categories": ["Other"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "switchboard.sendSelectionToChat",
+        "title": "Switchboard: Send Selection to Chat Draft"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "switchboard.sendSelectionToChat",
+        "key": "ctrl+alt+l",
+        "mac": "cmd+alt+l",
+        "when": "editorHasSelection"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "switchboard.sendSelectionToChat",
+          "when": "editorHasSelection",
+          "group": "switchboard@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Switchboard",
+      "properties": {
+        "switchboard.hubUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8099",
+          "description": "The hub's private console/API listener (loopback). Do not point this at the public tunnel."
+        },
+        "switchboard.token": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token for the private listener, matching MCP_SWITCHBOARD_PRIVATE_TOKEN on the hub. Leave empty when the hub has no token."
+        }
+      }
+    }
+  }
+}
