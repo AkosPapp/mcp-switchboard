@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import os
 import re
 import sys
@@ -142,28 +143,26 @@ class Sandbox:
         return rel if rel.startswith("/") else f"{self.path}/{rel}"
 
     def run(self, command: str, cwd: str | None = None, timeout: int = 120) -> tuple[int, str, str]:
-        out = self.call("run_command", {"command": command, "cwd": cwd or self.path, "timeout": timeout},
+        out = self.call("bash", {"command": command, "cwd": cwd or self.path, "timeout": timeout},
                         timeout=timeout + 30)
         return int(out.get("exit_code", -1)), out.get("stdout", ""), out.get("stderr", "")
 
     def write(self, rel: str, content: str) -> None:
-        out = self.call("file_write", {"path": self.abs(rel), "content": content})
+        out = self.call("write", {"path": self.abs(rel), "content": content})
         if out.get("success") is False:
-            raise ToolError(out.get("message", "file_write failed"))
+            raise ToolError(out.get("message", "write failed"))
 
     def read(self, rel: str) -> str | None:
-        """File text, or None if it does not exist / cannot be read."""
-        text, offset = "", 0
-        while True:
-            try:
-                out = self.call("file_read", {"path": self.abs(rel), "offset": offset})
-            except ToolError:
-                return None
-            chunk = out.get("raw_text", "")
-            text += chunk
-            if not out.get("truncated") or not chunk:
-                return text
-            offset += len(chunk)
+        """Exact file bytes as text, or None if the file does not exist.
+
+        `bash cat` rather than the `read` tool: read line-numbers and can cut
+        long lines, which is right for an agent and wrong for a verifier.
+        """
+        try:
+            code, text, _ = self.run(f"cat -- {shlex.quote(self.abs(rel))}")
+        except ToolError:
+            return None
+        return text if code == 0 else None
 
     def remove(self) -> None:
         if "eval-sandbox" in self.path:  # never rm -rf something we did not make
@@ -171,7 +170,7 @@ class Sandbox:
 
 
 def discover_root(hub: Hub, cid: str, server: str) -> str:
-    rec = hub.post(f"/api/connections/{cid}/servers/{server}/tools/run_command/call",
+    rec = hub.post(f"/api/connections/{cid}/servers/{server}/tools/bash/call",
                    {"arguments": {"command": "pwd"}}, timeout=60)
     root = extract_payload(rec).get("stdout", "").strip()
     if not root.startswith("/"):
@@ -459,7 +458,7 @@ def pick_connection(conns: list[dict], label: str | None, server: str) -> tuple[
     def harness_of(c):
         for s in c.get("servers", []):
             names = {t.get("name") for t in s.get("tools", [])}
-            if s.get("name") == server or "run_command" in names:
+            if s.get("name") == server or "bash" in names:
                 return s.get("name")
         return None
     if label:
@@ -467,7 +466,7 @@ def pick_connection(conns: list[dict], label: str | None, server: str) -> tuple[
             if c.get("label") == label:
                 h = harness_of(c)
                 if not h:
-                    raise EvalError(f"client {label!r} has no harness server (no server named {server!r} or with run_command)")
+                    raise EvalError(f"client {label!r} has no harness server (no server named {server!r} or with bash)")
                 return c, h
         raise EvalError(f"no connected client labelled {label!r}; connected: {[c.get('label') for c in conns]}")
     for c in conns:

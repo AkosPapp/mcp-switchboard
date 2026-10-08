@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -38,6 +39,7 @@ const (
 	TypeRestart       = "restart"
 	TypeError         = "error"
 	TypeContextUpdate = "context_update"
+	TypeSkillsUpdate  = "skills_update"
 )
 
 // Server lifecycle states, as reported by the client.
@@ -139,6 +141,68 @@ func SanitizeInstructions(in []InstructionFile) []InstructionFile {
 	return out
 }
 
+// Limits on skills scanned on the client host (hello.client.skills and the
+// skills_update frame). Same discipline as instructions: untrusted input,
+// counts and sizes capped hub-side, junk dropped rather than refused.
+const (
+	MaxSkillFiles      = 200
+	MaxSkillFileRunes  = 64 * 1024
+	MaxSkillTotalRunes = 256 * 1024
+	MaxSkillNameRunes  = 64
+	MaxSkillPathRunes  = 256
+)
+
+var skillNameRX = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// SkillFile is one SKILL.md found on a client host. Name is validated against
+// the skill-name grammar (and the client guarantees it equals the directory
+// name); Path and Source are display labels, collapsed to single lines;
+// Content is the raw SKILL.md text the hub can store and show.
+type SkillFile struct {
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Source      string `json:"source"`
+	Description string `json:"description"`
+	Content     string `json:"content"`
+}
+
+// SanitizeSkills bounds an untrusted skill list: invalid names and empty
+// bodies are dropped, fields are rune-capped, and the set is capped at
+// MaxSkillFiles entries and MaxSkillTotalRunes of body content. It never
+// fails: junk just shrinks. Earlier entries win a name clash.
+func SanitizeSkills(in []SkillFile) []SkillFile {
+	out := make([]SkillFile, 0, len(in))
+	seen := map[string]bool{}
+	total := 0
+	for _, s := range in {
+		if len(out) >= MaxSkillFiles {
+			break
+		}
+		name := capRunes(strings.TrimSpace(s.Name), MaxSkillNameRunes)
+		if !skillNameRX.MatchString(name) || seen[name] {
+			continue
+		}
+		body := capRunes(s.Content, MaxSkillFileRunes)
+		if body == "" {
+			continue
+		}
+		n := len([]rune(body))
+		if total+n > MaxSkillTotalRunes {
+			break
+		}
+		total += n
+		seen[name] = true
+		out = append(out, SkillFile{
+			Name:        name,
+			Path:        capRunes(strings.Join(strings.Fields(s.Path), " "), MaxSkillPathRunes),
+			Source:      capRunes(strings.Join(strings.Fields(s.Source), " "), MaxSkillPathRunes),
+			Description: capRunes(strings.Join(strings.Fields(s.Description), " "), 1024),
+			Content:     body,
+		})
+	}
+	return out
+}
+
 // ClientEnvironment describes where a client runs (dev container, direnv, nix
 // shell, ...). Kinds are open strings: an unknown kind from a newer client is
 // preserved, not rejected.
@@ -162,6 +226,7 @@ type ClientInfo struct {
 	Environment      *ClientEnvironment `json:"environment,omitempty"`
 	Instructions     []InstructionFile  `json:"instructions,omitempty"`
 	EnvironmentBrief string             `json:"environment_brief,omitempty"`
+	Skills           []SkillFile        `json:"skills,omitempty"`
 }
 
 // UnmarshalJSON decodes the client object, treating environment, instructions
@@ -176,6 +241,7 @@ func (c *ClientInfo) UnmarshalJSON(data []byte) error {
 		Environment      json.RawMessage `json:"environment"`
 		Instructions     json.RawMessage `json:"instructions"`
 		EnvironmentBrief json.RawMessage `json:"environment_brief"`
+		Skills           json.RawMessage `json:"skills"`
 	}
 	var p plain
 	if err := json.Unmarshal(data, &p); err != nil {
@@ -204,6 +270,14 @@ func (c *ClientInfo) UnmarshalJSON(data []byte) error {
 			slog.Warn("dropping malformed hello.client.environment_brief", "error", err)
 		} else {
 			c.EnvironmentBrief = SanitizeEnvironmentBrief(brief)
+		}
+	}
+	if len(p.Skills) > 0 && string(p.Skills) != "null" {
+		var in []SkillFile
+		if err := json.Unmarshal(p.Skills, &in); err != nil {
+			slog.Warn("dropping malformed hello.client.skills", "error", err)
+		} else {
+			c.Skills = SanitizeSkills(in)
 		}
 	}
 	return nil
@@ -299,6 +373,11 @@ type Frame struct {
 	// replaces it, empty string clears it.
 	Instructions     []InstructionFile `json:"instructions,omitempty"`
 	EnvironmentBrief *string           `json:"environment_brief,omitempty"`
+
+	// skills_update (client->hub): the live replacement for hello's
+	// client.skills. The list is always wholesale; absent means the same frame
+	// type was not sent, and an empty list clears the hub-side copy.
+	Skills []SkillFile `json:"skills,omitempty"`
 
 	// mcp, server_state, restart, error
 	Server   string          `json:"server,omitempty"`

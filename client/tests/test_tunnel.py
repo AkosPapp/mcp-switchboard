@@ -420,3 +420,89 @@ def test_tls_context_keeps_the_system_store_too(monkeypatch, tmp_path):
     monkeypatch.setenv("SSL_CERT_FILE", str(pem))
     assert len(tunnel._tls_context().get_ca_certs()) >= 1
     assert baseline >= 1
+
+
+# -- label-replacement damping (eviction-tennis guard) --------------------
+
+
+def _replacement_ws():
+    """A session that acks, learns it was replaced, and drops — like a second
+    live client on the same label sees, over and over."""
+    return FakeWebSocket([
+        protocol.hello_ack("c1", "hub", "0.1"),
+        protocol.error('label "legion5" is already connected from a newer connection; this one is replaced', ""),
+    ])
+
+
+async def test_replaced_after_ack_is_flagged_not_fatal():
+    ws = FakeWebSocket([
+        protocol.hello_ack("c1", "hub", "0.1"),
+        protocol.error('label "legion5" is already connected from a newer connection', ""),
+    ])
+    connection, _ = make_connection([ws], max_retries=1)
+    await connection.run()
+    # The point: post-ack "already connected" never raises (the run loop ran
+    # to its normal give-up), and it flags the session as churn instead.
+    assert connection._replaced is True
+
+
+async def test_backoff_keeps_growing_across_fast_replacements():
+    """Three ack-then-replaced sessions in a row must grow the delay (attempt
+    1,2,3), not restart at the base every time like plain success would."""
+    delays = []
+    connection, _ = make_connection([], max_retries=4)
+    connection.settings.reconnect_delay = 0.5
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+        return False
+
+    connection._sleep_or_stop = fake_sleep
+    await connection.run()
+    assert connection.failure is not None and "giving up" in connection.failure
+    assert len(delays) == 3
+    assert delays[1] > delays[0] and delays[2] > delays[1], f"backoff did not grow: {delays}"
+
+
+class _HeldThenClose(FakeWebSocket):
+    """Acks, holds the session open, then the stream ends (a clean drop)."""
+
+    def __init__(self, hold):
+        super().__init__([protocol.hello_ack("c1", "hub", "0.1")])
+        self._hold = hold
+
+    async def __anext__(self):
+        if self.inbound:
+            return self.inbound.pop(0)
+        await asyncio.sleep(self._hold)
+        raise StopAsyncIteration
+
+
+def connection_stop(connection):
+    connection.request_stop()
+
+
+async def test_stable_session_re_bases_the_backoff(monkeypatch):
+    monkeypatch.setattr(tunnel_mod, "STABLE_CONNECTION", 0.05)
+    delays = []
+    sessions = [
+        _replacement_ws(),            # churn 1 -> attempt 1
+        _HeldThenClose(0.3),          # holds past the stability window
+        _replacement_ws(),            # churn 2 -> attempt was reset -> smallest delay
+        _replacement_ws(),            # exhausts the retry budget
+    ]
+    connection, _ = make_connection(sessions, max_retries=3)
+    connection.settings.reconnect_delay = 0.5
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+        return len(delays) >= 3
+
+    connection._sleep_or_stop = fake_sleep
+    await connection.run()
+    assert len(delays) == 3
+    # Without the stable-session rule these would be ~1x, 2x, 4x of the base.
+    # With it: the churn before the stable session is 1x, the drop after the
+    # stable session is re-based to ~1x again, and plain churn grows from there.
+    assert delays[1] < delays[0] * 1.5, f"no re-base after the stable session: {delays}"
+    assert delays[2] > delays[1], f"growth must simply start over: {delays}"

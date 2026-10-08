@@ -53,6 +53,7 @@ def test_frame_type_constants_match_the_manifest() -> None:
         protocol.RESTART,
         protocol.ERROR,
         protocol.CONTEXT_UPDATE,
+        protocol.SKILLS_UPDATE,
     }
     assert declared == set(MANIFEST["frames"])
 
@@ -60,12 +61,16 @@ def test_frame_type_constants_match_the_manifest() -> None:
 # One builder call per frame, with arguments chosen so that every optional field is
 # populated - a builder that silently dropped a field would otherwise pass.
 INSTRUCTION_FILES = [{"path": "AGENTS.md", "content": "# rules\n"}]
+SKILLS = [
+    {"name": "pdf", "path": ".claude/skills/pdf/SKILL.md", "source": "project:.claude/skills",
+     "description": "PDF work", "content": "---\nname: pdf\ndescription: PDF work\n---\nbody\n"},
+]
 
 BUILDERS = {
     "hello": lambda: protocol.hello(
         "c", "0.0.0", "i", "lab", [{"name": "git"}],
         {"kinds": ["direnv"], "workspace": "/w"}, INSTRUCTION_FILES,
-        environment_brief="user: uid=1 me\n",
+        environment_brief="user: uid=1 me\n", skills=SKILLS,
     ),
     "hello_ack": lambda: protocol.hello_ack("cid", "hub", "0.0.0"),
     "mcp": lambda: protocol.mcp("git", {"jsonrpc": "2.0"}),
@@ -73,6 +78,7 @@ BUILDERS = {
     "restart": lambda: protocol.restart("git"),
     "error": lambda: protocol.error("bad", "git"),
     "context_update": lambda: protocol.context_update(INSTRUCTION_FILES),
+    "skills_update": lambda: protocol.skills_update(SKILLS),
 }
 
 
@@ -96,16 +102,18 @@ def test_every_builder_is_covered() -> None:
 
 def test_hello_client_optional_fields_are_declared_and_emitted() -> None:
     declared = MANIFEST["frames"]["hello"]["clientOptional"]
-    assert set(declared) >= {"environment", "instructions", "environment_brief"}
+    assert set(declared) >= {"environment", "instructions", "environment_brief", "skills"}
     client = protocol.hello(
-        "c", "0.0.0", "i", "lab", [], {"kinds": []}, INSTRUCTION_FILES, environment_brief="host: x\n"
+        "c", "0.0.0", "i", "lab", [], {"kinds": []}, INSTRUCTION_FILES,
+        environment_brief="host: x\n", skills=SKILLS,
     )["client"]
     assert set(client) <= {"name", "version", "instance", "label"} | set(declared)
     assert client["environment"] == {"kinds": []}
     assert client["instructions"] == INSTRUCTION_FILES
     assert client["environment_brief"] == "host: x\n"
+    assert client["skills"] == SKILLS
     omitted = protocol.hello("c", "0.0.0", "i", "lab", [])["client"]
-    assert not {"environment", "instructions", "environment_brief"} & set(omitted)
+    assert not {"environment", "instructions", "environment_brief", "skills"} & set(omitted)
 
 
 def test_context_update_fields_are_independently_optional() -> None:

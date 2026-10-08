@@ -14,9 +14,16 @@ import {
   type Profile,
   type ProfileInput,
 } from "./api";
+import HostSkillsPane from "./HostSkillsPane";
+import PersonaPane from "./PersonaPane";
 import ProfileForm from "./ProfileForm";
 import SkillPane from "./SkillPane";
 import { useSkills, type Skill } from "./skills";
+
+// Sidebar pages that live at /prompts/<special> next to the profile ids
+// (store ids never look like these words).
+const PERSONA = "persona";
+const HOSTS = "hosts";
 
 type Selection = { kind: "new" } | { kind: "edit"; id: string } | null;
 
@@ -98,9 +105,10 @@ export default function PromptsView() {
   };
   const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
+  const special = profileId === PERSONA || profileId === HOSTS ? profileId : null;
   const selection: Selection = creating
     ? { kind: "new" }
-    : profileId
+    : profileId && !special
       ? { kind: "edit", id: profileId }
       : null;
   const [error, setError] = useState<string | null>(null);
@@ -124,11 +132,11 @@ export default function PromptsView() {
   useEffect(() => {
     if (checked.current || !profiles.data) return;
     checked.current = true;
-    if (profileId && !profiles.data.some((p) => p.id === profileId)) {
+    if (profileId && !special && !profiles.data.some((p) => p.id === profileId)) {
       forgetTab("/prompts");
       navigate("/prompts", { replace: true });
     }
-  }, [profiles.data, profileId, navigate]);
+  }, [profiles.data, profileId, special, navigate]);
 
   const save = (input: ProfileInput) => {
     setError(null);
@@ -174,7 +182,7 @@ export default function PromptsView() {
       <aside
         className={[
           "min-h-0 flex-col border-border md:flex md:w-96 md:border-r",
-          selection !== null || skillSelected ? "hidden" : "flex flex-1",
+          selection !== null || skillSelected || special ? "hidden" : "flex flex-1",
         ].join(" ")}
       >
         <div className="flex items-center justify-between gap-2 border-b border-border p-2">
@@ -220,12 +228,36 @@ export default function PromptsView() {
           {skillList.map((k) => (
             <SkillRow key={k.id} skill={k} selected={skillId === k.id} onSelect={() => selectSkill({ kind: "edit", id: k.id })} />
           ))}
+
+          <div className="flex items-center justify-between gap-2 px-1 pt-3">
+            <h2 className="text-sm font-semibold">The hub itself</h2>
+          </div>
+          <button
+            type="button"
+            onClick={() => navigate("/prompts/persona")}
+            aria-current={special === PERSONA ? "true" : undefined}
+            className={["block min-h-[44px] w-full rounded px-3 py-2 text-left transition-colors", special === PERSONA ? "bg-accent/15" : "hover:bg-raised"].join(" ")}
+          >
+            <span className="text-sm font-medium">Persona prompt</span>
+            <p className="truncate text-xs text-muted">base.md — the identity leading every chat&apos;s system prompt</p>
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate("/prompts/hosts")}
+            aria-current={special === HOSTS ? "true" : undefined}
+            className={["block min-h-[44px] w-full rounded px-3 py-2 text-left transition-colors", special === HOSTS ? "bg-accent/15" : "hover:bg-raised"].join(" ")}
+          >
+            <span className="text-sm font-medium">Host skills</span>
+            <p className="truncate text-xs text-muted">SKILL.md files scanned on your clients; import to manage</p>
+          </button>
         </div>
       </aside>
 
       <section
-        className={["min-h-0 flex-1 overflow-auto", selection === null && !skillSelected ? "hidden md:block" : "block"].join(" ")}
+        className={["min-h-0 flex-1 overflow-auto", selection === null && !skillSelected && !special ? "hidden md:block" : "block"].join(" ")}
       >
+        {special === PERSONA && <PersonaPane onBack={() => navigate("/prompts")} />}
+        {special === HOSTS && <HostSkillsPane onBack={() => navigate("/prompts")} />}
         {skillSelected && (
           <SkillPane
             key={currentSkill ? `${currentSkill.id}:${currentSkill.updatedAt}` : "new"}

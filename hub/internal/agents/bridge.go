@@ -63,7 +63,15 @@ func (m *Manager) bridgeOf(ctx context.Context, chatID string) (*store.Chat, err
 // the text to the external session; scheduling a hub agent here would run a
 // second brain on the same window.
 func (m *Manager) postBridge(ctx context.Context, chat *store.Chat, in PostInput) (*PostResult, error) {
-	msg := store.Message{ID: store.NewID(), ChatID: chat.ID, Role: store.RoleUser, Content: mustJSON(in.Content)}
+	// Thread onto the active leaf the way the plugin will thread its reply:
+	// as roots both messages would be single-message paths past the next
+	// append, invisible to GET /messages (and to the plugin's own polling)
+	// the moment anything else lands.
+	parent := strPtrIf(in.ParentID)
+	if parent == nil {
+		parent = leafPtr(chat)
+	}
+	msg := store.Message{ID: store.NewID(), ChatID: chat.ID, Role: store.RoleUser, Content: mustJSON(in.Content), ParentID: parent}
 	if in.IdempotencyKey != "" {
 		existing, claimed, err := m.st.ClaimIdempotencyKey(ctx, in.IdempotencyKey, msg.ID)
 		if err != nil {
@@ -129,7 +137,7 @@ func (m *Manager) AppendBridge(ctx context.Context, chatID string, in BridgeAppe
 	}
 	msg := store.Message{
 		ID: store.NewID(), ChatID: chat.ID, Role: role,
-		Content: mustJSON(content), Sender: sender,
+		Content: mustJSON(content), Sender: sender, ParentID: leafPtr(chat),
 	}
 	saved, err := m.st.AppendMessage(ctx, msg)
 	if err != nil {
@@ -159,4 +167,20 @@ func (m *Manager) BridgeQuestion(ctx context.Context, chatID, text string) (push
 	for range errs {
 	}
 	return true, nil
+}
+
+// strPtrIf returns a pointer to s unless s is empty.
+func strPtrIf(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// leafPtr points at the chat's active leaf, or nil for an empty thread.
+func leafPtr(chat *store.Chat) *string {
+	if chat.ActiveLeafID == nil || *chat.ActiveLeafID == "" {
+		return nil
+	}
+	return chat.ActiveLeafID
 }

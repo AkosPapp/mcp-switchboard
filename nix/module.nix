@@ -120,6 +120,9 @@ let
   // lib.optionalAttrs cfg.loki.enable {
     LOKI_URL = cfg.loki.url;
     LOKI_LABELS = renderLabels cfg.loki.labels;
+  }
+  // lib.optionalAttrs cfg.public.api.enable {
+    PUBLIC_API = "true";
   };
 
   # Expected to be *paths* to files provisioned outside Nix. A literal here is
@@ -129,6 +132,9 @@ let
   }
   // lib.optionalAttrs (cfg.privateToken != null) {
     PRIVATE_TOKEN = cfg.privateToken;
+  }
+  // lib.optionalAttrs (cfg.public.api.token != null) {
+    PUBLIC_API_TOKEN = cfg.public.api.token;
   };
 
   providerEnv = lib.toUpper (lib.replaceStrings [ "-" ] [ "_" ] (toString cfg.llm.provider));
@@ -296,6 +302,34 @@ in
         Optional bearer token for the private listener. Same path-or-literal
         rule as {option}`services.mcp-switchboard.tunnelToken`; prefer a path.
       '';
+    };
+
+    public = {
+      api = {
+        enable = mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Also mount `/api` on the tunnel listener, behind a bearer token,
+            so a client that can dial the tunnel - e.g. the opencode bridge
+            plugin on another machine - can drive the chat API remotely
+            without exposing the private listener. Everything else about
+            `/api` assumes the private listener's trust level, so think of
+            this as widening the public surface deliberately.
+          '';
+        };
+        token = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          example = "/run/secrets/mcp-switchboard/api-token";
+          description = ''
+            Bearer token accepted on the public `/api`. When null the tunnel
+            token is reused, keeping one secret for the whole public surface.
+            Same path-or-literal rule as
+            {option}`services.mcp-switchboard.tunnelToken`; prefer a path.
+          '';
+        };
+      };
     };
 
     logLevel = mkOption {

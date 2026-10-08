@@ -25,9 +25,9 @@ private-listener token), `--client LABEL` (default: first connection with a harn
 
 ## What a run does
 
-For every (model, task): discover the harness root on the client (`run_command pwd` through
+For every (model, task): discover the harness root on the client (`bash pwd` through
 `POST /api/connections/{cid}/servers/{server}/tools/{tool}/call`), create `<root>/eval-sandbox/<tag>/<model>-<task>`,
-write the task's setup files with `file_write`, create a chat (default or `--profile` prompt, model pinned, that one
+write the task's setup files with `write`, create a chat (default or `--profile` prompt, model pinned, that one
 client), send the prompt, poll `GET /api/runs/{id}` until it ends, collect metrics, run the verifier through the
 same manual-call endpoint (so remote clients work), then delete the chat and sandbox unless `--keep`.
 

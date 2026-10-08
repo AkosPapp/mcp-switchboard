@@ -33,7 +33,7 @@ import { tool } from "@opencode-ai/plugin";
 const log = (...a) => console.error("[switchboard]", ...a);
 const trim = (x) => (typeof x === "string" ? x.trim() : "");
 
-export function textOf(parts) {
+function textOf(parts) {
   if (!Array.isArray(parts)) return "";
   return parts
     .filter((p) => p && p.type === "text" && typeof p.text === "string")
@@ -43,7 +43,7 @@ export function textOf(parts) {
 }
 
 // "yes/allow/…" vs "no/deny/…", first word wins.
-export function parsesVerdict(text) {
+function parsesVerdict(text) {
   const t = trim(text).toLowerCase();
   if (!t) return null;
   if (/^(y|yes|ok|allow|approve|proceed|do it)\b/.test(t)) return "allow";
@@ -73,13 +73,27 @@ async function saveState(directory, label, obj) {
   }
 }
 
-export async function switchboardHub({ client, directory }, opts = {}) {
+// opencode can initialise the same plugin file more than once per process
+// (observed: double INIT from a config-dir scan). Two live instances mean two
+// pollers racing on one cursor and duplicate mirrors, so a second init for the
+// same (directory, hub) pair returns an inert plugin. Distinct directories keep
+// their own bridges.
+const LOADED = "__switchboardHubLoadedDirs";
+
+async function switchboardHub({ client, directory }, opts = {}) {
   const cfg = opts || {};
+  const hubKey = `${directory} -> ${(trim(cfg.hub) || trim(process.env.MCP_SWITCHBOARD_HUB_URL) || "").replace(/\/+$/, "")}`;
+  const loaded = (globalThis[LOADED] ??= new Set());
+  if (loaded.has(hubKey)) {
+    log("duplicate init ignored for", hubKey);
+    return {};
+  }
   const hub = (trim(cfg.hub) || trim(process.env.MCP_SWITCHBOARD_HUB_URL) || "").replace(/\/+$/, "");
   if (!hub) {
     log("no hub configured; plugin idle");
     return {};
   }
+  loaded.add(hubKey);
   const token = trim(cfg.token) || trim(process.env.MCP_SWITCHBOARD_PRIVATE_TOKEN);
   const label = trim(cfg.label) || basename(directory) || "session";
   const pollMs = Number(cfg.pollMs) > 0 ? Number(cfg.pollMs) : 1500;
@@ -121,6 +135,10 @@ export async function switchboardHub({ client, directory }, opts = {}) {
 
   async function onMessageUpdated(info) {
     if (!info || info.role !== "assistant" || seenMessages.has(info.id)) return;
+    // Claim before awaiting: two message.updated events of one turn overlap,
+    // and both would otherwise fetch, see text and mirror. The claim is
+    // dropped again below whenever nothing was mirrored, so "only mirror once
+    // there is a body" still holds.
     remember(seenMessages, info.id);
     try {
       const { data } = await client.session.messages({ path: { id: info.sessionID } });
@@ -129,8 +147,14 @@ export async function switchboardHub({ client, directory }, opts = {}) {
         .filter((p) => p && p.type === "text" && trim(p.text))
         .map((p) => trim(p.text))
         .join("\n\n");
-      if (body) await mirror("assistant", body);
+      if (!body) {
+        // First update of the turn: no text yet, let a later one try again.
+        seenMessages.delete(info.id);
+        return;
+      }
+      await mirror("assistant", body);
     } catch (e) {
+      seenMessages.delete(info.id);
       log("assistant mirror failed:", e?.message || e);
     }
   }
@@ -198,7 +222,21 @@ export async function switchboardHub({ client, directory }, opts = {}) {
         return;
       }
       try {
-        await client.session.prompt({ path: { id: activeSession }, body: { parts: [{ type: "text", text }] } });
+        const res = await client.session.prompt({ path: { id: activeSession }, body: { parts: [{ type: "text", text }] } });
+        // Turns started from INSIDE the plugin never come back as
+        // message.updated events to this same plugin, so the event mirror
+        // above cannot see them: mirror the reply the prompt directly returns.
+        // client.session.prompt does not throw on API errors.
+        if (res?.error) log("prompt failed:", JSON.stringify(res.error).slice(0, 200));
+        const info = res?.data?.info;
+        if (info && info.role === "assistant" && !seenMessages.has(info.id)) {
+          remember(seenMessages, info.id);
+          const body = (res.data.parts || [])
+            .filter((p) => p && p.type === "text" && trim(p.text))
+            .map((p) => trim(p.text))
+            .join("\n\n");
+          if (body) await mirror("assistant", body);
+        }
       } catch (e) {
         log("prompt failed:", e?.message || e);
       }
@@ -299,4 +337,3 @@ export async function switchboardHub({ client, directory }, opts = {}) {
 }
 
 export default switchboardHub;
-export const server = switchboardHub;

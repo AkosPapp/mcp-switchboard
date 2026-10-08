@@ -16,7 +16,7 @@ def converse(root, calls):
 
     Requests go out in lockstep — each after its predecessor's reply — because
     the server dispatches pending requests concurrently: a batched send would
-    let `run_command "cat a.txt"` race the `file_write` that created the file.
+    let `bash "cat a.txt"` race the `write` that created the file.
 
     stdin stays open until every reply has arrived: closing it early makes the
     server shut down and abandon calls still in flight.
@@ -64,25 +64,31 @@ def replies(tmp_path):
         tmp_path,
         [
             (1, "tools/list", {}),
-            (2, "tools/call", {"name": "file_write", "arguments": {"path": "a.txt", "content": "hi"}}),
-            (3, "tools/call", {"name": "run_command", "arguments": {"command": "cat a.txt"}}),
-            (4, "tools/call", {"name": "file_read", "arguments": {"path": "../nope"}}),
+            (2, "tools/call", {"name": "write", "arguments": {"path": "a.txt", "content": "hi"}}),
+            (3, "tools/call", {"name": "bash", "arguments": {"command": "cat a.txt"}}),
+            (4, "tools/call", {"name": "read", "arguments": {"path": "../nope"}}),
         ],
     )
 
 
 def test_every_tool_has_an_output_schema_and_annotations(replies):
     tools = {t["name"]: t for t in replies[1]["result"]["tools"]}
-    assert len(tools) == 34
+    assert len(tools) == 26
     for name, tool in tools.items():
         assert tool["annotations"]["readOnlyHint"] in (True, False), name
-    assert tools["file_read"]["annotations"]["readOnlyHint"] is True
+    assert tools["read"]["annotations"]["readOnlyHint"] is True
     assert tools["file_delete"]["annotations"]["destructiveHint"] is True
     assert tools["git_push"]["annotations"]["destructiveHint"] is True
-    assert set(tools["run_command"]["outputSchema"]["properties"]) >= {"stdout", "stderr", "exit_code", "timed_out"}
+    assert set(tools["bash"]["outputSchema"]["properties"]) >= {"stdout", "stderr", "exit_code", "timed_out"}
     for w in ("wait_for_start", "wait_for_poll"):
         assert w in tools and tools[w]["outputSchema"] is not None
-    assert "run_bash" not in tools and "list_dir" not in tools
+    # the opencode-shaped names are in; the names they replaced are out
+    for n in ("bash", "read", "write", "edit", "glob", "grep"):
+        assert n in tools, n
+    for gone in ("run_command", "file_read", "file_write", "read_lines", "edit_file", "multi_edit",
+                 "run_python", "ripgrep", "find_files", "dir_list", "tree_of_files", "data_query",
+                 "find_symbol", "find_references"):
+        assert gone not in tools, gone
 
 
 def test_tools_work_over_the_protocol(replies):

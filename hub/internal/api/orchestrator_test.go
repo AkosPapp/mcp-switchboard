@@ -269,6 +269,19 @@ func (f *fakeAgents) UpdateSkill(context.Context, string, agents.SkillUpdate) (*
 }
 func (f *fakeAgents) DeleteSkill(context.Context, string) error { return f.err }
 
+func (f *fakeAgents) ListHostSkills(context.Context) ([]agents.HostSkillView, error) {
+	return nil, f.err
+}
+func (f *fakeAgents) ImportHostSkill(context.Context, string, string) (store.Skill, error) {
+	return store.Skill{}, f.err
+}
+func (f *fakeAgents) RawSkill(context.Context, string) (string, error) { return "", f.err }
+func (f *fakeAgents) PutRawSkill(context.Context, string, string) (*store.Skill, error) {
+	return nil, f.err
+}
+func (f *fakeAgents) PersonaPrompt() (string, error) { return "persona base", f.err }
+func (f *fakeAgents) SetPersonaPrompt(string) error  { return f.err }
+
 var _ agents.Service = (*fakeAgents)(nil)
 
 type orchFixture struct {

@@ -21,7 +21,8 @@ const (
 var todoAnn = &mcp.ToolAnnotations{DestructiveHint: bp(false), OpenWorldHint: bp(false)}
 
 var todoWriteTool = &sbTool{
-	name: todoWriteName,
+	name:  todoWriteName,
+	alias: "todowrite",
 	desc: "Maintain your plan for this chat as a TODO list that the user sees live. Use it for any task with 3 or more steps (skip it for trivial one-step requests). " +
 		"Rewrite the WHOLE list on every call: it replaces the previous list, so include items that are already completed. " +
 		"Keep exactly one item in_progress while you are working (none only when everything is pending or done), " +

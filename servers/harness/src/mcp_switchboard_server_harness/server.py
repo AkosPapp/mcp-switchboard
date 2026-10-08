@@ -13,7 +13,7 @@ set with ``--root`` / ``MCP_SWITCHBOARD_HARNESS_ROOT``), the *scratch* directory
 ``MCP_SWITCHBOARD_HARNESS_SCRATCH``; disposable, not persisted across sessions),
 and the system temp directory (``$TMPDIR``, else ``/tmp``). That set is a
 convention against mistakes and path surprises, **not** a security boundary:
-``run_command``, ``run_python`` and the ``process_*`` tools run arbitrary code as
+``bash`` and the ``process_*`` tools run arbitrary code as
 the launching user with that user's full access — anything they can reach
 (``~/.git-credentials``, your ssh keys, any readable file) is reachable, and the
 file-tool confines deliberately let through exactly what those can write, so the
@@ -29,7 +29,6 @@ import asyncio
 import atexit
 import base64
 import binascii
-import csv
 import difflib
 import fnmatch
 import functools
@@ -47,7 +46,6 @@ import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -65,7 +63,7 @@ DEFAULT_MAX_OUTPUT = 100_000  # characters returned per stream / file read
 MAX_PROCESSES = 16
 PROCESS_BUFFER_LIMIT = 1_000_000  # characters kept per background stream
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv"}
-# Directories a recursive dir_list lists but does not descend into: dependency
+# Directories the built-in search walks list but does not descend into: dependency
 # and cache trees that are huge and never what the caller is after. Naming one
 # as the path itself still lists it.
 _NO_DESCEND = _SKIP_DIRS | {".direnv", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", ".cache", "venv"}
@@ -136,7 +134,7 @@ def _resolve(path: str) -> Path:
     if not (in_root or in_scratch or in_temp):
         raise PermissionError(
             f"{path!r} is outside the allowed locations: root {_root}, scratch {special}, "
-            f"temp {temp} (only the run_* / process_* tools escape; they are unconfined)"
+            f"temp {temp} (only the bash / process_* tools escape; they are unconfined)"
         )
     return resolved
 
@@ -320,24 +318,6 @@ class CommandResult(BaseModel):
     applied_timeout_s: Optional[float] = Field(default=None, description="The timeout actually applied (requests above 3600 are clamped).")
 
 
-class FileReadResult(BaseModel):
-    content: Optional[str] = Field(default=None, description="Base64 of the bytes read; set when binary=true.")
-    raw_text: Optional[str] = Field(default=None, description="UTF-8 text read; set when binary=false.")
-    size: int = Field(description="Total size of the file in bytes.")
-    offset: int = Field(description="Where the read started (bytes for binary, characters for text).")
-    truncated: bool = Field(description="More data remains after this chunk; read again with a larger offset.")
-
-
-class ReadLinesResult(BaseModel):
-    text: str = Field(
-        description="The selected lines joined with newlines, byte-faithful to the file the way file_read is: no per-line trimming, CRLF normalised by text mode, and the file's final newline kept when the selection reaches the end of the file. Paginating without `end` is stitching-safe: consecutive pages concatenate verbatim; an explicit mid-file range `end` has no trailing newline, so join such pages with \"\\n\"."
-    )
-    start: int = Field(description="First line delivered (1-based).")
-    end: int = Field(description="Last line delivered in full (1-based), so resume with start=end+1; start-1 when nothing was delivered.")
-    total_lines: int = Field(description="Total lines in the file.")
-    truncated: bool = Field(description="More lines remain after `end`; read again with start=end+1.")
-
-
 class FileWriteResult(BaseModel):
     success: bool
     message: str
@@ -346,19 +326,6 @@ class FileWriteResult(BaseModel):
 class FileDeleteResult(BaseModel):
     deleted: bool
     message: str
-
-
-class DirEntry(BaseModel):
-    name: str
-    path: str = Field(description="Relative to the root.")
-    size: int
-    is_dir: bool
-    mtime: Optional[str] = Field(default=None, description="Modification time, ISO 8601 UTC.")
-
-
-class DirListResult(BaseModel):
-    entries: List[DirEntry]
-    truncated: bool = Field(default=False, description="More entries exist than `limit`; list a narrower path or raise limit.")
 
 
 class FileMoveResult(BaseModel):
@@ -417,7 +384,7 @@ class WatcherPoll(BaseModel):
 # ---------- Shell, files ---------------------------------------------------
 
 
-async def run_command(
+async def bash(
     command: str,
     cwd: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
@@ -435,7 +402,7 @@ async def run_command(
     output: "full" (default, capped), "head" / "tail" (first / last 100 lines), "grep" (only
     lines matching the regex `pattern`, plus 2 lines of context). When output is cut,
     `output_id` is returned: read the rest with output_read or output_grep.
-    Example: run_command(command="pytest -q", mode="tail")"""
+    Example: bash(command="pytest -q", mode="tail")"""
     _check_mode(mode, pattern)
     merged = {**os.environ, **env} if env else None
     result = await _run(
@@ -457,42 +424,68 @@ async def run_command(
     )
 
 
-def file_read(
-    path: str, binary: bool = False, offset: int = 0, limit: Optional[int] = None
-) -> FileReadResult:
-    """Read a file. With binary=true the bytes come back base64-encoded in `content`; otherwise UTF-8 text in `raw_text`. Output is capped (default 100000): use offset and limit (bytes for binary, characters for text) to page through large files. Paths must stay inside the root, the scratch or the system temp directory. Example: file_read(path="src/main.py")"""
+READ_DEFAULT_LIMIT = 2000  # lines returned by read by default
+READ_MAX_LINE = 2000  # characters of one source line returned by read
+
+
+def read(path: str, offset: Optional[int] = None, limit: Optional[int] = None) -> str:
+    """Read a file or list a directory.
+
+    Files return in `N: ` line-numbered form — absolute (1-based) line numbers,
+    so a line can be cited and pages stay consistent. offset is the first line
+    to read (default 1), limit how many lines to return (default 2000); when
+    lines remain, the result says so and gives the offset to continue with. A
+    source line longer than 2000 characters is cut with a `[... truncated]`
+    marker (page the raw bytes with `bash` when you need the whole line). A
+    directory path lists its entries, one per line, subdirectories with a
+    trailing `/`. Paths must stay inside the root, the scratch or the system
+    temp directory. Example: read(path="src/main.py", offset=40, limit=80)"""
     p = _resolve(path)
-    if offset < 0:
-        raise ValueError("offset must not be negative")
-    want = _max_output if limit is None else min(limit, _max_output)
-    if want < 1:
+    if p.is_dir():
+        entries = sorted(os.scandir(p), key=lambda e: e.name)
+        names = [e.name + ("/" if e.is_dir() and not e.is_symlink() else "") for e in entries]
+        if not names:
+            return "(empty directory)"
+        shown = names[:DEFAULT_LIST_LIMIT]
+        text = "\n".join(shown)
+        if len(names) > len(shown):
+            text += f"\n... {len(names) - len(shown)} more entries (narrow down with glob or `bash ls`)"
+        return text
+    if not p.is_file():
+        raise FileNotFoundError(str(path))
+    first = max(int(offset) if offset is not None else 1, 1)
+    if limit is not None and int(limit) < 1:
         raise ValueError("limit must be positive")
-    size = p.stat().st_size
-    if binary:
-        with open(p, "rb") as f:
-            f.seek(offset)
-            chunk = f.read(want)
-        return FileReadResult(
-            content=base64.b64encode(chunk).decode("ascii"),
-            size=size,
-            offset=offset,
-            truncated=offset + len(chunk) < size,
-        )
-    # Stream: never hold more than one block plus the requested window.
-    with open(p, "r") as f:
-        skip = offset
-        while skip > 0:
-            got = f.read(min(skip, 65536))
-            if not got:
-                break
-            skip -= len(got)
-        chunk = f.read(want) if skip == 0 else ""
-        truncated = skip == 0 and len(chunk) == want and f.read(1) != ""
-    return FileReadResult(raw_text=chunk, size=size, offset=offset, truncated=truncated)
+    take = READ_DEFAULT_LIMIT if limit is None else int(limit)
+    with open(p, "r", errors="replace") as f:
+        content = f.read()
+    lines = content.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    total = len(lines)
+    if total == 0:
+        return "(empty file)"
+    selected = lines[first - 1 : first - 1 + take]
+    parts: List[str] = []
+    used = 0
+    for i, ln in enumerate(selected):
+        display = ln if len(ln) <= READ_MAX_LINE else ln[:READ_MAX_LINE] + " [... truncated]"
+        out_line = f"{first + i}: {display}"
+        if parts and used + len(out_line) + 1 > _max_output:
+            break
+        used += len(out_line) + 1
+        parts.append(out_line)
+    if not parts:
+        raise ValueError(f"offset {first} is past the last kept line (file has {total})")
+    last = first + len(parts) - 1
+    text = "\n".join(parts)
+    if last < total:
+        text += f"\n\n[showing lines {first}-{last} of {total}; {total - last} more remain — continue with offset={last + 1}]"
+    return text
 
 
-def file_write(path: str, content: str, append: bool = False, binary: bool = False) -> FileWriteResult:
-    """Write a file, creating parent directories. With binary=true, `content` is base64 and is decoded to bytes; otherwise it is written as UTF-8 text. Overwrites are atomic; append=true appends instead. Writes land inside the root, the scratch or the system temp directory only (scratch is the right place for throwaway output). Example: file_write(path="notes/a.txt", content="hello\\n")"""
+def write(path: str, content: str, append: bool = False, binary: bool = False) -> FileWriteResult:
+    """Write a file, creating parent directories. With binary=true, `content` is base64 and is decoded to bytes; otherwise it is written as UTF-8 text. Overwrites are atomic; append=true appends instead (append is the way to build a file in pieces; a plain write replaces the whole thing). Writes land inside the root, the scratch or the system temp directory only (scratch is the right place for throwaway output). Example: write(path="notes/a.txt", content="hello\\n")"""
     p = _resolve(path)
     try:
         data = base64.b64decode(content, validate=True) if binary else content.encode()
@@ -531,44 +524,6 @@ def file_delete(path: str, recursive: bool = False) -> FileDeleteResult:
     return FileDeleteResult(deleted=True, message=f"deleted {path}")
 
 
-def _entry(p: Path) -> DirEntry:
-    st = p.lstat()
-    return DirEntry(
-        name=p.name,
-        path=_rel(p),
-        size=st.st_size,
-        is_dir=p.is_dir() and not p.is_symlink(),
-        mtime=datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
-    )
-
-
-def dir_list(path: str, recursive: bool = False, limit: int = DEFAULT_LIST_LIMIT) -> DirListResult:
-    """List a directory's entries with size, type and mtime; recursive=true descends into sub-folders (symlinks are not followed, and dependency/cache folders such as .git, node_modules, .venv and .direnv are listed but not entered). At most `limit` entries (default 500) come back; `truncated` says if there were more, so list a narrower path instead of the whole tree. Example: dir_list(path="src", recursive=true, limit=200)"""
-    base = _resolve(path)
-    if not base.is_dir():
-        raise NotADirectoryError(path)
-    if limit < 1:
-        raise ValueError("limit must be positive")
-    paths: List[Path] = []
-    truncated = False
-    if recursive:
-        for dirpath, dirnames, filenames in os.walk(base):
-            dirnames.sort()
-            for n in [*dirnames, *sorted(filenames)]:
-                if len(paths) >= limit:
-                    truncated = True
-                    break
-                paths.append(Path(dirpath) / n)
-            if truncated:
-                break
-            dirnames[:] = [d for d in dirnames if d not in _NO_DESCEND]
-    else:
-        names = sorted(base.iterdir())
-        truncated = len(names) > limit
-        paths = names[:limit]
-    return DirListResult(entries=[_entry(p) for p in paths], truncated=truncated)
-
-
 def file_move(src: str, dst: str) -> FileMoveResult:
     """Move or rename a file or directory. Refuses to overwrite an existing destination; creates missing parent directories."""
     s, d = _resolve(src), _resolve(dst)
@@ -587,19 +542,6 @@ def file_move(src: str, dst: str) -> FileMoveResult:
 # ---------- Reading and searching -------------------------------------------
 
 
-def tree_of_files(root: str = ".") -> Dict[str, Any]:
-    """Nested view of a directory tree: each directory maps to its subdirectories, with its files under "__files__"; skips .git, node_modules, __pycache__ and .venv."""
-    base = _resolve(root)
-    tree: Dict[str, Any] = {}
-    for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
-        node = tree
-        for part in Path(dirpath).relative_to(base).parts:
-            node = node.setdefault(part, {})
-        node["__files__"] = sorted(filenames)
-    return tree
-
-
 async def _tracked_files(base: Path) -> Optional[List[Path]]:
     """Files git knows about (tracked plus untracked-not-ignored) under ``base``,
     or None if ``base`` is not inside a git work tree."""
@@ -614,45 +556,56 @@ async def _tracked_files(base: Path) -> Optional[List[Path]]:
     return [base / name for name in result["stdout"].split("\0") if name]
 
 
-async def find_files(pattern: str, root: str = ".", limit: int = 1000) -> List[str]:
-    """Find files under root whose path or name matches a glob such as "**/*.py". Inside a git repository .gitignore is honoured; otherwise .git, node_modules, __pycache__ and .venv are skipped. Returns at most `limit` root-relative paths, sorted. Example: find_files(pattern="**/*.py", root="src")"""
-    base = _resolve(root)
+async def glob(pattern: str, path: str = ".", limit: int = 1000) -> List[str]:
+    """Find files under path whose path or name matches a glob such as "**/*.py", most
+    recently modified first. Inside a git repository .gitignore is honoured; otherwise
+    .git, node_modules, __pycache__ and .venv are skipped. Returns at most `limit`
+    root-relative paths. Example: glob(pattern="**/*.py", path="src")"""
+    base = _resolve(path)
     candidates = await _tracked_files(base)
     if candidates is None:
         candidates = []
         for dirpath, dirnames, filenames in os.walk(base):
             dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
             candidates.extend(Path(dirpath) / n for n in filenames)
-    found = []
+    found: List[Path] = []
     for p in candidates:
         rel = p.relative_to(base).as_posix()
         if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(p.name, pattern):
             if p.is_file():
-                found.append(_rel(p))
-    return sorted(found)[: max(limit, 0)]
+                found.append(p)
+
+    def _mtime(q: Path) -> float:
+        try:
+            return q.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    found.sort(key=_mtime, reverse=True)
+    return [_rel(p) for p in found[: max(limit, 0)]]
 
 
-async def ripgrep(
-    query: str,
+async def grep(
+    pattern: str,
     path: str = ".",
-    glob: Optional[str] = None,
+    include: Optional[str] = None,
     ignore_case: bool = False,
     context: int = 0,
     max_results: int = 200,
 ) -> GrepResult:
-    """Search file contents with a regex (ripgrep patterns; falls back to a built-in scanner when ripgrep is not installed, honoring .gitignore through `git ls-files`). glob filters files (e.g. "*.py"), context adds N surrounding lines per match, and at most max_results lines are returned (`truncated` says if more existed). Example: ripgrep(query="def main", glob="*.py", context=2)"""
+    """Search file contents with a regex (ripgrep patterns; falls back to a built-in scanner when ripgrep is not installed, honoring .gitignore through `git ls-files`). include filters files by a glob (e.g. "*.py"), context adds N surrounding lines per match, and at most max_results lines are returned (`truncated` says if more existed). Example: grep(pattern="def main", include="*.py", context=2)"""
     target = _resolve(path)
     if not shutil.which("rg"):
-        return await _py_search(query, target, glob, ignore_case, context, max_results)
+        return await _py_search(pattern, target, include, ignore_case, context, max_results)
     argv = ["rg", "--json"]
     if ignore_case:
         argv.append("--ignore-case")
-    if glob:
-        argv += ["--glob", glob]
+    if include:
+        argv += ["--glob", include]
     if context > 0:
         argv += ["--context", str(min(context, 20))]
     argv += ["--max-count", str(max(max_results, 0) + 1)]  # per file; one extra detects truncation
-    argv += ["--", query, str(target)]
+    argv += ["--", pattern, str(target)]
     seconds = _clamp_timeout(None)
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -725,14 +678,14 @@ async def ripgrep(
 
 
 async def _py_search(
-    query: str, target: Path, glob: Optional[str], ignore_case: bool, context: int, max_results: int
+    pattern: str, target: Path, include: Optional[str], ignore_case: bool, context: int, max_results: int
 ) -> GrepResult:
     """Built-in content search for hosts without ripgrep, so a missing optional
-    binary never leaves an agent unable to grep. Same contract as `ripgrep`
-    (regex, glob filter, context lines, max_results); walks git-tracked files
+    binary never leaves an agent unable to grep. Same contract as `grep`
+    (regex, include filter, context lines, max_results); walks git-tracked files
     where possible. Scans at most _PY_SEARCH_BYTES per file (skips binaries)."""
     try:
-        rx = re.compile(query, re.IGNORECASE if ignore_case else 0)
+        rx = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
     except re.error as e:
         raise RuntimeError(f"invalid regex: {e}") from e
     if target.is_file():
@@ -748,7 +701,7 @@ async def _py_search(
     matches: List[GrepMatch] = []
     truncated = False
     for f in files:
-        if glob and not (fnmatch.fnmatch(f.name, glob) or fnmatch.fnmatch(_rel(f), "**/" + glob.lstrip("*/"))):
+        if include and not (fnmatch.fnmatch(f.name, include) or fnmatch.fnmatch(_rel(f), "**/" + include.lstrip("*/"))):
             continue
         try:
             with open(f, "r") as fh:
@@ -776,61 +729,6 @@ async def _py_search(
 _PY_SEARCH_BYTES = 2_000_000
 
 
-def read_lines(path: str, start: int = 1, end: Optional[int] = None) -> ReadLinesResult:
-    """Text of lines start..end (1-based, inclusive) of a file, newline-faithful.
-
-    The result mirrors file_read's fidelity: `text` is returned as written, no line is
-    trimmed, and reading the whole file reproduces file_read's `raw_text` exactly
-    (including the final newline, when the file has one). Output is capped like every
-    other tool; `truncated` and `end` tell you where to continue (start=end+1).
-    To page a file, omit `end` and repeat with start=end+1: pages concatenate
-    verbatim. An explicit mid-file `end` returns a selection without a trailing
-    newline (join such pages with "\\n"). A single line longer than the cap
-    cannot be paged here — use file_read offsets. end defaults to the last line.
-    Example: read_lines(path="src/main.py", start=40, end=80)
-    """
-    first = max(start, 1)
-    if end is not None and end < first:
-        raise ValueError("end must not be before start")
-    with open(_resolve(path), "r") as f:
-        content = f.read()
-    if content:
-        ends_nl = content.endswith("\n")
-        lines = content.split("\n")
-        if ends_nl:
-            lines.pop()
-    else:
-        ends_nl, lines = False, []
-    total = len(lines)
-    last = total if end is None else min(end, total)
-    selected = lines[first - 1 : last] if first <= last else []
-    kept, used = 0, 0
-    for ln in selected:
-        extra = len(ln) + (1 if kept else 0)
-        if used + extra > _max_output:
-            break
-        used += extra
-        kept += 1
-    delivered_end = first + kept - 1 if kept else first - 1
-    # A page needs a trailing newline when the selection reached the file's last
-    # line and the file has one (fidelity: `text` is then a byte-exact suffix of
-    # the file text), or when the cap cut a line off — reserving that byte
-    # stitches consecutive pages together verbatim.
-    eol = bool(kept) and (kept < len(selected) or (delivered_end == total and ends_nl))
-    if eol and used + 1 > _max_output:
-        kept -= 1
-        delivered_end = first + kept - 1 if kept else first - 1
-        eol = bool(kept) and kept < len(selected)
-    text = "\n".join(selected[:kept]) + ("\n" if eol else "")
-    return ReadLinesResult(
-        text=text,
-        start=first,
-        end=delivered_end,
-        total_lines=total,
-        truncated=delivered_end < total,
-    )
-
-
 DIFF_CAP = 4000  # characters of diff echoed back by the edit tools
 
 
@@ -852,97 +750,46 @@ def _diff(label: str, old: str, new: str, cap: int = DIFF_CAP) -> str:
     return text
 
 
-def _replace_once(text: str, old_str: str, new_str: str, replace_all: bool, where: str) -> Tuple[str, int]:
-    if not old_str:
-        raise ValueError(f"{where}old_str must not be empty")
-    count = text.count(old_str)
+def _replace_once(text: str, old_string: str, new_string: str, replace_all: bool) -> Tuple[str, int]:
+    if not old_string:
+        raise ValueError("old_string must not be empty")
+    count = text.count(old_string)
     if count == 0:
-        raise ValueError(f"{where}{old_str!r} not found")
+        raise ValueError(f"{old_string!r} not found")
     if count > 1 and not replace_all:
         raise ValueError(
-            f"{where}{old_str!r} occurs {count} times; add context to make it unique or set replace_all"
+            f"{old_string!r} occurs {count} times; add context to make it unique or set replace_all"
         )
-    return text.replace(old_str, new_str), count
+    return text.replace(old_string, new_string), count
 
 
 def _plural(n: int) -> str:
     return f"{n} occurrence{'s' if n != 1 else ''}"
 
 
-def edit_file(
+def edit(
     path: str,
-    new_content: Optional[str] = None,
-    old_str: Optional[str] = None,
-    new_str: Optional[str] = None,
+    old_string: str,
+    new_string: str,
     replace_all: bool = False,
     dry_run: bool = False,
 ) -> str:
-    """Edit an existing file: either overwrite it with new_content, or replace old_str with new_str. old_str must occur exactly once unless replace_all is true (an ambiguous match is an error, so the wrong spot is never edited silently). Writes are atomic. Returns a one-line summary followed by a unified diff of the change; dry_run=true checks and shows the diff without writing. Example: edit_file(path="a.py", old_str="x = 1", new_str="x = 2")"""
+    """Edit an existing file by replacing old_string with new_string. old_string must occur exactly once unless replace_all is true (an ambiguous match is an error naming the count, so the wrong spot is never edited silently); it must differ from new_string. To replace the whole file use write instead. Writes are atomic. Returns a one-line summary followed by a unified diff of the change; dry_run=true checks and shows the diff without writing. Example: edit(path="a.py", old_string="x = 1", new_string="x = 2")"""
     p = _resolve(path)
     if not p.is_file():
         raise FileNotFoundError(str(path))
     text = p.read_text()
-    if new_content is not None:
-        new_text, summary = new_content, "full content"
-    else:
-        if old_str is None or new_str is None:
-            raise ValueError("provide new_content, or both old_str and new_str")
-        try:
-            new_text, count = _replace_once(text, old_str, new_str, replace_all, "")
-        except ValueError as e:
-            raise ValueError(f"{e} in {path}") from None
-        summary = f"{_plural(count)}"
+    try:
+        new_text, count = _replace_once(text, old_string, new_string, replace_all)
+    except ValueError as e:
+        raise ValueError(f"{e} in {path}") from None
     if not dry_run:
         _atomic_write(p, new_text.encode())
     diff = _diff(_rel(p), text, new_text)
-    if new_content is not None:
-        head = "would write" if dry_run else "wrote"
-        head += " full content"
-    else:
-        head = f"{'would replace' if dry_run else 'replaced'} {summary}"
+    head = f"{'would replace' if dry_run else 'replaced'} {_plural(count)}"
     if dry_run:
         head = "dry run: " + head
     return f"{head}\n{diff}" if diff else f"{head} (no change)"
-
-
-def multi_edit(path: str, edits: List[Dict[str, Any]], dry_run: bool = False) -> str:
-    """Apply several replacements to one file, in order and atomically: if any edit fails nothing is written. `edits` is a list of {"old_str", "new_str", optional "replace_all"}; each old_str must match exactly once (in the text as changed by the earlier edits) unless replace_all is true. Returns a summary and a unified diff; dry_run=true only checks. Example: multi_edit(path="a.py", edits=[{"old_str": "foo", "new_str": "bar"}, {"old_str": "1", "new_str": "2", "replace_all": true}])"""
-    p = _resolve(path)
-    if not p.is_file():
-        raise FileNotFoundError(str(path))
-    if not edits:
-        raise ValueError("edits must not be empty")
-    text = p.read_text()
-    new_text, total = text, 0
-    for i, e in enumerate(edits, 1):
-        if not isinstance(e, dict) or "old_str" not in e or "new_str" not in e:
-            raise ValueError(f"edit {i}: needs old_str and new_str")
-        new_text, count = _replace_once(
-            new_text, str(e["old_str"]), str(e["new_str"]), bool(e.get("replace_all", False)), f"edit {i}: "
-        )
-        total += count
-    if not dry_run:
-        _atomic_write(p, new_text.encode())
-    head = f"{'dry run: would apply' if dry_run else 'applied'} {len(edits)} edit{'s' if len(edits) != 1 else ''} ({_plural(total)})"
-    diff = _diff(_rel(p), text, new_text)
-    return f"{head}\n{diff}" if diff else f"{head} (no change)"
-
-
-async def run_python(
-    code: str, timeout: Optional[float] = None, mode: str = "full", pattern: Optional[str] = None
-) -> Dict[str, Any]:
-    """Run a Python snippet in a fresh interpreter (cwd = the root) and return {returncode, stdout, stderr}. Output is capped like run_command; mode ("full", "head", "tail", "grep" with `pattern`) shapes it the same way, and an `output_id` (with truncated=true) is added when output was cut. On timeout you get everything produced up to the kill with timed_out=true and returncode=124 — nothing is discarded. Example: run_python(code="print(2+2)")"""
-    _check_mode(mode, pattern)
-    result = await _run([sys.executable, "-"], input=code, timeout=timeout)
-    result["stdout"], result["stderr"], cut, output_id = _shape_result(
-        result["stdout"], result["stderr"], mode, pattern
-    )
-    if cut:
-        result["truncated"] = True
-        result["output_id"] = output_id
-    if result.get("timed_out"):
-        result["truncated"] = True
-    return result
 
 
 # ---------- Git -------------------------------------------------------------
@@ -1749,187 +1596,6 @@ def apply_patch(patch: str, dry_run: bool = False) -> PatchResult:
     return PatchResult(applied=not dry_run, dry_run=dry_run, files=results)
 
 
-# ---------- Symbol navigation ------------------------------------------------
-
-# Definition patterns per language for the ripgrep fallback: (kind, regex with
-# {n} for the escaped name). Tried in order; the first that matches a line names
-# its kind. Written in the syntax both Rust's regex (ripgrep) and Python's `re` accept.
-_QUAL = r"(?:(?:public|private|protected|static|async|readonly|override|final|abstract|synchronized|native|default)\s+)"
-_SYMBOL_RULES: List[Tuple[List[str], List[Tuple[str, str]]]] = [
-    (["*.py"], [
-        ("class", r"^\s*class\s+{n}\b"),
-        ("function", r"^\s*(?:async\s+)?def\s+{n}\b"),
-        ("variable", r"^{n}\s*(?::[^=]+)?=(?:[^=]|$)"),
-    ]),
-    (["*.go"], [
-        ("function", r"^\s*func\s+{n}\b"),
-        ("method", r"^\s*func\s+\([^)]*\)\s*{n}\b"),
-        ("type", r"^\s*type\s+{n}\b"),
-        ("constant", r"^\s*const\s+{n}\b"),
-        ("variable", r"^\s*var\s+{n}\b"),
-    ]),
-    (["*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs", "*.cjs"], [
-        ("function", r"\bfunction\s*\*?\s*{n}\b"),
-        ("class", r"\bclass\s+{n}\b"),
-        ("interface", r"\binterface\s+{n}\b"),
-        ("type", r"\btype\s+{n}\b\s*(?:<[^>]*>)?\s*="),
-        ("enum", r"\benum\s+{n}\b"),
-        ("variable", r"\b(?:const|let|var)\s+{n}\b"),
-        ("method", r"^\s*" + _QUAL + r"*{n}\s*(?:<[^>]*>)?\([^)]*\)\s*(?::\s*[^;{=]+)?\s*\{"),
-    ]),
-    (["*.rs"], [
-        ("function", r"\bfn\s+{n}\b"),
-        ("struct", r"\bstruct\s+{n}\b"),
-        ("enum", r"\benum\s+{n}\b"),
-        ("trait", r"\btrait\s+{n}\b"),
-        ("type", r"\btype\s+{n}\b"),
-        ("constant", r"\b(?:const|static)\s+{n}\b"),
-        ("module", r"\bmod\s+{n}\b"),
-        ("macro", r"\bmacro_rules!\s*{n}\b"),
-    ]),
-    (["*.java"], [
-        ("class", r"\b(?:class|record)\s+{n}\b"),
-        ("interface", r"\binterface\s+{n}\b"),
-        ("enum", r"\benum\s+{n}\b"),
-        ("method", r"^\s*" + _QUAL + r"+[\w<>\[\],.? ]+\s+{n}\s*\("),
-    ]),
-    (["*.c", "*.h", "*.cc", "*.cpp", "*.cxx", "*.hpp", "*.hh"], [
-        ("macro", r"^\s*#\s*define\s+{n}\b"),
-        ("struct", r"\b(?:struct|union)\s+{n}\b\s*(?:\{|$|:)"),
-        ("class", r"\bclass\s+{n}\b\s*(?:\{|$|:|final)"),
-        ("enum", r"\benum(?:\s+class)?\s+{n}\b"),
-        ("type", r"\btypedef\b.*\b{n}\s*;"),
-        ("function", r"^[A-Za-z_][\w\s\*&:<>,~]*?[\s\*&:]{n}\s*\([^;]*$"),
-    ]),
-]
-
-_KIND_ALIASES = {
-    "func": "function", "fn": "function", "def": "function", "member": "method", "var": "variable",
-    "const": "constant", "typedef": "type", "cls": "class",
-}
-
-
-def _norm_kind(kind: Optional[str]) -> str:
-    k = (kind or "").lower()
-    return _KIND_ALIASES.get(k, k)
-
-
-class SymbolHit(BaseModel):
-    file: str
-    line: int
-    text: str = Field(description="The source line.")
-    kind: Optional[str] = Field(default=None, description="function, class, method, type, variable, ... (definitions only).")
-
-
-class SymbolResult(BaseModel):
-    method: str = Field(description='How it was found: "ctags" or "heuristic" (ripgrep patterns; may miss or over-match).')
-    results: List[SymbolHit]
-    truncated: bool = Field(description="More results existed than max_results.")
-
-
-def _check_name(name: str) -> str:
-    if not re.fullmatch(r"[\w$]+", name or ""):
-        raise ValueError(f"name must be a plain identifier, got {name!r}")
-    return name
-
-
-async def _ctags_ok() -> bool:
-    if not shutil.which("ctags"):
-        return False
-    try:
-        r = await _run(["ctags", "--version"], timeout=10)
-    except RuntimeError:
-        return False
-    return "Universal Ctags" in r["stdout"]
-
-
-def _source_line(cache: Dict[str, List[str]], rel: str, line: int) -> str:
-    if rel not in cache:
-        try:
-            cache[rel] = (_root / rel).read_text(errors="replace").splitlines()
-        except OSError:
-            cache[rel] = []
-    lines = cache[rel]
-    return lines[line - 1].rstrip() if 0 < line <= len(lines) else ""
-
-
-async def _definitions(name: str, path: str, kind: Optional[str], limit: int) -> Tuple[str, List[SymbolHit], bool]:
-    """Definitions of ``name`` under ``path``: (method, hits, truncated)."""
-    target = _resolve(path)
-    want = _norm_kind(kind) if kind else None
-    hits: List[SymbolHit] = []
-    if await _ctags_ok():
-        argv = ["ctags", "--output-format=json", "--fields=+n", "-f", "-", "-R"]
-        argv += [f"--exclude={d}" for d in sorted(_SKIP_DIRS)]
-        argv.append(str(target))
-        r = await _run(argv, timeout=120)
-        if r["returncode"] != 0:
-            raise RuntimeError(r["stderr"].strip() or "ctags failed")
-        cache: Dict[str, List[str]] = {}
-        for raw in r["stdout"].splitlines():
-            try:
-                tag = json.loads(raw)
-            except ValueError:
-                continue
-            if tag.get("_type") != "tag" or tag.get("name") != name:
-                continue
-            if want and _norm_kind(tag.get("kind")) != want:
-                continue
-            file = _rel(_resolve(str(tag.get("path", ""))) if tag.get("path") else target)
-            line = int(tag.get("line") or 0)
-            hits.append(SymbolHit(file=file, line=line, text=_source_line(cache, file, line), kind=tag.get("kind")))
-        method = "ctags"
-    else:
-        esc = re.escape(name)
-
-        async def one(globs: List[str], rules: List[Tuple[str, str]]) -> List[SymbolHit]:
-            templates = [t.replace("{n}", esc) for _, t in rules]
-            pattern = "|".join(f"(?:{t})" for t in templates)
-            found: List[SymbolHit] = []
-            for glob in globs:
-                res = await ripgrep(pattern, path=str(target), glob=glob, max_results=1000)
-                for m in res.matches:
-                    for (k, _), t in zip(rules, templates):
-                        if re.search(t, m.text):
-                            found.append(SymbolHit(file=m.file, line=m.line_no, text=m.text.rstrip(), kind=k))
-                            break
-            return found
-
-        groups = await asyncio.gather(*(one(globs, rules) for globs, rules in _SYMBOL_RULES))
-        hits = [h for g in groups for h in g if not want or _norm_kind(h.kind) == want]
-        method = "heuristic"
-    seen = set()
-    unique = []
-    for h in sorted(hits, key=lambda h: (h.file, h.line)):
-        if (h.file, h.line) not in seen:
-            seen.add((h.file, h.line))
-            unique.append(h)
-    return method, unique[: max(limit, 0)], len(unique) > limit
-
-
-async def find_symbol(
-    name: str, path: str = ".", kind: Optional[str] = None, max_results: int = 100
-) -> SymbolResult:
-    """Find where a function, class, method, type or variable named `name` is DEFINED under path (a directory or file). Uses universal-ctags when installed, otherwise ripgrep patterns for Python, Go, TypeScript/JavaScript, Rust, Java and C/C++ (`method` in the result says which). kind optionally narrows to function, class, method, type, variable, constant, interface, enum, struct, module or macro. Example: find_symbol(name="handle_request", path="src", kind="function")"""
-    _check_name(name)
-    method, hits, cut = await _definitions(name, path, kind, max_results)
-    return SymbolResult(method=method, results=hits, truncated=cut)
-
-
-async def find_references(name: str, path: str = ".", max_results: int = 100) -> SymbolResult:
-    """Find every whole-word occurrence of `name` under path (a directory or file), with file, line and the line's text, leaving out the lines where it is defined. `method` says how the definitions were found ("ctags" or "heuristic"). Example: find_references(name="handle_request", path="src")"""
-    _check_name(name)
-    method, defs, _ = await _definitions(name, path, None, 100_000)
-    defined = {(d.file, d.line) for d in defs}
-    res = await ripgrep(rf"\b{re.escape(name)}\b", path=path, max_results=max_results + len(defined) + 1)
-    hits = [
-        SymbolHit(file=m.file, line=m.line_no, text=m.text.rstrip())
-        for m in res.matches
-        if (m.file, m.line_no) not in defined
-    ]
-    return SymbolResult(method=method, results=hits[:max_results], truncated=res.truncated or len(hits) > max_results)
-
-
 # ---------- Tests -------------------------------------------------------------
 
 
@@ -2321,256 +1987,6 @@ async def run_tests(
     )
 
 
-# ---------- Structured data files ------------------------------------------------
-
-_DATA_MAX_BYTES = 100_000_000
-_STEP_RE = re.compile(r"\[(-?\d+|\*)\]|\.?([^.\[\]]+)")
-
-
-def _path_steps(query: str) -> List[Any]:
-    """'items[0].name' -> ['items', 0, 'name']; '*' or '[*]' -> the wildcard."""
-    pos, steps = 0, []
-    query = query.strip()
-    while pos < len(query):
-        m = _STEP_RE.match(query, pos)
-        if not m:
-            raise ValueError(f"bad query near {query[pos:]!r}; use e.g. items[0].name or items[*].id")
-        if m.group(1) is not None:
-            steps.append("*" if m.group(1) == "*" else int(m.group(1)))
-        else:
-            steps.append("*" if m.group(2) == "*" else m.group(2))
-        pos = m.end()
-    return steps
-
-
-def _json_path(doc: Any, query: str) -> Any:
-    nodes, multi = [doc], False
-    for step in _path_steps(query):
-        nxt: List[Any] = []
-        for node in nodes:
-            if step == "*":
-                if isinstance(node, list):
-                    nxt.extend(node)
-                elif isinstance(node, dict):
-                    nxt.extend(node.values())
-                elif not multi:
-                    raise ValueError(f"cannot expand [*] on a {type(node).__name__}")
-            elif isinstance(step, int):
-                if isinstance(node, list) and -len(node) <= step < len(node):
-                    nxt.append(node[step])
-                elif not multi:
-                    raise ValueError(f"index {step} not available (value is {_describe(node)})")
-            elif isinstance(node, dict) and step in node:
-                nxt.append(node[step])
-            elif not multi:
-                keys = ", ".join(list(node)[:20]) if isinstance(node, dict) else _describe(node)
-                raise ValueError(f"key {step!r} not found; available: {keys}")
-        multi = multi or step == "*"
-        nodes = nxt
-    return nodes if multi else nodes[0]
-
-
-def _describe(v: Any) -> str:
-    if isinstance(v, dict):
-        return f"object with keys {', '.join(list(v)[:20])}"
-    if isinstance(v, list):
-        return f"list of {len(v)}"
-    return type(v).__name__
-
-
-def _kind(v: Any) -> str:
-    return {dict: "object", list: "array", str: "string", bool: "boolean", int: "number", float: "number", type(None): "null"}.get(type(v), type(v).__name__)
-
-
-def _load_data(p: Path, fmt: str) -> Any:
-    if p.stat().st_size > _DATA_MAX_BYTES:
-        raise ValueError(f"file is larger than {_DATA_MAX_BYTES // 1_000_000} MB")
-    text = p.read_text()
-    if fmt == "json":
-        try:
-            return json.loads(text)
-        except ValueError as e:
-            raise ValueError(f"invalid JSON: {e}") from None
-    rows = []
-    for n, line in enumerate(text.splitlines(), 1):
-        if line.strip():
-            try:
-                rows.append(json.loads(line))
-            except ValueError as e:
-                raise ValueError(f"invalid JSON on line {n}: {e}") from None
-    return rows
-
-
-def _fit(value: Any) -> Tuple[Any, bool]:
-    """Shrink a list result until its JSON fits the output cap."""
-    cut = False
-    while isinstance(value, list) and len(value) > 1 and len(json.dumps(value, default=str)) > _max_output:
-        value, cut = value[: len(value) // 2], True
-    text = json.dumps(value, default=str)
-    if len(text) > _max_output:
-        return text[:_max_output], True
-    return value, cut
-
-
-def _scalar(raw: str) -> Any:
-    try:
-        return json.loads(raw)
-    except ValueError:
-        return raw
-
-
-def _query_json(doc: Any, fmt: str, query: Optional[str], flt: Optional[str], limit: int, describe: bool) -> Dict[str, Any]:
-    if describe:
-        info: Dict[str, Any] = {"type": _kind(doc)}
-        if isinstance(doc, dict):
-            info["keys"] = {k: _kind(v) if not isinstance(v, (list, dict)) else _describe(v) for k, v in list(doc.items())[:100]}
-        elif isinstance(doc, list):
-            info["length"] = len(doc)
-            keys: Dict[str, str] = {}
-            for el in doc[:1000]:
-                if isinstance(el, dict):
-                    for k, v in el.items():
-                        keys.setdefault(k, _kind(v))
-            if keys:
-                info["element_keys"] = keys
-        return {"format": fmt, "describe": info}
-    value = _json_path(doc, query) if query else doc
-    if flt:
-        m = re.match(r"^\s*([^=!]+?)\s*==\s*(.*)$", flt)
-        if not m:
-            raise ValueError('filter must look like key==value, e.g. status=="ok" or age==3')
-        key, want = m.group(1), _scalar(m.group(2).strip())
-        if not isinstance(value, list):
-            raise ValueError("filter needs the query to produce a list (add [*] or point at an array)")
-
-        def keep(el: Any) -> bool:
-            try:
-                got = _json_path(el, key)
-            except (ValueError, TypeError):
-                return False
-            return got == want or (isinstance(got, (str, int, float)) and str(got) == str(want))
-
-        value = [el for el in value if keep(el)]
-    count = len(value) if isinstance(value, list) else 1
-    truncated = False
-    if isinstance(value, list) and len(value) > limit:
-        value, truncated = value[: max(limit, 0)], True
-    value, cut = _fit(value)
-    return {"format": fmt, "count": count, "truncated": truncated or cut, "result": value}
-
-
-def _number(s: str) -> Optional[float]:
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
-def _cell_type(values: List[str]) -> str:
-    seen = set()
-    for v in values:
-        if v == "":
-            continue
-        if re.fullmatch(r"-?\d+", v):
-            seen.add("integer")
-        elif _number(v) is not None:
-            seen.add("number")
-        elif v.lower() in ("true", "false"):
-            seen.add("boolean")
-        else:
-            seen.add("string")
-    if not seen:
-        return "empty"
-    if seen == {"integer", "number"}:
-        return "number"
-    return seen.pop() if len(seen) == 1 else "mixed"
-
-
-def _where_test(where: Dict[str, Any], header: List[str]) -> Any:
-    col, op, val = where.get("column"), where.get("op", "=="), where.get("value")
-    if col not in header:
-        raise ValueError(f"unknown column {col!r}; columns: {', '.join(header)}")
-    if op not in ("==", "!=", "<", ">", "<=", ">=", "contains"):
-        raise ValueError("where.op must be one of ==, !=, <, >, <=, >=, contains")
-    target = "" if val is None else str(val)
-    tnum = _number(target)
-
-    def test(row: Dict[str, str]) -> bool:
-        cell = row.get(col) or ""
-        if op == "contains":
-            return target.lower() in cell.lower()
-        cnum = _number(cell)
-        a, b = (cnum, tnum) if cnum is not None and tnum is not None else (cell, target)
-        return {"==": a == b, "!=": a != b, "<": a < b, ">": a > b, "<=": a <= b, ">=": a >= b}[op]
-
-    return test
-
-
-def _query_csv(
-    p: Path, fmt: str, columns: Optional[List[str]], where: Optional[Dict[str, Any]], limit: int, describe: bool
-) -> Dict[str, Any]:
-    csv.field_size_limit(1 << 24)
-    with open(p, newline="") as f:
-        reader = csv.DictReader(f, delimiter="\t" if fmt == "tsv" else ",")
-        header = list(reader.fieldnames or [])
-        if columns:
-            bad = [c for c in columns if c not in header]
-            if bad:
-                raise ValueError(f"unknown column(s) {bad}; columns: {', '.join(header)}")
-        test = _where_test(where, header) if where else None
-        rows: List[Dict[str, Any]] = []
-        total = matched = 0
-        samples: Dict[str, List[str]] = {c: [] for c in header}
-        for row in reader:
-            total += 1
-            if describe:
-                if total <= 1000:
-                    for c in header:
-                        samples[c].append(row.get(c) or "")
-                continue
-            if test and not test(row):
-                continue
-            matched += 1
-            if len(rows) < limit:
-                rows.append({c: row.get(c) for c in (columns or header)})
-    if describe:
-        return {
-            "format": fmt,
-            "describe": {
-                "rows": total,
-                "columns": [{"name": c, "type": _cell_type(samples[c])} for c in header],
-                "types_from_first_rows": min(total, 1000),
-            },
-        }
-    fitted, cut = _fit(rows)
-    return {"format": fmt, "count": matched, "truncated": matched > len(rows) or cut, "columns": columns or header, "result": fitted}
-
-
-def data_query(
-    path: str,
-    query: Optional[str] = None,
-    format: Optional[str] = None,
-    limit: int = 100,
-    filter: Optional[str] = None,
-    columns: Optional[List[str]] = None,
-    where: Optional[Dict[str, Any]] = None,
-    describe: bool = False,
-) -> Dict[str, Any]:
-    """Read-only query of a JSON, JSONL, CSV or TSV file (format is guessed from the extension). JSON: `query` is a path like `items[0].name` or `items[*].id` (JSONL is treated as a list of records: `[0].name`, `[*].id`), `filter` keeps list items where key==value (e.g. `status==ok`). CSV/TSV: `columns` picks columns, `where` is {"column", "op" (==, !=, <, >, <=, >=, contains), "value"}. `limit` caps returned items/rows; `describe=true` returns the schema (CSV: columns, types, row count). Example: data_query(path="users.csv", where={"column": "age", "op": ">", "value": 30}, columns=["name"], limit=10)"""
-    p = _resolve(path)
-    if not p.is_file():
-        raise FileNotFoundError(str(path))
-    if limit < 0:
-        raise ValueError("limit must not be negative")
-    ext = p.suffix.lower().lstrip(".")
-    fmt = (format or {"ndjson": "jsonl"}.get(ext, ext)).lower()
-    if fmt not in ("json", "jsonl", "csv", "tsv"):
-        raise ValueError('format must be json, jsonl, csv or tsv (could not tell from the file extension)')
-    if fmt in ("csv", "tsv"):
-        return _query_csv(p, fmt, columns, where, limit, describe)
-    return _query_json(_load_data(p, fmt), fmt, query, filter, limit, describe)
-
-
 # ---------- Registration ------------------------------------------------------
 
 # (function, readOnly, destructive, idempotent, openWorld). Clients use these
@@ -2579,26 +1995,17 @@ TOOLS: List[Tuple[Any, ToolAnnotations]] = [
     (fn, ToolAnnotations(readOnlyHint=ro, destructiveHint=None if ro else destructive, idempotentHint=idem, openWorldHint=open_world))
     for fn, ro, destructive, idem, open_world in [
         # files
-        (file_read, True, False, True, False),
-        (dir_list, True, False, True, False),
-        (tree_of_files, True, False, True, False),
-        (find_files, True, False, True, False),
-        (ripgrep, True, False, True, False),
-        (read_lines, True, False, True, False),
-        (file_write, False, True, False, False),  # overwrites
-        (edit_file, False, True, False, False),
-        (multi_edit, False, True, False, False),
+        (read, True, False, True, False),
+        (glob, True, False, True, False),
+        (grep, True, False, True, False),
+        (write, False, True, False, False),  # overwrites
+        (edit, False, True, False, False),
         (apply_patch, False, True, False, False),
-        (data_query, True, False, True, False),
-        # code navigation
-        (find_symbol, True, False, True, False),
-        (find_references, True, False, True, False),
         (file_move, False, False, False, False),  # never overwrites
         (file_delete, False, True, True, False),
         # code execution: anything can happen
-        (run_command, False, True, False, True),
-        (run_python, False, True, False, True),
-        # runs whatever the project's tests do (same reach as run_command), hence the same hints
+        (bash, False, True, False, True),
+        # runs whatever the project's tests do (same reach as bash), hence the same hints
         (run_tests, False, True, False, True),
         (output_read, True, False, True, False),  # pages an in-memory copy of an earlier output
         (output_grep, True, False, True, False),

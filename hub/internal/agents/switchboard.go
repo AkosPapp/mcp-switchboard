@@ -29,7 +29,11 @@ type callCtx struct {
 }
 
 type sbTool struct {
-	name    string
+	name string
+	// alias is the display name the model sees in its catalog (opencode-style
+	// names for the opencode-shaped capabilities); empty means providerName
+	// of name. Transcripts, logs and /mcp/agent keep the real name.
+	alias   string
 	desc    string
 	schema  map[string]any
 	ann     *mcp.ToolAnnotations
@@ -79,7 +83,7 @@ func init() {
 	write := &mcp.ToolAnnotations{DestructiveHint: bp(true), OpenWorldHint: bp(false)}
 	noApproval := &mcp.ToolAnnotations{DestructiveHint: bp(false), OpenWorldHint: bp(false)}
 	sbTools = []*sbTool{
-		{name: "switchboard.chat.spawn",
+		{name: "switchboard.chat.spawn", alias: "task",
 			desc: "Create a child chat to do a sub-task for you. Its grants, capabilities and approval can only be narrower than yours (omit them to pass on what you have). " +
 				"To delegate: (1) set `message` to the task, and tell the child to send its result back to you when it is finished, either with switchboard.chat.report (preferred: it gives you a fixed-format status and summary) or with switchboard.chat.send; " +
 				"(2) then END YOUR TURN: stop and write your reply, do not poll and do not call chat.list in a loop. There is no wait tool. When the child answers, its message arrives here as a new message and wakes you up to continue. " +
@@ -92,7 +96,7 @@ func init() {
 				"system_prompt": typ("string", "the child chat's system prompt"),
 				"grants":        map[string]any{"type": "array", "items": grantItem},
 				"allowed_tools": map[string]any{"type": "array", "items": map[string]any{"type": "string"},
-					"description": "glob patterns on the upstream tool name (e.g. file_read, git_*); the child may call only matching tools. Must be within your own list if you have one. switchboard.* tools are unaffected"},
+					"description": "glob patterns on the upstream tool name (e.g. read, git_*); the child may call only matching tools. Must be within your own list if you have one. switchboard.* tools are unaffected"},
 				"budget": map[string]any{"type": "object", "description": "per-run budget overrides"},
 				"capabilities": map[string]any{"type": "object", "description": "{can_spawn, can_message}; at most what you hold",
 					"properties": map[string]any{"can_spawn": map[string]any{"type": "boolean"}, "can_message": map[string]any{"type": "boolean"}}},
@@ -134,7 +138,7 @@ func init() {
 			schema:  obj([]string{"chat_id"}, map[string]any{"chat_id": typ("string", "descendant chat id, as returned by chat.spawn or chat.list")}),
 			ann:     write,
 			visible: canSpawn, run: (*Manager).toolStop},
-		{name: "switchboard.user.ask",
+		{name: "switchboard.user.ask", alias: "question",
 			desc: "Ask the user one to four questions and wait for the answers. Use it to choose between approaches or settle a detail you cannot decide alone, and not for things you can find out yourself. " +
 				"Give a question short `options` when it has clear choices (the user can always type their own answer instead). The answers are returned to you. " +
 				"Example: user.ask {questions: [{question: \"Which database should I use?\", header: \"Database\", options: [{label: \"SQLite\"}, {label: \"Postgres\"}]}]}",

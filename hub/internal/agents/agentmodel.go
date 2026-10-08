@@ -98,11 +98,34 @@ type turnPlan struct {
 
 // planTurn builds the plan for an already resolved agent (see resolveAgent).
 func (m *Manager) planTurn(ctx context.Context, eff *store.Agent, prof *store.Profile, chat *store.Chat) (*turnPlan, error) {
+	// Reconcile the library first so this turn sees hand-edited files and the
+	// most recent scanned skills (planTurn is once per turn: cheap reads).
+	m.reconcileLibrary(ctx)
 	cat, err := m.buildCatalog(ctx, eff, chat)
 	if err != nil {
 		return nil, err
 	}
-	system := systemPromptFor(eff)
+	// The persona prompt (prompts/base.md) leads every turn; the profile or
+	// agent text follows, then the injectables. This is THE place the hub's
+	// own voice enters the system prompt.
+	persona := ""
+	if m.lib != nil {
+		if s, err := m.lib.BasePrompt(); err == nil {
+			persona = s
+		} else {
+			m.log.Warn("could not read the persona prompt; running without it", "error", err)
+		}
+	}
+	var system string
+	for _, part := range []string{persona, systemPromptFor(eff)} {
+		if part == "" {
+			continue
+		}
+		if system != "" {
+			system += "\n\n"
+		}
+		system += part
+	}
 	for _, injectable := range []string{
 		skillsPrompt(m.autoSkills(ctx)), m.instructionsPrompt(cat), m.environmentBriefPrompt(cat), notePrompt(chat),
 	} {

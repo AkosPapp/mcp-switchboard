@@ -26,6 +26,16 @@
       "detail": "Client: tunnels servers from ./mcp.json to the local hub (token from .env)"
     },
     {
+      "label": "Switchboard: local opencode",
+      "type": "shell",
+      "command": "bash \"${workspaceFolder}/tools/opencode-local.sh\"",
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "panel": "dedicated", "group": "switchboard" },
+      "detail": "install.sh --opencode, but fully local: repo plugin + this checkout's client, bridged to the hub task on :8099. Start 'Switchboard: hub' first; leaving opencode stops the client too."
+    },
+    {
       "label": "Switchboard: hub + client",
       // Hub and client have no presentation group, so VS Code gives each its own
       // terminal tab instead of splitting them side by side.

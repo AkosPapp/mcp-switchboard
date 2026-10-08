@@ -21,10 +21,10 @@ import urllib.parse
 import urllib.request
 
 # The harness's readOnlyHint tools (servers/harness .../server.py TOOLS), split
-# by whether the call opens a file or merely searches: ripgrep, find_files and
-# data_query return many paths inside their result, not in the arguments.
-OPENED_TOOLS = {"file_read", "read_lines", "dir_list", "tree_of_files"}
-SEARCHED_TOOLS = {"ripgrep", "find_files", "data_query"}
+# by whether the call opens a file or merely searches: grep and glob
+# return many paths inside their result, not in the arguments.
+OPENED_TOOLS = {"read", "edit", "write", "file_move", "file_delete", "apply_patch"}
+SEARCHED_TOOLS = {"grep", "glob"}
 READ_TOOLS = OPENED_TOOLS | SEARCHED_TOOLS
 MAX_ROWS = 400
 
@@ -56,14 +56,12 @@ def subject(call):
     """What to show for a call: the path it opened, or what it searched."""
     args = call.get("arguments") or {}
     tool = call.get("tool")
-    if tool in ("file_read", "read_lines", "dir_list", "data_query"):
+    if tool in ("read", "edit", "write", "file_delete"):
         return str(args.get("path", "?"))
-    if tool == "tree_of_files":
-        return str(args.get("root", "."))
-    if tool == "ripgrep":
-        return f'"{args.get("query", "?")}" in {args.get("path", ".")}'
-    if tool == "find_files":
-        return f'"{args.get("pattern", "?")}" in {args.get("root", ".")}'
+    if tool == "grep":
+        return f'"{args.get("pattern", "?")}" in {args.get("path", ".")}'
+    if tool == "glob":
+        return f'"{args.get("pattern", "?")}" in {args.get("path", ".")}'
     return "?"
 
 

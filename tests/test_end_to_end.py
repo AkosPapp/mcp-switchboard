@@ -50,11 +50,13 @@ HUB_MODULE = REPO / "hub"
 class HubProcess:
     """A running hub, addressed the way anything else would address it."""
 
-    def __init__(self, process: subprocess.Popen, tunnel_port: int, private_port: int, log: Path):
+    def __init__(self, process: subprocess.Popen, tunnel_port: int, private_port: int, log: Path,
+                 data_dir: Path | None = None):
         self.process = process
         self.tunnel_port = tunnel_port
         self.private_port = private_port
         self.log = log
+        self.data_dir = data_dir
 
     @property
     def base(self) -> str:
@@ -136,7 +138,7 @@ async def start_hub(binary: str, data_dir: Path, **extra_env: str) -> HubProcess
     process = subprocess.Popen(
         [binary], cwd=data_dir, env=env, stdout=log_file, stderr=subprocess.STDOUT
     )
-    hub = HubProcess(process, tunnel_port, private_port, log_path)
+    hub = HubProcess(process, tunnel_port, private_port, log_path, data_dir)
 
     async def answering():
         if process.poll() is not None:
@@ -256,7 +258,7 @@ async def test_tool_reaches_both_the_console_and_an_mcp_consumer(running_hub, cl
 
         # The built-in coding harness is added by default, with no mcp.json entry.
         harness_tools = {t["name"] for t in ready["harness"]["tools"]}
-        assert {"run_command", "file_read", "git_diff", "process_start"} <= harness_tools
+        assert {"bash", "read", "git_diff", "process_start"} <= harness_tools
 
         # --- path 1: the way the web console calls a tool ---
         response = await http.post(

@@ -62,5 +62,77 @@ export function useDeleteSkill() {
   });
 }
 
-/** What follows the slash: lowercase letters, digits, - and _ (mirrors the hub's check). */
-export const SKILL_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+/** What follows the slash: the opencode grammar (mirrors the hub's check). */export const SKILL_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/** The SKILL.md file verbatim, as the hub stores it on disk. */
+export interface SkillRaw {
+  markdown: string;
+}
+
+export function useSkillRaw(id: string | null) {
+  return useQuery({
+    queryKey: [...skillKeys.list, "raw", id ?? ""],
+    queryFn: async () => (await request<SkillRaw>(`skills/${encodeURIComponent(id!)}/raw`)).markdown,
+    enabled: id !== null,
+  });
+}
+
+export function usePutSkillRaw() {
+  const invalidate = useInvalidate();
+  return useMutation({
+    mutationFn: ({ id, markdown }: { id: string; markdown: string }) =>
+      request<Skill>(`skills/${encodeURIComponent(id)}/raw`, { method: "PUT", body: JSON.stringify({ markdown }) }),
+    onSuccess: invalidate,
+  });
+}
+
+/** Skills scanned on client hosts, stored read-only under skills/hosts/. */
+export interface HostSkill {
+  host: string;
+  name: string;
+  description: string;
+  source: string;
+  path: string;
+  /** A managed skill of the same name wins; this copy is only a mirror. */
+  shadowed: boolean;
+}
+
+export const hostSkillKeys = { list: ["skills", "hosts"] as const };
+
+export function useHostSkills(enabled = true) {
+  return useQuery({
+    queryKey: hostSkillKeys.list,
+    queryFn: async () => (await request<{ skills?: HostSkill[] }>("skills/hosts")).skills ?? [],
+    enabled,
+  });
+}
+
+export function useImportHostSkill() {
+  const invalidate = useInvalidate();
+  return useMutation({
+    mutationFn: ({ host, name }: { host: string; name: string }) =>
+      request<Skill>("skills/import", { method: "POST", body: JSON.stringify({ host, name }) }),
+    onSuccess: invalidate,
+  });
+}
+
+/** The persona prompt ($DATA_DIR/prompts/base.md): the identity leading every chat. */
+export const personaKeys = { get: ["persona"] as const };
+
+export function usePersona() {
+  return useQuery({
+    queryKey: personaKeys.get,
+    queryFn: async () => (await request<{ persona: string }>("persona")).persona,
+  });
+}
+
+export function usePutPersona() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (persona: string) => request<{ ok: boolean }>("persona", { method: "PUT", body: JSON.stringify({ persona }) }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: personaKeys.get });
+      client.invalidateQueries({ queryKey: ["chatSystemPrompt"] });
+    },
+  });
+}

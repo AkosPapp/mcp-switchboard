@@ -31,7 +31,7 @@ var timeNowTool = &sbTool{
 	},
 }
 
-func init() { registerExtraTool(timeNowTool, nil) }
+func init() { registerExtraTool(timeNowTool, func(m *Manager) bool { return m.set.AgentDebugTools }) }
 
 func loadZone(name string) (*time.Location, error) {
 	name = strings.TrimSpace(name)

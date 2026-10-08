@@ -22,6 +22,7 @@ import logging
 import os
 import random
 import ssl
+import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
@@ -48,6 +49,12 @@ MAX_BACKOFF_DELAY = 60.0
 
 PING_INTERVAL = 20
 PING_TIMEOUT = 10
+
+# A session must hold this long after hello_ack before a drop re-bases the
+# reconnect backoff. Without it, two clients sharing a label evict each other
+# at the reconnect rate forever (every eviction looks like a fresh successful
+# session). See the hub evict path: it sends the explanatory error frame.
+STABLE_CONNECTION = 15.0
 
 _WS_SCHEMES = {"ws": "ws", "wss": "wss", "http": "ws", "https": "wss"}
 
@@ -169,6 +176,9 @@ class TunnelSettings:
     # The host brief (identity, git, tools, scratch) ships with every hello
     # too and refreshes via context_update; --no-env-brief turns it off.
     env_brief: bool = True
+    # SKILL.md skills scanned on this host ship with every hello and refresh
+    # via skills_update; --no-skills turns it off.
+    skills: bool = True
 
 
 class HubConnection:
@@ -201,10 +211,18 @@ class HubConnection:
         self._ws: Any = None
         self._acked = False
         self._session_ok = False
+        # hello_ack's monotonic clock, for the stable-session backoff rule, and
+        # the hub's "a newer client took this label" flag (see STABLE_CONNECTION
+        # and _handle_error); both refreshed per connection in _connect_and_serve.
+        self._ack_at = 0.0
+        self._replaced = False
+        # last sleep the run loop asked for, exposed for tests and triage
+        self.last_reconnect_delay: Optional[float] = None
         # Last instruction set and host brief sent on the live connection
         # (None = never), for the context_update freshness loop.
         self._instructions_last: Optional[List[Dict[str, str]]] = None
         self._brief_last: Optional[str] = None
+        self._skills_last: Optional[List[Dict[str, str]]] = None
         self._stopping = False
         self._stop_event: Optional[asyncio.Event] = None
         # Set when run() ended because the tunnel gave up (fatal rejection or
@@ -252,8 +270,16 @@ class HubConnection:
                 if self._stopping:
                     break
 
-                if self._session_ok:
-                    # A session that got as far as hello_ack starts backoff over.
+                stable = (
+                    self._session_ok
+                    and not self._replaced
+                    and time.monotonic() - self._ack_at >= STABLE_CONNECTION
+                )
+                if stable:
+                    # ONLY a session that reached hello_ack AND held it for
+                    # STABLE_CONNECTION starts the backoff over: a connection
+                    # the hub dropped (or replaced) within that window is churn
+                    # to damp, not success to forget.
                     attempt = 0
 
                 attempt += 1
@@ -266,11 +292,16 @@ class HubConnection:
                     )
                     break
 
+                # The exponent is bounded before the power: `2 ** attempt` as
+                # an int never overflows on its own, but multiplying it into a
+                # float does — an infinite-retry client that never connects
+                # would crash outright once attempt passed ~1024.
                 delay = min(
-                    self.settings.reconnect_delay * (2 ** (attempt - 1)),
+                    self.settings.reconnect_delay * (2 ** min(attempt - 1, 40)),
                     MAX_BACKOFF_DELAY,
                 )
                 delay *= 1 + random.uniform(-BACKOFF_JITTER, BACKOFF_JITTER)
+                self.last_reconnect_delay = delay
                 LOGGER.info("reconnecting in %.1fs (attempt %d)", delay, attempt)
                 if await self._sleep_or_stop(delay):
                     break
@@ -309,6 +340,8 @@ class HubConnection:
     async def _connect_and_serve(self) -> None:
         self._acked = False
         self._session_ok = False
+        self._replaced = False
+        self._ack_at = 0.0
         kwargs = {
             _header_kwarg(): {"Authorization": f"Bearer {self.settings.token}"},
             "ping_interval": PING_INTERVAL,
@@ -323,6 +356,7 @@ class HubConnection:
             closer = asyncio.create_task(self._close_when_stopped(ws))
             self._instructions_last = self._collect_instructions()
             self._brief_last = self._collect_brief()
+            self._skills_last = self._collect_skills()
             try:
                 await self._send(
                     protocol.hello(
@@ -334,6 +368,7 @@ class HubConnection:
                         self.settings.environment,
                         self._instructions_last,
                         environment_brief=self._brief_last,
+                        skills=self._skills_last,
                     )
                 )
                 refresh = asyncio.create_task(self._context_refresh_loop())
@@ -427,6 +462,7 @@ class HubConnection:
         )
         self._acked = True
         self._session_ok = True
+        self._ack_at = time.monotonic()
         # The hub opens a fresh MCP session per connection, and a server that
         # already completed `initialize` would reject a second one, so every
         # (re)connect restarts every local server. See docs/PROTOCOL.md.
@@ -469,6 +505,14 @@ class HubConnection:
     def _handle_error(self, data: Dict[str, Any]) -> None:
         message = data.get("message") or "unspecified error"
         server = data.get("server")
+        if self._acked and _is_label_in_use(message):
+            # The hub replaced this connection with a newer one carrying the
+            # same label (a second live client). Keep reconnecting, but this
+            # session must not re-base the backoff, or two such clients evict
+            # each other at the reconnect rate forever.
+            self._replaced = True
+            LOGGER.warning("superseded by a newer connection for label %r: %s", self.settings.label, message)
+            return
         if not self._acked:
             # Before hello_ack an error means the hub refused this client -
             # unsupported protocol version, illegal server name. Retrying with
@@ -549,15 +593,27 @@ class HubConnection:
         # None (not "") so an old hub omits the field when collection is off.
         return environment.collect_environment_brief(root, instruction_paths=paths) or None
 
+    def _collect_skills(self) -> Optional[List[Dict[str, str]]]:
+        """Scanned SKILL.md skills for hello, or None when the feature is off.
+
+        None (not []) also covers a host with no skills on an old hub: the
+        field simply disappears; a hub that knows the feature reads the empty
+        list back as skills_update when they change.
+        """
+        if not self.settings.skills:
+            return None
+        root = Path(self.settings.instruction_root or os.getcwd())
+        return environment.scan_skills(root) or None
+
     async def _context_refresh_loop(self) -> None:
-        """Re-read instruction files and the host brief; push a context_update on change.
+        """Re-read instruction files, the host brief and the skills; push updates on change.
 
         The hub re-injects the fresh text from the next turn on, so editing
         AGENTS.md mid-session actually reaches the agent (P1-A acceptance) and
         a changing git state keeps the brief honest (P2-B). Each refresh resets
         the hub's staleness clock for whatever it carries.
         """
-        if not (self.settings.instruction_root or self.settings.env_brief):
+        if not (self.settings.instruction_root or self.settings.env_brief or self.settings.skills):
             return
         interval = max(self.settings.instructions_interval, 0.2)
         while True:
@@ -566,9 +622,11 @@ class HubConnection:
             await asyncio.sleep(interval)
             current = self._collect_instructions()
             brief = self._collect_brief(current)
+            skills = self._collect_skills()
             changed_files = current != self._instructions_last
             changed_brief = brief != self._brief_last
-            if not (changed_files or changed_brief):
+            changed_skills = skills != self._skills_last
+            if not (changed_files or changed_brief or changed_skills):
                 continue
             kwargs: Dict[str, Any] = {}
             if changed_files and self.settings.instruction_root:
@@ -576,14 +634,22 @@ class HubConnection:
             if changed_brief and self.settings.env_brief:
                 kwargs["environment_brief"] = brief or ""
             self._instructions_last, self._brief_last = current, brief
-            try:
-                await self._send(protocol.context_update(**kwargs))
-                LOGGER.info(
-                    "sent context_update: %s",
-                    ", ".join(sorted(kwargs)) or "no carried fields",
-                )
-            except Exception as e:  # noqa: BLE001 - the read loop owns the connection
-                LOGGER.debug("context_update send failed (connection dropping?): %s", e)
+            if kwargs:
+                try:
+                    await self._send(protocol.context_update(**kwargs))
+                    LOGGER.info(
+                        "sent context_update: %s",
+                        ", ".join(sorted(kwargs)) or "no carried fields",
+                    )
+                except Exception as e:  # noqa: BLE001 - the read loop owns the connection
+                    LOGGER.debug("context_update send failed (connection dropping?): %s", e)
+            if changed_skills and self.settings.skills:
+                self._skills_last = skills
+                try:
+                    await self._send(protocol.skills_update(skills or []))
+                    LOGGER.info("sent skills_update: %d skills", len(skills or []))
+                except Exception as e:  # noqa: BLE001 - same reason
+                    LOGGER.debug("skills_update send failed (connection dropping?): %s", e)
 
     async def _send(self, frame: Dict[str, Any]) -> None:
         ws = self._ws

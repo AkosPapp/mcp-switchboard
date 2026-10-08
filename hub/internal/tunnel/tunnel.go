@@ -29,6 +29,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/AkosPapp/mcp-switchboard/hub/internal/events"
+	"github.com/AkosPapp/mcp-switchboard/hub/internal/library"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/mcpsession"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/protocol"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/registry"
@@ -70,6 +72,15 @@ type Options struct {
 	HubVersion string
 	Metrics    Metrics
 	Logger     *slog.Logger
+
+	// Lib, when set, receives every client's scanned skills as
+	// skills/hosts/<label>/<name>/SKILL.md (hello + skills_update frames).
+	// Nil leaves scanning to the console's view of the connection only.
+	Lib *library.Library
+
+	// Bus, when set, gets a TypeSkill event whenever a host's scanned set
+	// changes, so the console refreshes without polling.
+	Bus *events.Bus
 }
 
 // legacyProtocolVersion is the newest MCP revision that starts with initialize.
@@ -243,12 +254,25 @@ func (c *clientConn) send(_ context.Context, frame any) error {
 }
 
 // evict shuts this connection down because a newer one took its label. It must
-// not block the evictor, so the close handshake runs on its own goroutine.
+// not block the evictor, so it runs on its own goroutine: first an explanatory
+// error frame (a client that sees a bare socket teardown reconnects instantly
+// and — with a second live client on the same label — evicts IT back, an
+// eviction tennis match at the reconnect rate; the frame plus the client's
+// stable-session rule turns that into a legible, backed-off retry), then the
+// cancellation and the close, in that order so the reason actually reaches the
+// peer. Every step is best-effort with a short bound: an evicted connection
+// that cannot even say goodbye must still go away.
 func (c *clientConn) evict() {
-	if c.cancelRun != nil {
-		c.cancelRun()
-	}
-	go c.ws.Close(websocket.StatusPolicyViolation, "replaced by a newer connection")
+	go func() {
+		dCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = c.send(dCtx, protocol.ErrorFrame("label "+fmt.Sprintf("%q", c.connection.Label)+
+			" is already connected from a newer connection; this one is replaced — retry after a backoff, or stop the other client", ""))
+		if c.cancelRun != nil {
+			c.cancelRun()
+		}
+		_ = c.ws.Close(websocket.StatusPolicyViolation, "replaced by a newer connection")
+	}()
 }
 
 // keepalive pings the client until the connection ends, closing it when a ping
@@ -392,7 +416,32 @@ func (c *clientConn) acceptHello(frame *protocol.Frame) error {
 
 	c.connection = connection
 	c.log = c.log.With("label", label)
+	if len(frame.Client.Skills) > 0 {
+		c.storeScannedSkills(frame.Client.Skills)
+	}
 	return nil
+}
+
+// storeScannedSkills mirrors one connection's scanned skill set into the
+// library's skills/hosts/<label>/ tree (wholesale, like the frame contract)
+// and tells the console it changed. Best-effort: a disk hiccup never drops a
+// tunnel connection, and the live copy on the Connection object still serves
+// the session that is up.
+func (c *clientConn) storeScannedSkills(skills []protocol.SkillFile) {
+	if c.opts.Lib == nil || c.connection == nil {
+		return
+	}
+	items := make([]library.RawSkill, 0, len(skills))
+	for _, s := range skills {
+		items = append(items, library.RawSkill{Name: s.Name, Description: s.Description, Source: s.Source, Content: s.Content})
+	}
+	if err := c.opts.Lib.PutHostSkills(c.connection.Label, items); err != nil {
+		c.log.Warn("could not store scanned skills", "error", err)
+		return
+	}
+	if c.opts.Bus != nil {
+		c.opts.Bus.Publish(events.Event{Type: events.TypeSkill})
+	}
 }
 
 func (c *clientConn) receiveLoop(ctx context.Context) {
@@ -428,6 +477,15 @@ func (c *clientConn) receiveLoop(ctx context.Context) {
 				if frame.EnvironmentBrief != nil {
 					c.connection.SetBrief(protocol.SanitizeEnvironmentBrief(*frame.EnvironmentBrief), time.Now())
 				}
+			}
+		case protocol.TypeSkillsUpdate:
+			// The client re-scanned its SKILL.md directories. The list is
+			// wholesale (an empty one clears the copies); never a reason to
+			// drop the connection.
+			if c.connection != nil {
+				skills := protocol.SanitizeSkills(frame.Skills)
+				c.connection.SetSkills(skills, time.Now())
+				c.storeScannedSkills(skills)
 			}
 		default:
 			c.log.Warn("ignoring unknown frame type", "type", frame.Type)

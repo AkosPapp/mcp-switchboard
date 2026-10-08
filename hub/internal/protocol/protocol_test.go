@@ -82,7 +82,7 @@ func TestFrameTypesMatchManifest(t *testing.T) {
 	declared := map[string]bool{
 		TypeHello: true, TypeHelloAck: true, TypeMCP: true,
 		TypeServerState: true, TypeRestart: true, TypeError: true,
-		TypeContextUpdate: true,
+		TypeContextUpdate: true, TypeSkillsUpdate: true,
 	}
 	if len(declared) != len(m.Frames) {
 		t.Fatalf("declared %d frame types, manifest has %d", len(declared), len(m.Frames))
@@ -149,6 +149,7 @@ func TestDecodeReadsEveryClientFrame(t *testing.T) {
 		TypeContextUpdate: `{"type":"context_update","instructions":[{"path":"AGENTS.md","content":"rule\n"}],"environment_brief":"uid=1 me"}`,
 		TypeMCP:           `{"type":"mcp","server":"git","payload":{"jsonrpc":"2.0"}}`,
 		TypeError:         `{"type":"error","message":"boom","server":"git"}`,
+		TypeSkillsUpdate:  `{"type":"skills_update","skills":[{"name":"pdf","path":"pdf/SKILL.md","source":"global:.claude/skills","description":"d","content":"body"}]}`,
 	}
 	for want, raw := range cases {
 		frame, err := Decode([]byte(raw))
@@ -189,7 +190,7 @@ func TestManifestDeclaresOptionalClientEnvironment(t *testing.T) {
 	for _, f := range m.Frames[TypeHello].ClientOptional {
 		declared[f] = true
 	}
-	for _, want := range []string{"environment", "instructions", "environment_brief"} {
+	for _, want := range []string{"environment", "instructions", "environment_brief", "skills"} {
 		if !declared[want] {
 			t.Fatalf("manifest hello.clientOptional does not declare %s", want)
 		}
@@ -199,6 +200,7 @@ func TestManifestDeclaresOptionalClientEnvironment(t *testing.T) {
 		Environment:      &ClientEnvironment{Kinds: []string{}},
 		Instructions:     []InstructionFile{{Path: "AGENTS.md", Content: "x"}},
 		EnvironmentBrief: "uid=1 me",
+		Skills:           []SkillFile{{Name: "pdf", Content: "body"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -396,5 +398,42 @@ func TestContextUpdateFrameCarriesInstructions(t *testing.T) {
 	}
 	if len(frame.Instructions) != 1 || frame.Instructions[0].Content != "v2\n" {
 		t.Errorf("context_update instructions lost: %+v", frame.Instructions)
+	}
+}
+
+func TestSanitizeSkills(t *testing.T) {
+	in := []SkillFile{
+		{Name: "good", Path: "a/SKILL.md", Source: "global:.claude/skills", Description: "d", Content: "body"},
+		{Name: "good", Path: "dup", Source: "x", Content: "second"}, // name clash: first wins
+		{Name: "Bad-Name", Path: "p", Source: "x", Content: "body"}, // uppercase rejected
+		{Name: "bad--name", Path: "p", Source: "x", Content: "body"},
+		{Name: "", Path: "p", Source: "x", Content: "body"},
+		{Name: "empty", Path: "p", Source: "x", Content: ""},
+		{Name: "multiline", Path: "two\nlines", Source: "multi\nline", Description: "  spaced\nout  ", Content: "b"},
+	}
+	out := SanitizeSkills(in)
+	if len(out) != 2 {
+		t.Fatalf("got %d skills, want 2: %+v", len(out), out)
+	}
+	if out[0].Name != "good" || out[0].Content != "body" {
+		t.Errorf("first skill = %+v", out[0])
+	}
+	if out[1].Path != "two lines" || out[1].Source != "multi line" || out[1].Description != "spaced out" {
+		t.Errorf("labels not collapsed: %+v", out[1])
+	}
+}
+
+func TestHelloDecodesStrictlyOptionalSkills(t *testing.T) {
+	c := helloWith(t, `{"label":"lab","skills":"junk"}`)
+	if c.Skills != nil || c.Label != "lab" {
+		t.Errorf("malformed skills must be dropped, not refused: %+v", c)
+	}
+	c = helloWith(t, `{"label":"lab","skills":[{"name":"pdf","content":"b"},{"name":"oops!!","content":"b"}]}`)
+	if len(c.Skills) != 1 || c.Skills[0].Name != "pdf" {
+		t.Errorf("skills = %+v", c.Skills)
+	}
+	c = helloWith(t, `{"label":"lab"}`)
+	if c.Skills != nil {
+		t.Errorf("absent skills must stay nil: %+v", c.Skills)
 	}
 }

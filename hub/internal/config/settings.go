@@ -22,11 +22,21 @@ const (
 // an MCP_SWITCHBOARD_* variable and is therefore expressible in the NixOS
 // module without new machinery (spec.md E4).
 type Settings struct {
-	// The public-facing listener: only /tunnel/v1 and /health live here, and a
-	// token is always required.
+	// The public-facing listener: by default only /tunnel/v1 and /health live
+	// here, and a token is always required.
 	TunnelHost  string
 	TunnelPort  int
 	TunnelToken string
+
+	// PublicAPI also mounts /api on the tunnel listener, behind a bearer
+	// token, so a client that can dial the tunnel (e.g. an opencode plugin
+	// over a tailnet) can drive the chat API from afar without the private
+	// listener being exposed. Off by default: everything else about /api
+	// assumes the trust level of the private listener.
+	PublicAPI bool
+	// PublicAPIToken authenticates that bearer; empty falls back to
+	// TUNNEL_TOKEN, one secret for the whole public surface.
+	PublicAPIToken string
 
 	// The private listener: console, /api, /mcp and /metrics. Unauthenticated
 	// by default because it is meant to bind loopback and never be exposed;
@@ -71,6 +81,11 @@ type Settings struct {
 	// json format enabled); when set, chats are offered switchboard.web.search.
 	SearxngURL string
 
+	// AgentDebugTools (AGENT_DEBUG_TOOLS=true) re-adds the convenience tools
+	// that clutter a focused agent's catalog (switchboard.calc,
+	// switchboard.time.now). They are off by default because opencode-style
+	// agents do not expect them and they compete for the model's attention.
+	AgentDebugTools bool
 	// WebFetchDisabled turns off switchboard.web.fetch (WEB_FETCH=false); the
 	// tool is otherwise always offered.
 	WebFetchDisabled bool
@@ -167,9 +182,9 @@ func (s Settings) String() string {
 	}
 	return fmt.Sprintf(
 		"Settings{tunnel=%s:%d private=%s:%d data=%s tunnelToken=%s privateToken=%s "+
-			"agents=%v anthropicKey=%s openaiKey=%s openaiCompatibleKey=%s}",
+			"publicApi=%v publicApiToken=%s agents=%v anthropicKey=%s openaiKey=%s openaiCompatibleKey=%s}",
 		s.TunnelHost, s.TunnelPort, s.PrivateHost, s.PrivatePort, s.DataDir,
-		mask(s.TunnelToken), mask(s.PrivateToken), s.AgentsEnabled,
+		mask(s.TunnelToken), mask(s.PrivateToken), s.PublicAPI, mask(s.PublicAPIToken), s.AgentsEnabled,
 		mask(s.LLMAnthropicAPIKey), mask(s.LLMOpenAIAPIKey), mask(s.LLMOpenAICompatibleAPIKey),
 	)
 }
@@ -231,6 +246,15 @@ func Load(envFile string) (Settings, error) {
 	}
 	if s.PrivateToken, err = Get("PRIVATE_TOKEN", "", true); err != nil {
 		return fail(err)
+	}
+	if s.PublicAPI, err = GetBool("PUBLIC_API", false); err != nil {
+		return fail(err)
+	}
+	if s.PublicAPIToken, err = Get("PUBLIC_API_TOKEN", "", true); err != nil {
+		return fail(err)
+	}
+	if s.PublicAPI && s.PublicAPIToken == "" {
+		s.PublicAPIToken = s.TunnelToken
 	}
 	if s.DataDir, err = GetPath("DATA_DIR", "/var/lib/mcp-switchboard"); err != nil {
 		return fail(err)
@@ -330,6 +354,7 @@ func loadAgentSettings(s *Settings) error {
 	if err != nil {
 		return err
 	}
+	s.AgentDebugTools, _ = GetBool("AGENT_DEBUG_TOOLS", false)
 	s.WebFetchDisabled = !webFetch
 	allow, err := Get("HTTP_GET_ALLOWLIST", "", false)
 	if err != nil {

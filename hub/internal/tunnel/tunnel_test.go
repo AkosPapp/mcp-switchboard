@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/events"
+	"github.com/AkosPapp/mcp-switchboard/hub/internal/library"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/protocol"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/registry"
 )
@@ -465,15 +466,27 @@ func TestDuplicateLabelEvictsTheOldConnection(t *testing.T) {
 		conns := reg.Connections()
 		return len(conns) == 1 && conns[0].ID != oldID
 	})
-	// The old socket is closed, which ends its inbox.
+	// The old client must be TOLD why its socket goes away (the already-
+	// connected frame the client uses to damp its reconnect backoff against
+	// eviction tennis), then the inbox ends with the socket.
+	var gotEviction bool
 	waitFor(t, "the old socket to close", func() bool {
 		select {
-		case _, ok := <-first.inbox:
-			return !ok
+		case frame, ok := <-first.inbox:
+			if !ok {
+				return true
+			}
+			if frame.Type == protocol.TypeError && strings.Contains(frame.Message, "already connected") {
+				gotEviction = true
+			}
+			return false
 		default:
 			return false
 		}
 	})
+	if !gotEviction {
+		t.Error("the evicted client never received the explanatory already-connected error frame")
+	}
 	// Old teardown must not remove the new registration.
 	time.Sleep(200 * time.Millisecond)
 	conns := reg.Connections()
@@ -739,4 +752,73 @@ func TestHelloCarriesAndContextUpdateReplacesInstructions(t *testing.T) {
 	waitFor(t, "the next frame to be processed", func() bool {
 		return len(conn.Instructions()) == protocol.MaxInstructionFiles
 	})
+}
+
+func TestSkillsHelloAndSkillsUpdateStoreHostSkillFiles(t *testing.T) {
+	reg := registry.New(events.NewBus())
+	lib, err := library.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bus := events.NewBus()
+	handler := NewHandler(reg, Options{
+		Token: testToken, ToolsTimeout: 3 * time.Second, StopWait: time.Second,
+		HubVersion: "test", Lib: lib, Bus: bus,
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	client, err := dial(t, srv, testToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skill := map[string]string{
+		"name": "pdf", "path": "pdf/SKILL.md", "source": "global:.claude/skills",
+		"description": "pdf work", "content": "---\nname: pdf\ndescription: pdf work\n---\nDo the thing.\n",
+	}
+	client.send(map[string]any{
+		"type":     protocol.TypeHello,
+		"protocol": protocol.Version,
+		"client": map[string]any{
+			"name": "fake", "version": "0", "instance": "i", "label": "box",
+			"skills": []map[string]string{skill},
+		},
+		"servers": []protocol.ServerDecl{{Name: "git"}},
+	})
+	client.serve()
+
+	waitFor(t, "registration", func() bool { return len(reg.Connections()) == 1 })
+	conn := reg.Connections()[0]
+	skills, at := conn.Skills()
+	if len(skills) != 1 || skills[0].Name != "pdf" || at.IsZero() {
+		t.Fatalf("hello skills lost: %+v %v", skills, at)
+	}
+	waitFor(t, "the SKILL.md on disk", func() bool {
+		d, err := lib.GetHostSkill("box", "pdf")
+		return err == nil && strings.Contains(d.Body, "Do the thing.")
+	})
+
+	// Wholesale replace: b appears, pdf vanishes.
+	client.send(map[string]any{"type": protocol.TypeSkillsUpdate, "skills": []map[string]string{{
+		"name": "b", "path": "b/SKILL.md", "source": "project:.claude/skills",
+		"description": "bee", "content": "body b\n",
+	}}})
+	waitFor(t, "the conn skill set to swap", func() bool {
+		s, _ := conn.Skills()
+		return len(s) == 1 && s[0].Name == "b"
+	})
+	waitFor(t, "the stale host file to go", func() bool {
+		_, err := lib.GetHostSkill("box", "pdf")
+		return err != nil
+	})
+
+	// Empty list clears both copies; junk is dropped, connection stays up.
+	client.send(map[string]any{"type": protocol.TypeSkillsUpdate, "skills": []any{}})
+	waitFor(t, "the cleared set", func() bool {
+		s, _ := conn.Skills()
+		return len(s) == 0
+	})
+	client.send("not even close")
+	client.hello(protocol.ServerDecl{Name: "late"})
+	waitFor(t, "the still-live connection", func() bool { return len(reg.Connections()) == 1 })
 }

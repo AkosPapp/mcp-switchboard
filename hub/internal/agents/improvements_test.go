@@ -239,8 +239,8 @@ func TestOptimizeSkillsUnlockFlow(t *testing.T) {
 	prov := e.scripted("p",
 		llm.Say("plain turn"),
 		llm.CallTool("switchboard_optimize_chats_list", map[string]any{}),
-		llm.CallTool("switchboard_optimize_prompt_set", map[string]any{"profile_id": def[0].ID, "system_prompt": "IMPROVED SYSTEM PROMPT"}),
-		llm.CallTool("switchboard_optimize_skill_set", map[string]any{"name": "optimized-out", "description": "made by the optimizer", "body": "do the improved thing", "auto": false}),
+		llm.CallTool("switchboard_prompt_set", map[string]any{"profile_id": def[0].ID, "system_prompt": "IMPROVED SYSTEM PROMPT"}),
+		llm.CallTool("switchboard_skill_set", map[string]any{"name": "optimized-out", "description": "made by the optimizer", "body": "do the improved thing", "auto": false}),
 		llm.Say("read done"),
 		llm.Say("locked again"),
 	)

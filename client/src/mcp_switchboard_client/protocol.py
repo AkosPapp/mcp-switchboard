@@ -21,6 +21,7 @@ SERVER_STATE = "server_state"
 RESTART = "restart"
 ERROR = "error"
 CONTEXT_UPDATE = "context_update"
+SKILLS_UPDATE = "skills_update"
 
 STATE_STARTING = "starting"
 STATE_RUNNING = "running"
@@ -53,6 +54,7 @@ def hello(
     environment: Optional[Dict[str, Any]] = None,
     instructions: Optional[List[Dict[str, str]]] = None,
     environment_brief: Optional[str] = None,
+    skills: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     client: Dict[str, Any] = {"name": client_name, "version": version, "instance": instance, "label": label}
     if environment is not None:
@@ -61,6 +63,8 @@ def hello(
         client["instructions"] = instructions
     if environment_brief is not None:
         client["environment_brief"] = environment_brief
+    if skills is not None:
+        client["skills"] = skills
     return {
         "type": HELLO,
         "protocol": PROTOCOL_VERSION,
@@ -86,6 +90,16 @@ def context_update(
     if environment_brief is not None:
         frame["environment_brief"] = environment_brief
     return frame
+
+
+def skills_update(skills: List[Dict[str, str]]) -> Dict[str, Any]:
+    """Replace the hub's copy of the skills scanned on this host.
+
+    The list is complete (an empty list means the host has none), mirrors the
+    context_update wholesale-replacement contract, is additive (protocol
+    version stays 1), and hubs that do not know the frame ignore it.
+    """
+    return {"type": SKILLS_UPDATE, "skills": skills}
 
 
 def hello_ack(connection_id: str, hub_name: str, hub_version: str) -> Dict[str, Any]:

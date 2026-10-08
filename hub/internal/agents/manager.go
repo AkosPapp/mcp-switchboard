@@ -13,6 +13,7 @@ import (
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/calls"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/config"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/events"
+	"github.com/AkosPapp/mcp-switchboard/hub/internal/library"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/llm"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/push"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/registry"
@@ -57,6 +58,10 @@ type Options struct {
 	// Push sends the two phone notifications of spec.md 8.7. Nil (or an
 	// unconfigured Sender) means notifications are simply never sent.
 	Push Pusher
+	// Library is the file store for skills and prompts (spec.md 5.2b/5.2a:
+	// files are the record, the SQLite rows the index). Nil keeps the
+	// pre-library behaviour: SQLite only, no SKILL.md files.
+	Library *library.Library
 }
 
 // Manager is the orchestrator: run scheduler, run loop, tool catalog and the
@@ -73,6 +78,7 @@ type Manager struct {
 	loki     calls.Exporter
 	log      *slog.Logger
 	push     Pusher
+	lib      *library.Library
 	maxRun   int
 	parallel int
 
@@ -127,7 +133,7 @@ func New(o Options) *Manager {
 	base, cancel := context.WithCancelCause(context.Background())
 	return &Manager{
 		st: o.Store, reg: o.Registry, disp: o.Dispatcher, llm: o.LLM, bus: o.Bus, stream: o.Streamer,
-		set: o.Settings, met: o.Metrics, loki: o.Loki, log: log, push: o.Push, maxRun: maxRun, parallel: par,
+		set: o.Settings, met: o.Metrics, loki: o.Loki, log: log, push: o.Push, lib: o.Library, maxRun: maxRun, parallel: par,
 		baseCtx: base, baseCancel: cancel,
 		runs: map[string]*runState{}, byAgent: map[string]map[string]*runState{},
 		chatActive: map[string]*runState{}, chatQueue: map[string][]*runState{},
@@ -149,6 +155,14 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	if err := m.seedProfiles(ctx); err != nil {
 		return fmt.Errorf("agents: seeding the default profile: %w", err)
+	}
+	if m.lib != nil {
+		// Seed the persona prompt, then adopt any file edits (or freshly
+		// hand-written SKILL.md / prompt files) into the index.
+		if _, err := m.lib.BasePrompt(); err != nil {
+			return fmt.Errorf("agents: seeding the persona prompt: %w", err)
+		}
+		m.reconcileLibrary(ctx)
 	}
 	m.syncAgentGauge()
 	go func() {

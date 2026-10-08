@@ -131,6 +131,24 @@ agent without a reconnect) and whenever the environment brief changes (each push
 carry's staleness clock). Same caps and same tolerance rules as the corresponding `hello` fields; a hub
 that does not know this frame ignores it, so the older snapshot simply stays in use.
 
+### `skills_update` — client → hub
+
+```json
+{"type": "skills_update", "skills": [{"name": "pdf", "path": "pdf/SKILL.md",
+  "source": "global:.claude/skills", "description": "PDF work", "content": "---\nname: pdf\n---\nDo the thing.\n"}]}
+```
+
+The live replacement for `hello`'s `client.skills`: every SKILL.md skill the client can see on its
+host (opencode discovery locations — `~/.claude/skills`, `~/.config/opencode/skills`, `~/.agents/skills`
+and the project-level `.claude/.opencode/.agents/skills` directories up to the git root). The list is
+complete — an empty list means the host has none — and the client sends it whenever the scan changes.
+`name` is the directory name and must match the skill grammar (`^[a-z0-9]+(-[a-z0-9]+)*$`);
+`path` and `source` are display labels; `content` is the whole SKILL.md text. The hub caps the set
+(200 skills, 64 KiB each, 256 KiB total), stores valid entries under
+`skills/hosts/<label>/<name>/SKILL.md` in its data directory as read-only mirrors, and a hub that
+does not know this frame ignores it. Untrusted input: counts and sizes are bounded hub-side, junk is
+dropped rather than refused (same discipline as `instructions`).
+
 ## Tool `_meta` extensions
 
 Servers may carry namespaced hints in a tool's `_meta` (an MCP standard field). Switchboard honours

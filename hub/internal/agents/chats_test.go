@@ -469,12 +469,18 @@ func TestHubToolsSpeakOfChatsOnly(t *testing.T) {
 	for n := range alwaysOnExtras {
 		want[n] = true
 	}
+	for _, lib := range []string{
+		"switchboard.skill.list", "switchboard.skill.create", "switchboard.skill.set",
+		"switchboard.skill.delete", "switchboard.skill.raw",
+		"switchboard.prompt.list", "switchboard.prompt.raw", "switchboard.prompt.set",
+		"switchboard.persona.get", "switchboard.persona.set",
+	} {
+		want[lib] = true
+	}
 	// The gated tools are still DEFINED here (the endpoint is the catalog;
 	// buildCatalog is what hides them from a locked chat).
 	for _, gated := range []string{
-		"switchboard.optimize.chats_list", "switchboard.optimize.chat_read", "switchboard.optimize.prompts_list",
-		"switchboard.optimize.prompt_set", "switchboard.optimize.skills_list", "switchboard.optimize.skill_set",
-		"switchboard.optimize.skill_delete",
+		"switchboard.optimize.chats_list", "switchboard.optimize.chat_read",
 	} {
 		want[gated] = true
 	}

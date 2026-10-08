@@ -189,7 +189,11 @@ Unchanged by this revision. Retained verbatim for completeness.
   `127.0.0.1:8097`) serves only `/tunnel/v1` and `/health` and is always token-protected; it is the
   only one meant to be publicly reachable. The **private listener** (default `127.0.0.1:8099`)
   serves `/mcp*`, `/`, `/api/*`, `/metrics`, and is unauthenticated unless
-  `MCP_SWITCHBOARD_PRIVATE_TOKEN` is set.
+  `MCP_SWITCHBOARD_PRIVATE_TOKEN` is set. `MCP_SWITCHBOARD_PUBLIC_API=1` opts into
+  also mounting `/api/*` on the tunnel listener behind a bearer token
+  (`MCP_SWITCHBOARD_PUBLIC_API_TOKEN`, defaulting to the tunnel token) — the
+  remote-control path for clients that can dial the tunnel but not the private
+  listener (e.g. the opencode bridge plugin on another machine).
 - **H1a.** With the orchestrator enabled the private listener also holds **LLM provider
   credentials** and the **entire chat history**. Its threat model changes accordingly; see §10.
 - **H2. Hello validation.** Rejects with an `error` frame and closes on: unsupported protocol
@@ -382,6 +386,13 @@ is therefore on `(COALESCE(parent_id, ''), name) WHERE deleted_at IS NULL`.
 > shared-mutable-history problem the moment two sides branch independently.
 
 ### 5.2a Profiles
+
+Profiles are the library's prompt files (`$DATA_DIR/prompts/<slug>.md`: frontmatter `id`, `name`,
+`description`, `model`, `capabilities`, `approval`, `budget`, `default`; body = the system prompt),
+reconciled disk-first like skills; `$DATA_DIR/prompts/base.md` is the **persona prompt**, the text
+that leads *every* chat's system prompt ahead of the followed profile (seeded with an opencode-style
+identity, editable in the console, via `GET/PUT /api/persona` or `switchboard.persona.get/set`). The
+`profiles` table remains the id index chats and agents reference.
 
 `profiles`
 
@@ -629,9 +640,22 @@ Primary key `(agent_id, label, project, server)`.
 
 ### 5.2b Skills
 
-A **skill** (`skills` table, migration 009) is a named block of instructions: `name` (a slug,
-`[a-z0-9][a-z0-9_-]*`, unique), `description`, `body` and `auto` (default true). Skills are global,
-not per chat or profile. They have two entrances:
+A **skill** is a named block of instructions, stored by the **library** as a real file —
+`$DATA_DIR/skills/<name>/SKILL.md` in the opencode format (YAML frontmatter `name`, `description`, `auto`,
+the hub's `id`; unknown frontmatter keys such as `license` or `metadata` survive every hub rewrite). The
+SQLite `skills` row is only the index: it exists to keep stable ids, and the library reconciles the two
+directions before every turn (a file hand-edited with a text editor wins; a file deleted on disk deletes
+its row; a hand-written file is adopted). `name` is the opencode slug `^[a-z0-9]+(-[a-z0-9]+)*$`
+(≤ 64, unique, equal to the directory name), plus `description`, body and `auto` (default true). Skills are
+global, not per chat or profile. They have two entrances:
+
+- **S0. Clients contribute skills read-only.** Every client scans its
+  host (`~/.claude/skills`, `~/.config/opencode/skills`, `~/.agents/skills`, and the project-level
+  `.claude/.opencode/.agents/skills` up to the git root) and ships the set in `hello.client.skills`,
+  refreshed by `skills_update` frames (docs/PROTOCOL.md). The hub caps it and stores the copies under
+  `$DATA_DIR/skills/hosts/<label>/` — mirrors nobody but their host updates, invisible to agents, shown
+  in the console's Host skills pane, and promotable into the managed library by import (the managed
+  copy then owns the name; the mirror is flagged shadowed).
 
 - **S1. `/name` runs a skill.** A user message whose text is `/name` or `/name arguments`, with
   `name` a known skill, is sent to the model as `<skill name="…">body</skill>` followed by the
@@ -725,7 +749,7 @@ topology changes take effect at the next turn boundary:
      case for a chat that has a client (A19). The client prefix is redundant
      and is dropped: names are `[project__]server__tool`, and the first-party `harness` server
      (§9), which every client carries, drops its server prefix as well, leaving bare tool names
-     such as `run_command`. Every other server keeps its prefix, so tools of different servers
+     such as `bash`. Every other server keeps its prefix, so tools of different servers
      cannot collide. A tool call resolves only against that one client's servers.
    - **Unpinned** — wildcard or multi-client grants (agents made through the API, or with no grants): the fully
      qualified `label__[project__]server__tool` of `Scope.ALL`.
@@ -761,7 +785,7 @@ trusted to use it without a human in the loop for every call.
 
 | Tool | Input | Output | Behaviour |
 |---|---|---|---|
-| `switchboard.chat.spawn` | `{title, system_prompt, model?, grants?, allowed_tools?, budget?, capabilities?, approval?, message?}` | `{chat_id}` | Creates a child chat of the calling chat (A29). `model`, `capabilities` and `approval` default to the caller's (M3). `grants` are intersected with the caller's (A12). `allowed_tools` (optional, list of glob patterns on the *upstream* tool name, e.g. `["file_read","git_*"]`) narrows which tools of the granted servers the child may call: hidden from its catalog and refused in `execTool`; `switchboard.*` tools are unaffected. A child can only narrow: with no list it inherits its parent's, and when the parent has one every requested pattern must match one of the parent's patterns (else denied). Stored as `agents.tool_allow` (JSON, null = no narrowing), shown as `toolAllow` on the Agent. Fails if the child's depth (`parent.depth + 1`) would exceed `AGENT_MAX_DEPTH`, or if the caller already has `AGENT_MAX_CHILDREN` live direct children. `message`, when given, is injected into the child as `sender.kind = "spawn"` and wakes it; its final answer to that first message returns to the caller's chat as a reply (B8), but only that first run: the reliable way to get a result back is for the child to `chat.report`/`chat.send` it. **Coordination pattern** (there is deliberately no `wait_for` tool): to delegate, `chat.spawn` with a `message` that states the task and tells the child to send its result back with `chat.report` (or `chat.send`), then **end the turn**; the child's message wakes the parent, which continues. Do not poll. |
+| `switchboard.chat.spawn` | `{title, system_prompt, model?, grants?, allowed_tools?, budget?, capabilities?, approval?, message?}` | `{chat_id}` | Creates a child chat of the calling chat (A29). `model`, `capabilities` and `approval` default to the caller's (M3). `grants` are intersected with the caller's (A12). `allowed_tools` (optional, list of glob patterns on the *upstream* tool name, e.g. `["read","git_*"]`) narrows which tools of the granted servers the child may call: hidden from its catalog and refused in `execTool`; `switchboard.*` tools are unaffected. A child can only narrow: with no list it inherits its parent's, and when the parent has one every requested pattern must match one of the parent's patterns (else denied). Stored as `agents.tool_allow` (JSON, null = no narrowing), shown as `toolAllow` on the Agent. Fails if the child's depth (`parent.depth + 1`) would exceed `AGENT_MAX_DEPTH`, or if the caller already has `AGENT_MAX_CHILDREN` live direct children. `message`, when given, is injected into the child as `sender.kind = "spawn"` and wakes it; its final answer to that first message returns to the caller's chat as a reply (B8), but only that first run: the reliable way to get a result back is for the child to `chat.report`/`chat.send` it. **Coordination pattern** (there is deliberately no `wait_for` tool): to delegate, `chat.spawn` with a `message` that states the task and tells the child to send its result back with `chat.report` (or `chat.send`), then **end the turn**; the child's message wakes the parent, which continues. Do not poll. |
 | `switchboard.chat.report` | `{status: "done"\|"failed"\|"blocked", summary, details?, artifacts?: [string]}` | `{message_id}` | Offered only to a chat that has a parent (needs no capability). Delivers to the parent chat, as a message from this chat and exactly like `chat.send` (wakes it, fire-and-forget), a fixed-format text: first line `[report status=<status>]`, then the summary, then `Details:` and `Artifacts:` (one `- item` per line) when given. The preferred way for a child to hand its result back. Annotations `destructiveHint: false, openWorldHint: false`. |
 | `switchboard.chat.send` | `{to, message}` | `{message_id}` | `to` is a **name**, as returned by `chat.list`'s `name` field — not a chat id (M4a). Resolved against the same set `chat.list` shows: the caller's parent, a child, or a chat joined to it by an allowed edge (D14; never itself). Inserts `message` into the recipient's **own** (most recently active) chat exactly as if the human had typed it there — a plain `user`-role turn, distinguished only by `sender` metadata (chat id, title and kind, B7) — and wakes it (B2). Always fire-and-forget: there is no `wait`, no synchronous reply, and no special routing back; a chat that expects an answer ends its turn and is woken by the reply. If the recipient wants to answer, it calls `switchboard.chat.send` back to the sender, exactly like any other message — the edge is symmetric (D14), so it always can. The one exception is `switchboard.chat.spawn`'s own `message` (B8): a spawned child's *final* answer is still returned to the spawning chat automatically, because that is a property of spawning a task, not of `chat.send`. |
 | `switchboard.chat.list` | `{}` | `[{name, chat_id, title, status, relation, depth?}]` | Every chat the caller can currently message: its parent and children (`relation: "parent"` / `"child"`, with `depth`) plus every chat joined by an edge (`relation: "connected"`). One flat list, no scope parameter — this is deliberately the *only* way a chat discovers who it can talk to, so there is nothing to get wrong. Never reveals a chat the caller cannot message. `name` is what `chat.send`'s `to` takes. |
@@ -831,6 +855,24 @@ trusted to use it without a human in the loop for every call.
   argument otherwise (X8). `name` is unique enough in practice to address by (it is built as
   `title · <id suffix>`, chats.go's `agentNameFor`), and a reachable set is small and already
   edge-gated, so a collision within it is not a realistic concern.
+
+**Model-facing aliases (opencode fidelity).** The catalog (`buildCatalog`) presents five hub tools under
+their opencode names — `switchboard.chat.spawn`→**`task`**, `switchboard.user.ask`→**`question`**,
+`switchboard.todo.write`→**`todowrite`**, `switchboard.web.fetch`→**`webfetch`**,
+`switchboard.skill.load`→**`skill`** — because the harness ships the rest of that suite under exactly
+those names (v0.4). The alias is display-only: transcripts, the call log, `/api/hub-tools`,
+`/mcp/agent/{id}` and routing keep the real `switchboard.*` name, and `GET /api/chats/{id}/tools` shows
+`name` + `alias` so nothing is hidden. `switchboard.calc` and `switchboard.time.now` are off by default
+(`AGENT_DEBUG_TOOLS=true` re-adds them; the earlier suite-shrink principle, now applied to the hub side
+too). The old `optimize.prompt_set/prompt_list/skill_*` set is replaced by the always-available library
+tools (next paragraph) and `/optimize_skills` keeps only its two evidence-review tools.
+
+**Library tools.** While the library is enabled every chat can be offered `switchboard.skill.list/
+create/set/delete/raw`, `switchboard.prompt.list/raw/set` and `switchboard.persona.get/set`. The reads
+are annotation-read-only; every write is annotation-**destructive** (so `approval: "destructive"` gates
+it) — `skill.set` upserts, `prompt.set` and `persona.set` replace live shared text, and the tool
+descriptions say the model must have the user's explicit OK first. They are the same code paths the
+REST API uses (R1: one authority), so a model edit and a console edit cannot drift.
 
 ### 5.6 Mailbox, wake-up and termination
 
@@ -1001,8 +1043,8 @@ request/response; a chat that is not running cannot be called. So:
   or both `destructiveHint: false` and `openWorldHint: false`. Missing annotations (none at all, or
   the destructive/open-world hints unset) do **not** count as harmless: the MCP defaults for a tool
   that is not read-only are `destructiveHint: true` and `openWorldHint: true`, so the hub follows
-  them. This covers the harness's `run_command`, `run_python`, `process_start`, `git_push`,
-  `file_delete`, `file_write`, `edit_file`, `git_checkout` (§9.6), and any
+  them. This covers the harness's `bash`, `process_start`, `git_push`,
+  `file_delete`, `write`, `edit`, `git_checkout` (§9.6), and any
   unannotated tool from any other server. (`process_kill` is **not** gated: it can address only
   background processes this same harness instance started for this same agent — an unknown id is an
   error, there is no path to an external pid — so killing one is not an external destructive action.)
@@ -1031,13 +1073,23 @@ request/response; a chat that is not running cannot be called. So:
   stated as such and flagged retryable, never surfacing as the same bare "cancelled" as a human deny
   (P1-B — both looked identical in the session that produced this rule).
 - **W6. Shell-command classification: a known follow-up, deliberately not built.** Per-call
-  downgrading of `run_command` by parsing the shell string (read-only probes prompting zero) is
+  downgrading of `bash` by parsing the shell string (read-only probes prompting zero) is
   consistent with S3 (the root is not a security boundary, so annotation-level gating already sits
   above the same cliff) — but it is a security-relevant classifier with a bypass story (quotes,
   command substitution, `bash -c` indirection), and its guarantees cannot currently be stated, so it
-  is not shipped. Until someone writes those guarantees down, `run_command` gates whole.
+  is not shipped. Until someone writes those guarantees down, `bash` gates whole.
 
 ## 6. Storage
+
+The hub's data directory holds one SQLite file plus the file library, all plain enough to browse:
+
+```
+$DATA_DIR/calls.db            every table below, WAL
+$DATA_DIR/skills/<name>/SKILL.md        managed skills (the opencode format)
+$DATA_DIR/skills/hosts/<label>/…        scanned mirrors, read-only until imported
+$DATA_DIR/prompts/<slug>.md             profiles
+$DATA_DIR/prompts/base.md               the persona prompt
+```
 
 ### 6.1 The Store interface
 
@@ -1167,6 +1219,10 @@ one catalog. The handler layer is the boundary, and it is the only place that tr
 | GET/POST | `/api/skills` | list by name / create (`{name, description?, body, auto?}`; `name` is a slug; 400 on a bad one, 409 on a clash) |
 | PATCH/DELETE | `/api/skills/{id}` | any subset of `name`, `description`, `body`, `auto` / delete |
 | GET/PATCH/DELETE | `/api/profiles/{id}` | `PATCH` takes any subset, including `isDefault: true` (A17); `DELETE` is 409 for the default or the only profile |
+| GET/PUT | `/api/persona` | read / replace `$DATA_DIR/prompts/base.md`, the system prompt leading every chat |
+| GET | `/api/skills/hosts` | the scanned host mirrors (host, name, description, source, shadowed) |
+| POST | `/api/skills/import` | `{host, name}` copies a mirror into the managed library (409 on a name clash) |
+| GET/PUT | `/api/skills/{id}/raw` | read / replace a managed skill's SKILL.md verbatim (frontmatter name renames it; unknown keys preserved) |
 | GET | `/api/hub-tools` | every `switchboard.*` tool (the `switchboard.chat.*` names, M4) with its `requires` (M1, A21) |
 | GET | `/api/chats/{id}/messages` | `?leaf=` walks that leaf; `?tree=1` returns the whole DAG. Each message carries `sender` (B7), null unless another chat injected it |
 | POST | `/api/chats/{id}/messages` | append a user message and start a run; `Idempotency-Key` honoured (R5) |
@@ -1345,7 +1401,7 @@ serves hashed assets with long cache headers.
   approval is restored and an error toast says why, except `409` (already decided or timed out),
   where gone is the truth. A `tool_result` frame for the call, or a `run_done`, also drops the card.
 - **U35. Running-tool status.** While a run is active the thread shows "Running `<tool>`…" from
-  the `tool_call` frame until its `tool_result`, listing parallel calls ("Running run_command,
+  the `tool_call` frame until its `tool_result`, listing parallel calls ("Running bash,
   fetch__fetch…") and skipping calls that wait for approval. Names are the exposed names, in
   monospace, as-is. The approval card headline is "Approve `<tool>`?" with the arguments, and a
   tool card with no result yet shows a spinner beside its name.
@@ -1665,7 +1721,7 @@ just sitting `blocked`). Everything else stays in-app.
   must additionally stay inside the root. A symlink *itself* can be deleted or moved; only following
   it is checked. The root itself cannot be deleted. Paths returned to the caller are relative to the
   root (`.` for the root) or absolute when outside it.
-- **S3. Confinement is a guard, not a sandbox.** `run_command`, `run_python`, `process_start` (and
+- **S3. Confinement is a guard, not a sandbox.** `bash`, `process_start` (and
   `git_*`, through hooks and configuration) run arbitrary code as the launching user and are not
   confined; only their `cwd` is. See section 10 and `docs/SANDBOX_PROPOSAL.md` (a proposal, not
   implemented — nothing here enforces a security boundary).
@@ -1677,17 +1733,17 @@ just sitting `blocked`). Everything else stays in-app.
     are delivered to the caller as a tool error (`isError: true`) **with their message**, e.g.
     `PermissionError: 'x' is outside the allowed root /work`; anything unexpected yields only a generic
     "Error executing tool" and is logged server-side.
-- **S5. Output limit.** Text returned per stream (`run_command`, `run_python`, git output, background
-  process reads) or per `file_read` is capped at `--max-output` /
+- **S5. Output limit.** Text returned per stream (`bash`, git output, background
+  process reads) or per `read` is capped at `--max-output` /
   `MCP_SWITCHBOARD_HARNESS_MAX_OUTPUT` characters (default 100000). Truncation is always flagged
   (`truncated`, or a `[output truncated]` suffix on git output), never silent.
-- **S6. Timeouts.** Commands are killed after 120 s (`timeout` argument on `run_command` and
-  `run_python`, clamped to 3600 s) and reported as a tool error. The whole process group is killed, so
+- **S6. Timeouts.** Commands are killed after 120 s (`timeout` argument on `bash`,
+  clamped to 3600 s) and reported as a tool error. The whole process group is killed, so
   children a command backgrounded (`sleep 99 &`) do not outlive it. A missing binary (`rg`, `git`, `bash`)
   is a tool error naming it.
 - **S7. Concurrency.** Subprocess tools are `async` and file tools run in worker threads, so a slow call
   never blocks other calls on the same server.
-- **S8. Atomic writes.** `file_write` (overwrite) and `edit_file` write a temp file in the target's
+- **S8. Atomic writes.** `write` (overwrite) and `edit` write a temp file in the target's
   directory and `os.replace` it, preserving an existing file's mode; a crash never leaves a truncated
   file. `append` is a plain append.
 - **S9. Annotations.** Every tool advertises MCP annotations so clients can auto-approve reads and
@@ -1695,9 +1751,13 @@ just sitting `blocked`). Everything else stays in-app.
 
 ### 9.2 Typed file and shell tools
 
-All outputs are advertised as JSON output schemas (`structuredContent`).
+The core tool names — `bash`, `read`, `write`, `edit`, `glob`, `grep` — deliberately match the
+suite a Claude Code / opencode-style agent already knows, with the same semantics; the remaining
+tools (`apply_patch`, `run_tests`, git, processes, watches, output paging) are the extras. All
+outputs are advertised as JSON output schemas (`structuredContent`) except the plain-string tools
+(`read`, `edit`, `git_*`).
 
-**`run_command`**: run a shell command via `bash -c`. When it drives CLIs that have machine-readable
+**`bash`**: run a shell command via `bash -c`. When it drives CLIs that have machine-readable
 modes (especially Slurm), prefer `--json` / `--parsable` over default table output: Slurm table
 columns are misalignment-prone and silently mis-parse.
 
@@ -1712,21 +1772,21 @@ columns are misalignment-prone and silently mis-parse.
 | out `truncated` | boolean | stdout or stderr was cut |
 | out `stdout_total`, `stderr_total` | integer | full lengths before truncation |
 
-**`file_read`**: read one file, in pages if large.
+**`read`**: read a file (line-numbered, paged) or list a directory. Returns plain text.
 
 | Field | Type | Notes |
 |---|---|---|
-| in `path` | string | required |
-| in `binary` | boolean, default `false` | |
-| in `offset` | integer, default 0 | start position: bytes when `binary`, else characters |
-| in `limit` | integer, optional | chunk size in the same unit; never exceeds the output limit |
-| out `content` | string (base64), optional | set when `binary` is true |
-| out `raw_text` | string, optional | UTF-8 text; set when `binary` is false. A file that is not valid UTF-8 needs `binary: true` |
-| out `size` | integer | total file size in bytes |
-| out `offset` | integer | where this chunk started |
-| out `truncated` | boolean | more remains; call again with a larger `offset`. **This is the only valid end-of-file test**: `offset` and `limit` count characters in text mode while `size` is always bytes, so `offset + len(raw_text) == size` does not hold for non-ASCII files |
+| in `path` | string | required; a directory lists its entries one per line (subdirectories with a trailing `/`) |
+| in `offset` | integer, optional | first line to read, 1-based (default 1) |
+| in `limit` | integer, optional | lines to return (default 2000) |
 
-**`file_write`**: write one file, creating missing parent directories.
+File content returns as `N: content` lines with absolute line numbers, so a citation and the
+paging `offset` stay consistent across calls; when lines remain, a trailing note gives the
+`offset` to continue with. A source line longer than 2000 characters is cut with a
+`[... truncated]` marker (page raw bytes with `bash` for the whole line). Undecodable bytes come
+back replaced, not as an error.
+
+**`write`**: write one file, creating missing parent directories.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1746,19 +1806,6 @@ columns are misalignment-prone and silently mis-parse.
 | out `deleted` | boolean | `false` if the path does not exist, a non-recursive delete hit a non-empty directory, or the path is the root |
 | out `message` | string | |
 
-**`dir_list`**: list a directory.
-
-| Field | Type | Notes |
-|---|---|---|
-| in `path` | string | required |
-| in `recursive` | boolean, default `false` | symlinks are not followed; `.git`, `node_modules`, `__pycache__`, `.venv`, `venv`, `.direnv` and the usual tool caches are listed but not entered (naming one as `path` lists its contents) |
-| in `limit` | integer, default `500` | at most this many entries are returned; must be positive |
-| out `entries[]` | object | `name`, `path` (root-relative), `size` (bytes), `is_dir`, `mtime` (ISO 8601 UTC) |
-| out `truncated` | boolean | more entries existed than `limit`: list a narrower path |
-
-Order is stable: sorted by name; when recursive, each directory's subdirectories then its files.
-Raises if `path` is not a directory.
-
 **`file_move`**: move or rename.
 
 | Field | Type | Notes |
@@ -1771,23 +1818,20 @@ Raises if `path` is not a directory.
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `tree_of_files` | `root="."` | nested dict: subdirectories by name, files under `"__files__"`; skips `.git`, `node_modules`, `__pycache__`, `.venv` |
-| `find_files` | `pattern`, `root="."`, `limit=1000` | sorted root-relative paths of files whose path or name matches a glob such as `**/*.py`. Inside a git repository `.gitignore` is honoured (tracked plus untracked-not-ignored files); otherwise the directories above are skipped |
-| `ripgrep` | `query`, `path="."`, `glob=None`, `ignore_case=false`, `context=0`, `max_results=200` | `{matches: [{file, line_no, text, is_match}], truncated}`; `context` adds up to 20 surrounding lines per match (`is_match: false`); `truncated` when `max_results` was hit; requires `rg` |
-| `read_lines` | `path`, `start=1`, `end=None` | `{text, start, end, total_lines, truncated}` — lines `start..end` (1-based inclusive) as **one string with newlines intact**, newline-faithful the way `file_read` is (`read_lines(f, 1, ∞).text == file_read(f).raw_text`); `truncated` output pages with `start=end+1` |
+| `glob` | `pattern`, `path="."`, `limit=1000` | root-relative paths of files whose path or name matches a glob such as `**/*.py`, **most recently modified first**. Inside a git repository `.gitignore` is honoured (tracked plus untracked-not-ignored files); otherwise `.git`, `node_modules`, `__pycache__`, `.venv` are skipped |
+| `grep` | `pattern`, `path="."`, `include=None`, `ignore_case=false`, `context=0`, `max_results=200` | `{matches: [{file, line_no, text, is_match}], truncated}`; `include` filters files by a glob (e.g. `*.py`), `context` adds up to 20 surrounding lines per match (`is_match: false`); `truncated` when `max_results` was hit; uses `rg` when installed, else a built-in scanner with the same contract |
+| `edit` | `path`, `old_string`, `new_string` (+ `replace_all=false`, `dry_run=false`) | summary plus unified diff. `old_string` must occur **exactly once** unless `replace_all`; zero matches, several matches without `replace_all`, an empty `old_string`, or a missing file is an error, so the wrong spot is never edited silently. Full-content replacement is `write`'s job |
 | `apply_patch` | `patch`, `dry_run=false` | `{applied, dry_run, files: [{path, action, hunks, added, removed, renamed_from}]}`; applies a git-style or plain unified diff (multi-file, create, delete, rename) with a built-in applier, all-or-nothing across files; paths must stay inside the root |
-| `multi_edit` | `path`, `edits: [{old_str, new_str, replace_all?}]`, `dry_run=false` | summary plus diff; edits apply in order with `edit_file`'s uniqueness rules, all-or-nothing, errors name the failing edit |
-| `find_symbol` | `name`, `path="."`, `kind=None`, `max_results=100` | `{method: "ctags"\|"heuristic", results: [{file, line, text, kind}], truncated}`; definitions, via universal-ctags when installed, else ripgrep patterns for py, go, ts/js, rust, java and c/c++ |
-| `find_references` | `name`, `path="."`, `max_results=100` | same shape as `find_symbol`; word-boundary matches minus the definition lines |
 | `run_tests` | `command=None`, `path="."`, `timeout=None` | `{framework, command, exit_code, ok, passed, failed, skipped, failures: [{name, file, line, message}], output_tail, output_id}`; auto-detects pytest, `go test`, `npm test` and `cargo test` |
-| `data_query` | `path`, `query=None`, `format=None`, `limit=100`, `filter=None`, `columns=None`, `where=None`, `describe=false` | read-only JSON, JSONL, CSV and TSV queries: a dotted/bracket path for JSON, `columns` and `where` for CSV, and `describe` for a schema summary |
 | `output_read` | `output_id`, `stream="stdout"`, `offset=0`, `limit=None`, `mode="chars"\|"lines"` | `{text, offset, next_offset, total, more}`; pages through output that was cut at the cap (the full text of the last 20 cut outputs is kept in memory) |
 | `output_grep` | `output_id`, `pattern`, `stream="stdout"`, `context=2`, `max_results=100` | line-numbered matches from a stored output |
-| `edit_file` | `path`, then either `new_content`, or `old_str` + `new_str` (+ `replace_all=false`) | confirmation. `old_str` must occur **exactly once** unless `replace_all`; zero matches, several matches without `replace_all`, an empty `old_str`, or a missing file is an error, so the wrong spot is never edited silently |
-| `run_python` | `code`, `timeout=120` | `{exit_code, stdout, stderr, truncated}` from a fresh interpreter run in the root; output capped. Field names and the `timeout` default match `run_command` deliberately — the two are siblings, and a model that has learnt `exit_code` on one should not have to retry against `returncode` on the other. (The current implementation returns `returncode`; renaming it is part of this revision.) |
 
-`run_bash` and `list_dir` were removed in favour of `run_command` and `dir_list` (fewer, sharper tools
-choose better). `tree_of_files` stays because its nested shape is different.
+v0.4.0 rebuilt the set around the opencode names — `bash`, `read`, `write`, `edit`, `glob`, `grep` —
+and removed the tools they subsume: `run_command`→`bash`, `file_read`/`read_lines`→`read`,
+`file_write`→`write`, `edit_file`→`edit`, `find_files`→`glob`, `ripgrep`→`grep`. Deleted outright:
+`run_python` (use `bash`), `dir_list` (read on a directory), `tree_of_files`, `multi_edit`
+(sequence `edit` calls), `find_symbol` / `find_references` (`grep`), `data_query` (`bash` + `read`).
+Earlier revisions had already retired `run_bash` and `list_dir` (fewer, sharper tools choose better).
 
 ### 9.4 Git tools
 
@@ -1832,14 +1876,14 @@ and ask/report with `switchboard_user_ask` when the watch is `done`.
 
 | Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
 |---|---|---|---|---|
-| `file_read`, `dir_list`, `tree_of_files`, `find_files`, `ripgrep`, `read_lines`, `find_symbol`, `find_references`, `data_query`, `output_read`, `output_grep`, `git_status`, `git_log`, `git_diff`, `git_show`, `git_branch` | true | | true | false |
+| `read`, `glob`, `grep`, `output_read`, `output_grep`, `git_status`, `git_log`, `git_diff`, `git_show`, `git_branch` | true | | true | false |
 | `process_read` (consumes buffered output) | true | | false | false |
-| `file_write`, `edit_file`, `multi_edit`, `apply_patch`, `git_checkout` | false | true | false | false |
+| `write`, `edit`, `apply_patch`, `git_checkout` | false | true | false | false |
 | `file_delete` | false | true | true | false |
 | `file_move`, `git_commit` | false | false | false | false |
 | `process_kill` (can only address ids this same harness started, W9) | false | false | true | false |
 | `git_add` | false | false | true | false |
-| `run_command`, `run_python`, `process_start` | false | true | false | true |
+| `bash`, `process_start` | false | true | false | true |
 | `git_push` | false | true | false | true |
 
 
@@ -1855,13 +1899,13 @@ listener.
 Anyone who can call a hub's `/mcp` endpoints can use the harness on every connected machine. The
 harness's root confinement stops file tools escaping by mistake or by path trick, and annotations
 let well-behaved clients ask before destructive calls, but neither is a security boundary:
-`run_command` can do whatever the client's user can. **Access to the private listener is shell
+`bash` can do whatever the client's user can. **Access to the private listener is shell
 access to every machine running a default client.**
 
 ### 10.2 What the orchestrator changes
 
 - **X1.** The sentence above now reads: *an LLM has shell on every connected machine.* The hub
-  autonomously issues `run_command` against real machines, driven by text that may include tool
+  autonomously issues `bash` against real machines, driven by text that may include tool
   output, file contents and web pages. Prompt injection is therefore a remote-code-execution
   vector, not a content problem.
 - **X2. Grants are the only real control**, and they are coarse (server-level). The practical

@@ -18,10 +18,19 @@ import (
 // alwaysOnExtras are the hub tools every chat is offered whatever its
 // capabilities and grants. Tests about capabilities and grants look past them.
 var alwaysOnExtras = map[string]bool{
-	"switchboard.calc": true, "switchboard.time.now": true, "switchboard.todo.read": true,
-	"switchboard.todo.write": true, "switchboard.web.fetch": true,
+	"switchboard.todo.read": true, "switchboard.todo.write": true, "switchboard.web.fetch": true,
 	"switchboard.note.read": true, "switchboard.note.append": true,
 	"switchboard.calls.stats": true, "switchboard.chat.search": true,
+	"switchboard.skill.list": true, "switchboard.skill.create": true, "switchboard.skill.set": true,
+	"switchboard.skill.delete": true, "switchboard.skill.raw": true,
+	"switchboard.prompt.list": true, "switchboard.prompt.raw": true, "switchboard.prompt.set": true,
+	"switchboard.persona.get": true, "switchboard.persona.set": true,
+}
+
+// provider-facing aliases of extras and capability tools (the tools.go alias
+// map); catalog assertions often see these names instead of the real ones.
+var aliasExtras = map[string]bool{
+	"todowrite": true, "webfetch": true, "question": true, "task": true, "skill": true,
 }
 
 // dropExtras removes the always-on extras from a list of tool names, whether
@@ -29,7 +38,7 @@ var alwaysOnExtras = map[string]bool{
 func dropExtras(names []string) []string {
 	out := make([]string, 0, len(names))
 	for _, n := range names {
-		if !alwaysOnExtras[strings.ReplaceAll(n, "_", ".")] && !alwaysOnExtras[n] {
+		if !alwaysOnExtras[strings.ReplaceAll(n, "_", ".")] && !alwaysOnExtras[n] && !aliasExtras[n] {
 			out = append(out, n)
 		}
 	}
@@ -94,7 +103,7 @@ func TestRunHappyPathWithRealToolCall(t *testing.T) {
 			offered = append(offered, tl.Name)
 		}
 	}
-	if len(calls) != 2 || len(dropExtras(offered)) != 2 || calls[0].Tools[0].Name != "box__demo__echo" {
+	if len(calls) != 2 || len(dropExtras(offered)) != 1 || calls[0].Tools[0].Name != "box__demo__echo" {
 		t.Fatalf("provider calls: %+v", calls)
 	}
 	last := calls[1].Messages[len(calls[1].Messages)-1]
@@ -437,11 +446,11 @@ func TestSpawnIntersectsGrantsAndEnforcesLimits(t *testing.T) {
 	e := newEnv(t, func(s *config.Settings) { s.AgentMaxChildren = 1 })
 	e.addServer("box", "", "demo", registry.ToolInfo{Name: "echo"})
 	e.scripted("p",
-		llm.CallTool("switchboard_chat_spawn", map[string]any{
+		llm.CallTool("task", map[string]any{
 			"title": "kid", "system_prompt": "be a kid",
 			"grants": []any{map[string]any{"label": "*", "project": "*", "server": "*"}},
 		}),
-		llm.CallTool("switchboard_chat_spawn", map[string]any{"title": "kid2", "system_prompt": "x"}),
+		llm.CallTool("task", map[string]any{"title": "kid2", "system_prompt": "x"}),
 		llm.Say("spawned"))
 	parent := e.agent("parent", chain(withModel("p"), caps(true, false), func(in *CreateAgentInput) {
 		in.Grants = []store.Grant{{Label: "box", Project: "*", Server: "demo", Allowed: true}}
@@ -665,7 +674,7 @@ func TestPinnedAgentSeesShortToolNamesAndCanCallThem(t *testing.T) {
 	for _, tl := range prov.Calls()[0].Tools {
 		names = append(names, tl.Name)
 	}
-	if got := strings.Join(dropExtras(names), ","); got != "fetch__fetch,run_command,switchboard_user_ask" {
+	if got := strings.Join(dropExtras(names), ","); got != "fetch__fetch,run_command" {
 		t.Errorf("tool names offered = %s", got)
 	}
 	rows := e.callRows(store.CallFilter{Source: store.SourceAgent})

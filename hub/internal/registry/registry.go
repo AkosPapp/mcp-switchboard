@@ -275,6 +275,32 @@ type Connection struct {
 	// trusting it.
 	brief   string
 	briefAt time.Time
+
+	// skills is the live set of SKILL.md skills scanned on the client host,
+	// from hello's client.skills replaced by every skills_update frame.
+	skills   []protocol.SkillFile
+	skillsAt time.Time
+}
+
+// SetSkills replaces this connection's live scanned skills (already sanitized
+// by the caller) and stamps when they were received. An empty list clears the
+// copy but still resets the clock: "the host has none" is information too.
+func (c *Connection) SetSkills(skills []protocol.SkillFile, at time.Time) {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.skills = skills
+	c.skillsAt = at
+}
+
+// Skills snapshots the connection's live scanned skills and the moment they
+// were last received (zero time when there are none).
+func (c *Connection) Skills() ([]protocol.SkillFile, time.Time) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]protocol.SkillFile(nil), c.skills...), c.skillsAt
 }
 
 // SetInstructions replaces this connection's live instruction files (already
@@ -327,6 +353,10 @@ func NewConnection(id, label string, client protocol.ClientInfo, connectedAt tim
 	if client.EnvironmentBrief != "" {
 		c.brief = client.EnvironmentBrief
 		c.briefAt = connectedAt
+	}
+	if len(client.Skills) > 0 {
+		c.skills = client.Skills
+		c.skillsAt = connectedAt
 	}
 	return c
 }

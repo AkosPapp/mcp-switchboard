@@ -284,7 +284,7 @@ func (m *Manager) turn(rs *runState, agent *store.Agent) (turnResult, error) {
 		}
 		return turnResult{}, err
 	}
-	skills, err := m.st.ListSkills(ctx)
+	skills, err := m.ListSkills(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return turnResult{kind: turnCancelled}, nil

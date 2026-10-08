@@ -27,16 +27,22 @@ const skillLoadName = "switchboard.skill.load"
 // slashRE: "/name" alone, or followed by whitespace and arguments.
 var slashRE = regexp.MustCompile(`^/([a-z0-9][a-z0-9_-]*)(?:\s+([\s\S]*))?$`)
 
-var skillNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+// skillNameRE is the opencode skill grammar (single hyphens, no underscores,
+// no leading/trailing dash): names must match their SKILL.md directory, and
+// scanned host skills use the same rules hub-side.
+var skillNameRE = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 func checkSkillName(name string) error {
-	if !skillNameRE.MatchString(name) {
-		return fmt.Errorf("%w: skill name must be lowercase letters, digits, - or _ (at most 64), e.g. code-review", ErrInvalid)
+	if len(name) > 64 || !skillNameRE.MatchString(name) {
+		return fmt.Errorf("%w: skill name must be lowercase letters, digits and single hyphens (at most 64), e.g. code-review", ErrInvalid)
 	}
 	return nil
 }
 
-func (m *Manager) ListSkills(ctx context.Context) ([]store.Skill, error) { return m.st.ListSkills(ctx) }
+func (m *Manager) ListSkills(ctx context.Context) ([]store.Skill, error) {
+	m.reconcileLibrary(ctx)
+	return m.st.ListSkills(ctx)
+}
 
 func (m *Manager) CreateSkill(ctx context.Context, in SkillInput) (*store.Skill, error) {
 	name := strings.TrimSpace(in.Name)
@@ -52,6 +58,7 @@ func (m *Manager) CreateSkill(ctx context.Context, in SkillInput) (*store.Skill,
 	if err != nil {
 		return nil, err
 	}
+	m.mirrorSkillFile(k, "")
 	m.publish(events.Event{Type: events.TypeSkill})
 	return &k, nil
 }
@@ -68,18 +75,28 @@ func (m *Manager) UpdateSkill(ctx context.Context, id string, in SkillUpdate) (*
 	if in.Body != nil && strings.TrimSpace(*in.Body) == "" {
 		return nil, fmt.Errorf("%w: body must not be empty", ErrInvalid)
 	}
+	before, err := m.st.GetSkill(ctx, id)
+	if err != nil || before == nil {
+		return nil, ErrNotFound
+	}
 	k, err := m.st.UpdateSkill(ctx, id, patch)
 	if err != nil {
 		return nil, err
 	}
+	m.mirrorSkillFile(k, before.Name)
 	m.publish(events.Event{Type: events.TypeSkill})
 	return &k, nil
 }
 
 func (m *Manager) DeleteSkill(ctx context.Context, id string) error {
+	before, err := m.st.GetSkill(ctx, id)
+	if err != nil || before == nil {
+		return ErrNotFound
+	}
 	if err := m.st.DeleteSkill(ctx, id); err != nil {
 		return err
 	}
+	m.removeSkillFile(before.Name)
 	m.publish(events.Event{Type: events.TypeSkill})
 	return nil
 }
@@ -124,8 +141,9 @@ func skillsPrompt(skills []store.Skill) string {
 // skillLoadTool is offered (see buildCatalog) only while some skill is auto.
 // It is not in sbTools: it needs no capability and is not a hub-tools entry.
 var skillLoadTool = &sbTool{
-	name: skillLoadName,
-	desc: "Load one of your skills by name and return its instructions. The available skills are listed in your system prompt.",
+	name:  skillLoadName,
+	alias: "skill",
+	desc:  "Load one of your skills by name and return its full instructions. The available skills are listed in your system prompt; the listing is all you see until you load one.",
 	schema: obj([]string{"name"}, map[string]any{
 		"name": typ("string", "the skill's name, exactly as listed")}),
 	ann:     &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: bp(false)},

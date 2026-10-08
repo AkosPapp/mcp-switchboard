@@ -1,4 +1,4 @@
-"""apply_patch, multi_edit, edit_file diffs, symbols, run_tests, big-output paging, data_query."""
+"""apply_patch, edit diffs, run_tests, big-output paging."""
 
 import asyncio
 import json
@@ -16,43 +16,23 @@ def run(coro):
     return asyncio.run(coro)
 
 
-# --- edit_file / multi_edit ----------------------------------------------------
+# --- edit ----------------------------------------------------------------------
 
 
-def test_edit_file_returns_a_diff_and_dry_run_does_not_write(tmp_path):
+def test_edit_returns_a_diff_and_dry_run_does_not_write(tmp_path):
     (tmp_path / "f.txt").write_text("one\ntwo\nthree\n")
-    out = h.edit_file("f.txt", old_str="two", new_str="2", dry_run=True)
+    out = h.edit("f.txt", old_string="two", new_string="2", dry_run=True)
     assert out.startswith("dry run: would replace 1 occurrence")
     assert "-two" in out and "+2" in out
     assert (tmp_path / "f.txt").read_text() == "one\ntwo\nthree\n"
-    out = h.edit_file("f.txt", old_str="two", new_str="2")
+    out = h.edit("f.txt", old_string="two", new_string="2")
     assert "+2" in out and (tmp_path / "f.txt").read_text() == "one\n2\nthree\n"
 
 
-def test_edit_file_diff_is_capped(tmp_path):
+def test_edit_diff_is_capped(tmp_path):
     (tmp_path / "f.txt").write_text("".join(f"line {i}\n" for i in range(2000)))
-    out = h.edit_file("f.txt", new_content="".join(f"LINE {i}\n" for i in range(2000)), dry_run=True)
+    out = h.edit("f.txt", old_string="line ", new_string="LINE ", replace_all=True, dry_run=True)
     assert "[diff truncated]" in out and len(out) < h.DIFF_CAP + 200
-
-
-def test_multi_edit_is_ordered_and_atomic(tmp_path):
-    f = tmp_path / "f.py"
-    f.write_text("a = 1\nb = 2\nb = 2\n")
-    out = h.multi_edit("f.py", [{"old_str": "a = 1", "new_str": "a = 10"}, {"old_str": "a = 10", "new_str": "a = 11"},
-                                {"old_str": "b = 2", "new_str": "b = 3", "replace_all": True}])
-    assert "applied 3 edits" in out and f.read_text() == "a = 11\nb = 3\nb = 3\n"
-    before = f.read_text()
-    with pytest.raises(ValueError, match="edit 2: .*occurs 2 times"):
-        h.multi_edit("f.py", [{"old_str": "a = 11", "new_str": "x"}, {"old_str": "b = 3", "new_str": "y"}])
-    with pytest.raises(ValueError, match="edit 2: .*not found"):
-        h.multi_edit("f.py", [{"old_str": "a = 11", "new_str": "x"}, {"old_str": "zzz", "new_str": "y"}])
-    assert f.read_text() == before  # nothing was written
-    assert "dry run" in h.multi_edit("f.py", [{"old_str": "a = 11", "new_str": "q"}], dry_run=True)
-    assert f.read_text() == before
-    with pytest.raises(ValueError):
-        h.multi_edit("f.py", [])
-    with pytest.raises(ValueError):
-        h.multi_edit("f.py", [{"old_str": "a"}])
 
 
 # --- apply_patch -----------------------------------------------------------------
@@ -166,74 +146,6 @@ def test_apply_patch_rejects_garbage_and_existing_creates(tmp_path):
         h.apply_patch("--- a/e.txt\n+++ b/e.txt\n@@ -1,5 +1,5 @@\n hi\n")
 
 
-# --- symbols ------------------------------------------------------------------------
-
-
-@pytest.fixture
-def code(tmp_path):
-    (tmp_path / "a.py").write_text("import os\n\nclass Widget:\n    def render(self):\n        return helper()\n\ndef helper():\n    return Widget()\n")
-    (tmp_path / "b.go").write_text("package b\n\nfunc helper() int { return 1 }\n\ntype Widget struct{}\n\nfunc (w Widget) Render() {}\n\nfunc use() { helper() }\n")
-    (tmp_path / "c.ts").write_text("export function helper(): void {}\nexport const Widget = 1;\nclass Foo {\n  render(x: number): void { helper(); }\n}\n")
-    (tmp_path / "d.rs").write_text("pub fn helper() {}\nstruct Widget;\n")
-    (tmp_path / "e.c").write_text("#define WIDGET 1\nstatic int helper(int x) {\n  return x;\n}\nint y = helper(2);\n")
-    (tmp_path / "F.java").write_text("public class F {\n  public static int helper(int a) { return a; }\n}\n")
-
-
-def test_find_symbol_heuristic(code, monkeypatch):
-    monkeypatch.setenv("PATH", "/nonexistent" + os.pathsep + os.environ["PATH"])
-    which_orig = h.shutil.which  # snapshot: the server may call which for tools other than ctags
-    monkeypatch.setattr(h.shutil, "which", lambda name: None if name == "ctags" else which_orig(name))
-    r = run(h.find_symbol("helper"))
-    assert r.method == "heuristic"
-    got = {(x.file, x.line, x.kind) for x in r.results}
-    assert got == {("a.py", 7, "function"), ("b.go", 3, "function"), ("c.ts", 1, "function"),
-                   ("d.rs", 1, "function"), ("e.c", 2, "function"), ("F.java", 2, "method")}
-    assert all("helper" in x.text for x in r.results)
-    widgets = {(x.file, x.kind) for x in run(h.find_symbol("Widget")).results}
-    assert {("a.py", "class"), ("b.go", "type"), ("c.ts", "variable"), ("d.rs", "struct")} <= widgets
-    assert [x.file for x in run(h.find_symbol("Widget", kind="class")).results] == ["a.py"]
-    assert [x.kind for x in run(h.find_symbol("Render")).results] == ["method"]
-    assert [x.kind for x in run(h.find_symbol("render", path="c.ts")).results] == ["method"]
-    assert [x.kind for x in run(h.find_symbol("WIDGET")).results] == ["macro"]
-    assert run(h.find_symbol("nothing_here")).results == []
-    with pytest.raises(ValueError):
-        run(h.find_symbol("not an identifier(("))
-
-
-def test_find_references_excludes_definitions_and_caps(code, monkeypatch):
-    which_orig = h.shutil.which
-    monkeypatch.setattr(h.shutil, "which", lambda name: None if name == "ctags" else which_orig(name))
-    r = run(h.find_references("helper"))
-    assert r.method == "heuristic"
-    got = {(x.file, x.line) for x in r.results}
-    assert ("a.py", 5) in got and ("b.go", 9) in got and ("e.c", 5) in got
-    assert ("a.py", 7) not in got and ("b.go", 3) not in got  # definitions left out
-    assert all("helper" in x.text for x in r.results)
-    capped = run(h.find_references("helper", max_results=2))
-    assert len(capped.results) == 2 and capped.truncated
-
-
-def test_find_symbol_uses_ctags_when_available(code, tmp_path, monkeypatch):
-    bindir = tmp_path.parent / (tmp_path.name + "-bin")
-    bindir.mkdir()
-    fake = bindir / "ctags"
-    tag = {"_type": "tag", "name": "helper", "path": "a.py", "line": 7, "kind": "function"}
-    fake.write_text(
-        "#!/bin/sh\n"
-        'if [ "$1" = "--version" ]; then echo "Universal Ctags 6.0"; exit 0; fi\n'
-        f"echo '{json.dumps(tag)}'\n"
-        'echo \'{"_type":"tag","name":"other","path":"a.py","line":1,"kind":"class"}\'\n'
-    )
-    fake.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
-    r = run(h.find_symbol("helper"))
-    assert r.method == "ctags"
-    assert [(x.file, x.line, x.kind, x.text) for x in r.results] == [("a.py", 7, "function", "def helper():")]
-    assert run(h.find_symbol("helper", kind="class")).results == []
-    refs = run(h.find_references("helper"))
-    assert refs.method == "ctags" and ("a.py", 7) not in {(x.file, x.line) for x in refs.results}
-
-
 # --- run_tests -----------------------------------------------------------------------
 
 
@@ -326,27 +238,27 @@ def test_run_tests_needs_something_to_run(tmp_path):
 # --- big output ------------------------------------------------------------------------
 
 
-def test_run_command_modes(tmp_path):
+def test_bash_modes(tmp_path):
     seq = "seq 1 300"
-    head = run(h.run_command(seq, mode="head"))
+    head = run(h.bash(seq, mode="head"))
     assert head.stdout.splitlines() == [str(i) for i in range(1, 101)] and head.truncated and head.output_id
-    tail = run(h.run_command(seq, mode="tail"))
+    tail = run(h.bash(seq, mode="tail"))
     assert tail.stdout.splitlines()[0] == "201" and tail.stdout.splitlines()[-1] == "300"
-    g = run(h.run_command(seq, mode="grep", pattern="^15$"))
+    g = run(h.bash(seq, mode="grep", pattern="^15$"))
     assert g.stdout.splitlines() == ["13-13", "14-14", "15:15", "16-16", "17-17"]
-    full = run(h.run_command("echo hi", mode="full"))
+    full = run(h.bash("echo hi", mode="full"))
     assert full.stdout == "hi\n" and full.output_id is None and not full.truncated
     with pytest.raises(ValueError):
-        run(h.run_command("echo", mode="grep"))
+        run(h.bash("echo", mode="grep"))
     with pytest.raises(ValueError):
-        run(h.run_command("echo", mode="bogus"))
+        run(h.bash("echo", mode="bogus"))
     with pytest.raises(ValueError, match="invalid regex"):
-        run(h.run_command("echo", mode="grep", pattern="("))
+        run(h.bash("echo", mode="grep", pattern="("))
 
 
 def test_overflow_is_stored_and_pageable():
     h.configure(max_output=50)
-    r = run(h.run_command("seq 1 100; echo oops >&2"))
+    r = run(h.bash("seq 1 100; echo oops >&2"))
     assert r.truncated and r.output_id and len(r.stdout) == 50
     first = h.output_read(r.output_id, limit=20)
     assert first.text == r.stdout[:20] and first.more and first.next_offset == 20
@@ -366,16 +278,10 @@ def test_overflow_is_stored_and_pageable():
         h.output_read(r.output_id, stream="both")
 
 
-def test_run_python_and_git_overflow_give_output_ids(tmp_path):
+def test_git_overflow_gives_output_id(tmp_path):
     h.configure(max_output=30)
-    r = run(h.run_python("print('x' * 100)"))
-    assert r["truncated"] and h.output_read(r["output_id"], limit=5).text == "xxxxx"
-    assert "output_id" not in run(h.run_python("print(1)"))
-    (tmp_path / "f.txt").write_text("l\n" * 100)
-    import subprocess
-
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     (tmp_path / "g.txt").write_text("l\n" * 100)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     out = run(h.git_diff(staged=True))
     assert "output_read(output_id=" in out
@@ -396,85 +302,18 @@ def test_output_store_is_an_lru(monkeypatch):
     assert a in h._outputs and c in h._outputs and b not in h._outputs
 
 
-# --- data_query ---------------------------------------------------------------------------
-
-
-def test_data_query_json(tmp_path):
-    doc = {"items": [{"id": 1, "name": "a", "tags": {"k": "x"}}, {"id": 2, "name": "b"}, {"id": 3, "name": "a"}], "n": 3}
-    (tmp_path / "d.json").write_text(json.dumps(doc))
-    assert h.data_query("d.json", "items[0].name")["result"] == "a"
-    assert h.data_query("d.json", "items[*].id")["result"] == [1, 2, 3]
-    assert h.data_query("d.json", "items[-1].id")["result"] == 3
-    r = h.data_query("d.json", "items", filter="name==a")
-    assert [x["id"] for x in r["result"]] == [1, 3] and r["count"] == 2
-    assert h.data_query("d.json", "items[*].tags.k")["result"] == ["x"]  # missing keys skipped under [*]
-    r = h.data_query("d.json", "items", limit=1)
-    assert r["truncated"] and len(r["result"]) == 1 and r["count"] == 3
-    with pytest.raises(ValueError, match="not found; available: items, n"):
-        h.data_query("d.json", "nope")
-    d = h.data_query("d.json", describe=True)["describe"]
-    assert d["type"] == "object" and d["keys"]["n"] == "number"
-
-
-def test_data_query_jsonl_and_format_override(tmp_path):
-    (tmp_path / "d.jsonl").write_text('{"a": 1}\n\n{"a": 2}\n{"a": 3}\n')
-    assert h.data_query("d.jsonl", "[*].a")["result"] == [1, 2, 3]
-    assert h.data_query("d.jsonl", "[1]")["result"] == {"a": 2}
-    assert h.data_query("d.jsonl", filter="a==3")["result"] == [{"a": 3}]
-    assert h.data_query("d.jsonl", describe=True)["describe"]["length"] == 3
-    (tmp_path / "noext").write_text('{"x": 1}\n')
-    assert h.data_query("noext", format="jsonl")["result"] == [{"x": 1}]
-    with pytest.raises(ValueError, match="format must be"):
-        h.data_query("noext")
-
-
-def test_data_query_csv(tmp_path):
-    (tmp_path / "u.csv").write_text("name,age,city\nann,31,Oslo\nbob,25,Rome\ncy,40,Oslo\n")
-    r = h.data_query("u.csv")
-    assert r["count"] == 3 and r["columns"] == ["name", "age", "city"] and r["result"][0] == {"name": "ann", "age": "31", "city": "Oslo"}
-    r = h.data_query("u.csv", where={"column": "age", "op": ">", "value": 30}, columns=["name"])
-    assert r["result"] == [{"name": "ann"}, {"name": "cy"}]
-    r = h.data_query("u.csv", where={"column": "city", "op": "==", "value": "Oslo"}, limit=1)
-    assert r["count"] == 2 and r["truncated"] and len(r["result"]) == 1
-    assert h.data_query("u.csv", where={"column": "name", "op": "contains", "value": "O"})["count"] == 1
-    assert h.data_query("u.csv", where={"column": "city", "op": "!=", "value": "Oslo"})["result"][0]["name"] == "bob"
-    d = h.data_query("u.csv", describe=True)["describe"]
-    assert d["rows"] == 3 and {c["name"]: c["type"] for c in d["columns"]} == {"name": "string", "age": "integer", "city": "string"}
-    with pytest.raises(ValueError, match="unknown column"):
-        h.data_query("u.csv", columns=["zip"])
-    with pytest.raises(ValueError, match="where.op"):
-        h.data_query("u.csv", where={"column": "age", "op": "~", "value": 1})
-
-
-def test_data_query_tsv_and_confinement(tmp_path):
-    (tmp_path / "t.tsv").write_text("a\tb\n1\t2\n")
-    assert h.data_query("t.tsv")["result"] == [{"a": "1", "b": "2"}]
-    with pytest.raises(PermissionError):
-        h.data_query("../x.json")
-    with pytest.raises(FileNotFoundError):
-        h.data_query("missing.json")
-
-
-def test_data_query_result_fits_the_output_cap(tmp_path):
-    h.configure(max_output=500)
-    (tmp_path / "big.json").write_text(json.dumps([{"k": "v" * 50, "i": i} for i in range(200)]))
-    r = h.data_query("big.json", limit=200)
-    assert r["truncated"] and len(json.dumps(r["result"])) <= 500
-
-
 # --- registration -----------------------------------------------------------------------------
 
 
 def test_new_tools_are_registered_with_examples_and_annotations():
     tools = {fn.__name__: (fn, a) for fn, a in h.TOOLS}
-    for name in ["apply_patch", "multi_edit", "edit_file", "find_symbol", "find_references", "run_tests",
-                 "output_read", "output_grep", "data_query", "run_command", "run_python", "file_read",
-                 "file_write", "find_files", "ripgrep", "git_diff"]:
+    for name in ["apply_patch", "edit", "grep", "glob", "read", "write", "run_tests",
+                 "output_read", "output_grep", "bash", "git_diff"]:
         assert "Example:" in tools[name][0].__doc__, name
         assert (tools[name][0].__doc__.strip().rsplit("Example:", 1)[1]).strip(), name
-    for name in ["find_symbol", "find_references", "output_read", "output_grep", "data_query"]:
+    for name in ["read", "glob", "grep", "output_read", "output_grep"]:
         assert tools[name][1].read_only_hint is True
-    for name in ["apply_patch", "multi_edit"]:
+    for name in ["apply_patch", "edit"]:
         a = tools[name][1]
         assert (a.read_only_hint, a.destructive_hint, a.idempotent_hint, a.open_world_hint) == (False, True, False, False)
     assert tools["run_tests"][1].open_world_hint is True
@@ -522,27 +361,27 @@ def test_git_push_declares_itself_irreversible():
     assert sw.get("irreversible") is True
     assert "cannot be undone" in sw.get("irreversibleReason", "")
     # other tools carry no such flag
-    assert not (tools["file_write"].meta or {}).get("switchboard")
+    assert not (tools["write"].meta or {}).get("switchboard")
 
-# ---------- ripgrep fallback and run_tests changed_only (capability pass) ----
+# ---------- grep fallback and run_tests changed_only (capability pass) ----
 
 
-def test_ripgrep_falls_back_to_python_scanner(tmp_path, monkeypatch):
+def test_grep_falls_back_to_python_scanner(tmp_path, monkeypatch):
     (tmp_path / "a.py").write_text("import os\n\ndef main():\n    pass\n")
     (tmp_path / "keep.txt").write_text("main here\n")
     monkeypatch.setattr(h.shutil, "which", lambda name: None)
-    r = run(h.ripgrep("def \\w+", glob="*.py", context=1))
+    r = run(h.grep("def \\w+", include="*.py", context=1))
     texts = [(m.file, m.line_no) for m in r.matches]
     assert ("a.py", 3) in texts
-    assert all(f.endswith(".py") for f, _ in texts)  # glob honored by the scanner too
+    assert all(f.endswith(".py") for f, _ in texts)  # include honored by the scanner too
     ctx = [m for m in r.matches if not m.is_match]
     assert any(m.line_no == 2 or m.line_no == 4 for m in ctx)
 
 
-def test_ripgrep_fallback_reports_bad_regex(tmp_path, monkeypatch):
+def test_grep_fallback_reports_bad_regex(tmp_path, monkeypatch):
     monkeypatch.setattr(h.shutil, "which", lambda name: None)
     with pytest.raises(RuntimeError, match="regex"):
-        run(h.ripgrep("def("))
+        run(h.grep("def("))
 
 
 def _git(tmp_path, *args):

@@ -77,7 +77,7 @@ func TestRunSendsExpandedSkillAndOffersLoadTool(t *testing.T) {
 	}
 	var offered bool
 	for _, tl := range c.Tools {
-		offered = offered || tl.Name == providerName(skillLoadName)
+		offered = offered || tl.Name == providerName(skillLoadName) || tl.Name == "skill" // the opencode-style alias
 	}
 	if !offered {
 		t.Errorf("skill.load not offered: %+v", c.Tools)
@@ -121,7 +121,7 @@ func TestUserAskPausesTheRunAndReturnsTheAnswers(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 	p := e.scripted("s",
-		llm.CallTool("switchboard_user_ask", map[string]any{"questions": []any{
+		llm.CallTool("question", map[string]any{"questions": []any{
 			map[string]any{"question": "Which db?", "header": "DB", "options": []any{
 				map[string]any{"label": "sqlite"}, map[string]any{"label": "postgres", "description": "bigger"}}},
 			map[string]any{"question": "Anything else?"},
@@ -177,7 +177,7 @@ func TestUserAskDeclinedAndInvalid(t *testing.T) {
 	if out := e.m.execTool(ctx, a, nil, "switchboard.user.ask", map[string]any{"questions": []any{map[string]any{"question": "x"}}}, "c"); !out.IsError {
 		t.Errorf("no run to pause, yet: %+v", out)
 	}
-	e.scripted("s", llm.CallTool("switchboard_user_ask", map[string]any{"questions": []any{}}), llm.Say("ok"))
+	e.scripted("s", llm.CallTool("question", map[string]any{"questions": []any{}}), llm.Say("ok"))
 	b := e.agent("b", withModel("s"))
 	res := e.post(b.ID, "go")
 	if run := e.waitRun(res.RunID); run.Status != store.RunDone {
@@ -192,7 +192,7 @@ func TestUserAskDeclinedAndInvalid(t *testing.T) {
 		t.Fatalf("an empty questions list should be a tool error: %+v", rows)
 	}
 
-	e.scripted("s2", llm.CallTool("switchboard_user_ask", map[string]any{"questions": []any{map[string]any{"question": "sure?"}}}), llm.Say("ok"))
+	e.scripted("s2", llm.CallTool("question", map[string]any{"questions": []any{map[string]any{"question": "sure?"}}}), llm.Say("ok"))
 	c := e.agent("c", withModel("s2"))
 	res = e.post(c.ID, "go")
 	e.waitFor("a pending question", func() bool { return len(e.m.PendingApprovals(res.RunID)) == 1 })

@@ -26,10 +26,11 @@ func (m *Manager) seedProfiles(ctx context.Context) error {
 	if err != nil || n > 0 {
 		return err
 	}
-	_, err = m.st.CreateProfile(ctx, store.Profile{
+	seed, err := m.st.CreateProfile(ctx, store.Profile{
 		Name: seedProfileName, SystemPrompt: seedProfilePrompt, Approval: store.ApprovalDestructive, IsDefault: true,
 	})
 	if err == nil {
+		m.mirrorPromptFile(seed)
 		m.log.Info("seeded the default agent profile", "name", seedProfileName)
 	}
 	return err
@@ -63,6 +64,7 @@ func normBudget(raw json.RawMessage) (json.RawMessage, error) {
 }
 
 func (m *Manager) ListProfiles(ctx context.Context) ([]store.Profile, error) {
+	m.reconcileLibrary(ctx)
 	return m.st.ListProfiles(ctx)
 }
 
@@ -111,6 +113,7 @@ func (m *Manager) CreateProfile(ctx context.Context, in ProfileInput) (*store.Pr
 	if err != nil {
 		return nil, err
 	}
+	m.mirrorPromptFile(p)
 	m.publish(events.Event{Type: events.TypeProfile})
 	return &p, nil
 }
@@ -172,6 +175,7 @@ func (m *Manager) UpdateProfile(ctx context.Context, id string, in ProfileUpdate
 			return nil, err
 		}
 	}
+	m.mirrorAllPrompts(ctx)      // the file index follows (default flag may have moved)
 	m.syncProfileAgents(ctx, &p) // agents referencing it follow the edit
 	m.publish(events.Event{Type: events.TypeProfile})
 	return &p, nil
@@ -195,6 +199,7 @@ func (m *Manager) DeleteProfile(ctx context.Context, id string) error {
 	if err := m.st.DeleteProfile(ctx, id); err != nil {
 		return err
 	}
+	m.removePromptFile(id)
 	m.publish(events.Event{Type: events.TypeProfile})
 	m.publish(events.Event{Type: events.TypeAgent})
 	return nil
@@ -210,3 +215,18 @@ func (m *Manager) firstConfiguredModel() json.RawMessage {
 }
 
 func isNameTaken(err error) bool { return errors.Is(err, store.ErrNameTaken) }
+
+// mirrorAllPrompts rewrites every prompt file from its row (extras preserved
+// by mirrorPromptFile). Only used after profile mutations, which are rare.
+func (m *Manager) mirrorAllPrompts(ctx context.Context) {
+	if m.lib == nil {
+		return
+	}
+	rows, err := m.st.ListProfiles(ctx)
+	if err != nil {
+		return
+	}
+	for _, r := range rows {
+		m.mirrorPromptFile(r)
+	}
+}

@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"flag"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/config"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/console"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/events"
+	"github.com/AkosPapp/mcp-switchboard/hub/internal/library"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/llm"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/loki"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/mcpserver"
@@ -186,6 +188,13 @@ func run() error {
 		manager *agents.Manager
 		streams *chatstream.Hub
 	)
+	// The file library (skills as SKILL.md, prompts as *.md under the data
+	// dir) always exists: the tunnel stores scanned host skills there even
+	// with the orchestrator off, and the console can browse the tree.
+	dataLib, err := library.New(settings.DataDir)
+	if err != nil {
+		return err
+	}
 	mcpOpts := mcpserver.Options{Version: version, Logger: logger}
 	if settings.AgentsEnabled {
 		llmRegistry, err := llm.NewRegistryFromSettings(settings)
@@ -218,6 +227,7 @@ func run() error {
 			Loki:       exporter,
 			Logger:     logger,
 			Push:       pushSender,
+			Library:    dataLib,
 		})
 		if err := manager.Start(ctx); err != nil {
 			return err
@@ -243,6 +253,8 @@ func run() error {
 	apiHandler := api.New(apiOpts)
 
 	tunnelHandler := tunnel.NewHandler(reg, tunnel.Options{
+		Lib:          dataLib,
+		Bus:          bus,
 		Token:        settings.TunnelToken,
 		ToolsTimeout: time.Duration(settings.ToolsTimeout * float64(time.Second)),
 		SettleDelay:  time.Duration(settings.ServerSettleDelay * float64(time.Second)),
@@ -259,7 +271,7 @@ func run() error {
 
 	tunnelSrv := &http.Server{
 		Addr:              net.JoinHostPort(settings.TunnelHost, strconv.Itoa(settings.TunnelPort)),
-		Handler:           tunnelMux(tunnelHandler),
+		Handler:           tunnelMux(settings, tunnelHandler, apiHandler),
 		ReadHeaderTimeout: 10 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
@@ -313,11 +325,30 @@ func run() error {
 }
 
 // tunnelMux serves only what the public listener is allowed to expose.
-func tunnelMux(handler http.Handler) http.Handler {
+func tunnelMux(settings config.Settings, tunnel http.Handler, apiHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle(protocol.Path, handler)
+	mux.Handle(protocol.Path, tunnel)
 	mux.HandleFunc("/health", health)
+	if settings.PublicAPI {
+		// Remote control: clients that can dial the tunnel can also drive the
+		// chat API (bridge chats, the opencode plugin's polling) from here,
+		// authenticated by bearer token instead of by loopback.
+		mux.Handle("/api/", tokenGuard(settings.PublicAPIToken, apiHandler))
+	}
 	return mux
+}
+
+// tokenGuard admits only requests carrying want as a bearer token.
+func tokenGuard(want string, next http.Handler) http.Handler {
+	const prefix = "Bearer "
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), prefix)
+		if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func privateMux(

@@ -23,8 +23,12 @@
 #                        found - an existing copy, very likely a Nix-managed
 #                        one, is left completely alone), installs the hub
 #                        bridge plugin (editor/opencode/plugin in this repo,
-#                        served from the Pages site): every opencode session
-#                        gets a bridge chat in the hub console - transcript
+#                        served from the Pages site) into an INSTALLER-OWNED
+#                        dummy config dir (~/.cache/mcp-switchboard-installer/
+#                        opencode) and points opencode at it with
+#                        OPENCODE_CONFIG_DIR; your own opencode config is
+#                        never read for this nor written. The session started
+#                        here gets a bridge chat in the hub console - transcript
 #                        mirrored in both directions, permission prompts and
 #                        questions pushed to the phone, and switchboard_*
 #                        tools for talking to the hub's agents. The plugin
@@ -206,14 +210,28 @@ ensure_ca_bundle() {
 # the piece that makes "run opencode in VS Code" behave like an integration.
 OPENCODE_EXTENSION="sst-dev.opencode"
 
-# Where the config merge below writes. Global rather than project-level
-# because a hub URL describes this machine, not one repository.
+# The user's global OpenCode config. This script NEVER writes to it anymore
+# (an earlier revision merged its plugin entry in there; retire_opencode_config
+# below cleans that up). It is only read to undo those past edits.
 EDITOR_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
 
-# The hub-bridge plugin opencode loads from the config dir; it is served from
-# the same Pages site as this script (see .github/workflows/pages.yml).
+# The installer-owned dummy OpenCode config directory handed to opencode via
+# OPENCODE_CONFIG_DIR (see opencode.ai/docs/config "Custom directory"). It is
+# scanned for plugins exactly like ~/.config/opencode, and opencode bootstraps
+# @opencode-ai/plugin into it on first run, so no user file is touched and
+# opencode's own global/custom configs keep resolving normally.
+OPENCODE_MANAGED_DIR="$CACHE_DIR/opencode"
+
+# The hub-bridge plugin opencode loads from the dummy config dir; it is served
+# from the same Pages site as this script (see .github/workflows/pages.yml).
 PLUGIN_FILE=""
 PLUGIN_URL="${MCP_SWITCHBOARD_PLUGIN_URL:-https://akospapp.github.io/mcp-switchboard/opencode/plugin/switchboard-hub.js}"
+
+# Set to 1 once the bridge plugin is in place; gates the env exports at exec.
+OPENCODE_BRIDGE_READY=0
+
+# The hub base URL the bridge plugin should dial, derived by setup_editor.
+OPENCODE_HUB_BASE=""
 
 # The endpoint written into opencode.json when nothing better is known.
 DEFAULT_MCP_URL="http://127.0.0.1:8099/mcp"
@@ -221,6 +239,11 @@ DEFAULT_MCP_URL="http://127.0.0.1:8099/mcp"
 # Peeked (never consumed) from --hub-url by main's argument loop, so the
 # config merge can work out the endpoint from the hub the user already named.
 HUB_URL_PEEKED=""
+
+# Peeked from --token by main's argument loop, so the opencode bridge can use
+# the same bearer the client uses (a hub with PUBLIC_API enabled accepts it on
+# /api too). An explicit MCP_SWITCHBOARD_PRIVATE_TOKEN still wins.
+TOKEN_PEEKED=""
 
 # resolved_mcp_url: what endpoint opencode should dial, best guess last.
 #   1. MCP_SWITCHBOARD_MCP_URL - explicit wins, always.
@@ -348,53 +371,68 @@ ensure_opencode() {
         log "note: Nix users can get a managed copy instead with 'nix profile install nixpkgs#opencode'"
 }
 
-# install_opencode_plugin: fetch the bridge plugin and merge its entry into
-# the global opencode.json without touching any other key (that file carries
-# the user's providers and agents; clobbering it is exactly what this script
-# promises not to do). Merging also REMOVES the legacy mcp "switchboard" entry:
-# opencode gets its local file/shell power from its own built-in tools now,
-# and hub comms from the plugin - a second harness over /mcp was duplication.
-install_opencode_plugin() {
+# install_opencode_bridge: fetch the hub-bridge plugin into the installer-owned
+# dummy config dir and remember the hub origin. Nothing here touches the user's
+# opencode config: the plugin lives in $OPENCODE_MANAGED_DIR/plugins/, which
+# opencode scans (and bootstraps @opencode-ai/plugin into) when launched with
+# OPENCODE_CONFIG_DIR=$OPENCODE_MANAGED_DIR, and it reads hub/token from the
+# MCP_SWITCHBOARD_HUB_URL / MCP_SWITCHBOARD_PRIVATE_TOKEN env vars set at exec.
+# As a courtesy it also RETIRES what older revisions of this script wrote into
+# the user's global config (the same plugin copy there, the "plugin" entry
+# pointing at it, and the legacy mcp "switchboard" entry - a second harness
+# over /mcp; the plugin and opencode's own built-in tools replaced both).
+install_opencode_bridge() {
     _hub_base=$1
-    _dir=$EDITOR_CONFIG_DIR
-    _file="$_dir/opencode.json"
-    PLUGIN_FILE="$_dir/plugin/switchboard-hub.js"
+    OPENCODE_HUB_BASE=$_hub_base
+    PLUGIN_FILE="$OPENCODE_MANAGED_DIR/plugins/switchboard-hub.js"
 
-    mkdir -p "$_dir/plugin" 2>/dev/null || {
-        log "WARNING: cannot create $_dir/plugin; skipping the hub bridge"
+    mkdir -p "$OPENCODE_MANAGED_DIR/plugins" 2>/dev/null || {
+        log "WARNING: cannot create $OPENCODE_MANAGED_DIR/plugins; skipping the hub bridge"
         return 0
     }
     if fetch "$PLUGIN_URL" "$PLUGIN_FILE"; then
+        chmod 644 "$PLUGIN_FILE" 2>/dev/null || true
+        OPENCODE_BRIDGE_READY=1
         log "installed the hub bridge plugin: $PLUGIN_FILE"
     else
         log "WARNING: could not fetch $PLUGIN_URL; skipping the hub bridge"
         return 0
     fi
 
-    [ -f "$_file" ] || printf '{}' >"$_file" 2>/dev/null || {
-        log "WARNING: cannot write $_file; skipping the plugin config"
-        return 0
-    }
+    retire_opencode_config
+    log "opencode (started by this command) bridges to $_hub_base via OPENCODE_CONFIG_DIR=$OPENCODE_MANAGED_DIR; your own opencode config is untouched"
+}
+
+# retire_opencode_config: undo older revisions' edits to the user's global
+# opencode config - delete our plugin copy there and strip OUR plugin entries
+# (identified by the switchboard-hub.js path suffix any revision wrote) from
+# opencode.json, along with the legacy mcp "switchboard" entry. Entries the
+# user added themselves are left alone; an unparseable config is left alone.
+retire_opencode_config() {
+    if [ -f "$EDITOR_CONFIG_DIR/plugin/switchboard-hub.js" ]; then
+        rm -f -- "$EDITOR_CONFIG_DIR/plugin/switchboard-hub.js" 2>/dev/null &&
+            log "removed the stale bridge plugin from $EDITOR_CONFIG_DIR/plugin (older installer revision)"
+    fi
+    _file="$EDITOR_CONFIG_DIR/opencode.json"
+    [ -f "$_file" ] || return 0
     _out=$(mktemp) || return 0
-    OPENCODE_PLUGIN_FILE="$PLUGIN_FILE" \
-    OPENCODE_HUB_BASE="$_hub_base" \
-    OPENCODE_TOKEN="${MCP_SWITCHBOARD_PRIVATE_TOKEN:-}" \
-        _merge_plugin_json "$_file" "$_out" || {
+    _retire_plugin_json "$_file" "$_out" || {
         rm -f "$_out"
-        log "WARNING: could not merge $_file (it may not be valid JSON); leaving it untouched"
-        log "  add this by hand: \"plugin\": [[\"$PLUGIN_FILE\", {\"hub\": \"$_hub_base\"}]]"
+        log "NOTE: could not parse $_file to strip the old switchboard plugin entry; leaving it untouched"
+        log "  (harmless, but you may delete the \"plugin\" entry ending in switchboard-hub.js by hand)"
         return 0
     }
-    if cat "$_out" >"$_file" 2>/dev/null; then
-        log "opencode bridges to $_hub_base (chat + tools + questions: $_file)"
-    else
-        log "WARNING: could not write $_file"
+    if ! cmp -s "$_out" "$_file"; then
+        if cat "$_out" >"$_file" 2>/dev/null; then
+            log "stripped the old switchboard plugin entry from $_file (your other settings kept)"
+        fi
     fi
     rm -f "$_out"
 }
 
-# _merge_plugin_json: node first, python3 fallback; identical semantics.
-_merge_plugin_json() {
+# _retire_plugin_json <in> <out>: node first, python3 fallback; identical
+# semantics - remove switchboard's own traces, write nothing else.
+_retire_plugin_json() {
     _in=$1
     _out=$2
     if has_cmd node; then
@@ -403,20 +441,18 @@ _merge_plugin_json() {
             const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
             if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) throw new Error("not an object");
             if (cfg.mcp && typeof cfg.mcp === "object") delete cfg.mcp.switchboard;
-            const pth = process.env.OPENCODE_PLUGIN_FILE;
-            const entry = [pth, { hub: process.env.OPENCODE_HUB_BASE, ...(process.env.OPENCODE_TOKEN ? { token: process.env.OPENCODE_TOKEN } : {}) }];
-            let list = Array.isArray(cfg.plugin) ? cfg.plugin : [];
-            list = list.filter((e) => {
-                const first = Array.isArray(e) ? e[0] : e;
-                return !(typeof first === "string" && first.endsWith("switchboard-hub.js"));
-            });
-            list.push(entry);
-            cfg.plugin = list;
+            if (Array.isArray(cfg.plugin)) {
+                const kept = cfg.plugin.filter((e) => {
+                    const first = Array.isArray(e) ? e[0] : e;
+                    return !(typeof first === "string" && first.endsWith("switchboard-hub.js"));
+                });
+                if (kept.length) cfg.plugin = kept; else delete cfg.plugin;
+            }
             fs.writeFileSync(process.argv[2], JSON.stringify(cfg, null, 2) + "\n");
         ' "$_in" "$_out" 2>/dev/null
     elif has_cmd python3; then
         python3 - "$_in" "$_out" <<'PY' 2>/dev/null
-import json, os, sys
+import json, sys
 try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
@@ -427,16 +463,14 @@ if not isinstance(cfg, dict):
 mcp = cfg.get("mcp")
 if isinstance(mcp, dict):
     mcp.pop("switchboard", None)
-pth = os.environ["OPENCODE_PLUGIN_FILE"]
-opts = {"hub": os.environ["OPENCODE_HUB_BASE"]}
-token = os.environ.get("OPENCODE_TOKEN") or ""
-if token:
-    opts["token"] = token
-lst = [e for e in (cfg.get("plugin") or []) if isinstance(e, (str, list))]
-lst = [e for e in lst if not (isinstance(e, str) and e.endswith("switchboard-hub.js"))
-       and not (isinstance(e, list) and e and isinstance(e[0], str) and e[0].endswith("switchboard-hub.js"))]
-lst.append([pth, opts])
-cfg["plugin"] = lst
+if isinstance(cfg.get("plugin"), list):
+    kept = [e for e in cfg["plugin"]
+            if not (isinstance(e, str) and e.endswith("switchboard-hub.js"))
+            and not (isinstance(e, list) and e and isinstance(e[0], str) and e[0].endswith("switchboard-hub.js"))]
+    if kept:
+        cfg["plugin"] = kept
+    else:
+        del cfg["plugin"]
 with open(sys.argv[2], "w") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
@@ -454,12 +488,13 @@ setup_editor() {
     case "$EDITOR_TARGET" in
         "" | none)
             if [ "$OPENCODE_WANTED" -eq 1 ]; then
-                # Standalone TUI hosts: no editor involved, but the same global
-                # opencode.json merge still applies, so `opencode` in any
-                # terminal reaches the hub's /mcp without VS Code.
+                # Standalone TUI hosts: no editor involved. The bridge rides on
+                # the dummy config dir + env vars exported just before main
+                # execs opencode, so exactly this command's session is bridged
+                # and the user's own config never changes.
                 ensure_opencode
                 _url=$(resolved_mcp_url)
-                install_opencode_plugin "${_url%/mcp}"
+                install_opencode_bridge "${_url%/mcp}"
             fi
             return 0
             ;;
@@ -478,13 +513,18 @@ setup_editor() {
     fi
 
     _mcp=$(resolved_mcp_url)
-    install_opencode_plugin "${_mcp%/mcp}"
+    install_opencode_bridge "${_mcp%/mcp}"
 
     log "in VS Code: Ctrl+Escape opens the OpenCode TUI and shares your current selection; use @File#L37-42 to pin a range"
+    if [ "$OPENCODE_BRIDGE_READY" -eq 1 ] && [ "$OPENCODE_WANTED" -ne 1 ]; then
+        # The extension launches opencode in terminals this script cannot see,
+        # so the bridge env has to come from the shell that starts them.
+        log "to bridge opencode sessions you start yourself: export OPENCODE_CONFIG_DIR=\"$OPENCODE_MANAGED_DIR\" MCP_SWITCHBOARD_HUB_URL=\"$OPENCODE_HUB_BASE\""
+    fi
     # Plain expansion, deliberately: $(...) would *run* the CLI, and `code`
     # with no arguments opens an editor window instead of printing a revert hint.
     _revert_cli=${_cli:-code}
-    log "revert: $_revert_cli --uninstall-extension $OPENCODE_EXTENSION, delete $PLUGIN_FILE, and drop the plugin entry from $EDITOR_CONFIG_DIR/opencode.json"
+    log "revert: $_revert_cli --uninstall-extension $OPENCODE_EXTENSION, delete $PLUGIN_FILE (and $OPENCODE_MANAGED_DIR)"
 }
 
 main() {
@@ -524,6 +564,17 @@ main() {
                 ;;
             --hub-url=*)
                 HUB_URL_PEEKED=${_arg#*=}
+                set -- "$@" "$_arg"
+                ;;
+            --token)
+                # Peeked like --hub-url: the bridge plugin gets the same
+                # bearer the tunnel uses, which is also what PUBLIC_API=1
+                # hubs on the other side of that tunnel will accept.
+                TOKEN_PEEKED=${1:-}
+                set -- "$@" --token
+                ;;
+            --token=*)
+                TOKEN_PEEKED=${_arg#*=}
                 set -- "$@" "$_arg"
                 ;;
             *)
@@ -605,6 +656,20 @@ main() {
                 nohup "$@" < /dev/null >> "$_log" 2>&1 &
                 echo "$!" >"$_pidfile"
                 log "client started in the background (pid $!); log: $_log; stop: kill \$(cat $_pidfile)"
+            fi
+            # Hand opencode the installer-owned dummy config dir and the hub
+            # coordinates through the environment only - `export` here affects
+            # the exec'd opencode, never a file of the user's.
+            if [ "$OPENCODE_BRIDGE_READY" -eq 1 ]; then
+                export OPENCODE_CONFIG_DIR="$OPENCODE_MANAGED_DIR"
+                export MCP_SWITCHBOARD_HUB_URL="$OPENCODE_HUB_BASE"
+                # Explicit env wins; otherwise reuse this command's --token so
+                # a PUBLIC_API hub beyond the tunnel authenticates the plugin.
+                if [ -z "${MCP_SWITCHBOARD_PRIVATE_TOKEN:-}" ]; then
+                    MCP_SWITCHBOARD_PRIVATE_TOKEN=$TOKEN_PEEKED
+                fi
+                [ -n "${MCP_SWITCHBOARD_PRIVATE_TOKEN:-}" ] && export MCP_SWITCHBOARD_PRIVATE_TOKEN
+                true
             fi
             exec "$_oc"
         fi

@@ -70,6 +70,18 @@ type Service interface {
 	DeleteProfile(ctx context.Context, id string) error
 	// --- skills (agents/skills.go) ---
 	ListSkills(ctx context.Context) ([]store.Skill, error)
+	// --- library: on-disk SKILL.md files, scanned host skills, persona ---
+	// ListHostSkills returns skills scanned on client hosts (read-only mirrors).
+	ListHostSkills(ctx context.Context) ([]HostSkillView, error)
+	// ImportHostSkill copies one scanned skill into the managed library.
+	ImportHostSkill(ctx context.Context, host, name string) (store.Skill, error)
+	// RawSkill returns a managed skill's SKILL.md text.
+	RawSkill(ctx context.Context, id string) (string, error)
+	// PutRawSkill applies a whole SKILL.md to a managed skill.
+	PutRawSkill(ctx context.Context, id, text string) (*store.Skill, error)
+	// PersonaPrompt is the base.md system prompt leading every turn.
+	PersonaPrompt() (string, error)
+	SetPersonaPrompt(text string) error
 	// CreateSkill: ErrInvalid on a bad name or empty body, ErrNameTaken on a clash.
 	CreateSkill(ctx context.Context, in SkillInput) (*store.Skill, error)
 	UpdateSkill(ctx context.Context, id string, in SkillUpdate) (*store.Skill, error)
@@ -342,7 +354,11 @@ type ToolServer struct {
 
 // ChatTool is one tool in a chat's live catalog (GET /api/chats/{id}/tools).
 type ChatTool struct {
-	Name        string           `json:"name"`
+	Name string `json:"name"`
+	// Alias is the opencode-facing name the model's catalog shows for this
+	// tool (task, question, todowrite, webfetch, skill); omitted when the
+	// model sees Name itself.
+	Alias       string           `json:"alias,omitempty"`
 	Description string           `json:"description"`
 	Origin      string           `json:"origin"` // "mcp" | "hub"
 	Server      *ToolServer      `json:"server,omitempty"`

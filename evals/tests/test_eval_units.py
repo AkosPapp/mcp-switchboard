@@ -233,7 +233,7 @@ class FakeHub:
             return h._send(200, {"profiles": [{"id": "p0", "name": "Assistant", "isDefault": True,
                                                 "systemPrompt": "Be useful.", "capabilities": {}, "budget": {}}]})
         if base == "/api/connections":
-            tools = [{"name": "run_command"}, {"name": "file_write"}, {"name": "file_read"}]
+            tools = [{"name": "bash"}, {"name": "write"}, {"name": "read"}]
             return h._send(200, {"connections": [{"id": "c1", "label": "laptop",
                                                    "servers": [{"name": "harness", "tools": tools}]}] if self.connections else []})
         parts = base.strip("/").split("/")
@@ -279,20 +279,20 @@ class FakeHub:
     def tool(self, tool, a):
         def ok(sc):
             return {"status": "ok", "result": {"structuredContent": sc}}
-        if tool == "run_command":
+        if tool == "bash":
             p = subprocess.run(["bash", "-c", a["command"]], cwd=a.get("cwd") or self.root,
                                capture_output=True, text=True)
             return ok({"stdout": p.stdout, "stderr": p.stderr, "exit_code": p.returncode})
-        if tool == "file_write":
+        if tool == "write":
             p = Path(a["path"])
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(a["content"])
             return ok({"success": True, "message": "ok"})
-        if tool == "file_read":
+        if tool == "read":
             p = Path(a["path"])
             if not p.exists():
                 return {"status": "error", "error": "no such file", "result": None}
-            return ok({"raw_text": p.read_text(), "truncated": False, "size": p.stat().st_size, "offset": 0})
+            return ok({"text": p.read_text()})
         return {"status": "error", "error": "unknown tool"}
 
 
@@ -306,7 +306,7 @@ def good_agent(fake, prompt):
     sandbox = prompt.split("to ")[1].split("/out.txt")[0]
     Path(sandbox, "out.txt").write_text("hello\n")
     return [{"role": "user", "content": []},
-            {"role": "assistant", "toolCalls": [{"id": "1", "name": "harness__file_write", "arguments": {}}],
+            {"role": "assistant", "toolCalls": [{"id": "1", "name": "harness__write", "arguments": {}}],
              "tokenInput": 10, "tokenOutput": 5, "costMicros": 2000},
             {"role": "tool", "toolResults": [{"tool_call_id": "1", "error": None}]},
             {"role": "assistant", "toolCalls": [{"id": "2", "name": "harness__x", "arguments": {}}],

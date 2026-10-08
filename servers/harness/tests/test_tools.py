@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import os
 import shutil
 import subprocess
 import time
@@ -23,9 +24,9 @@ def test_paths_outside_the_root_are_refused(tmp_path):
     (tmp_path / "secret.txt").write_text("s")
     for bad in ["../secret.txt", str(tmp_path / "secret.txt"), "a/../../secret.txt"]:
         with pytest.raises(PermissionError):
-            h.file_read(bad)
+            h.read(bad)
     with pytest.raises(PermissionError):
-        h.file_write("../x", "y")
+        h.write("../x", "y")
 
 
 def test_symlink_escaping_the_root_is_refused(tmp_path):
@@ -35,7 +36,7 @@ def test_symlink_escaping_the_root_is_refused(tmp_path):
     (inner / "link").symlink_to(tmp_path / "secret.txt")
     h.configure(str(inner))
     with pytest.raises(PermissionError):
-        h.file_read("link")
+        h.read("link")
 
 
 def test_deleting_a_symlink_removes_the_link_not_the_target(tmp_path):
@@ -57,31 +58,31 @@ def test_root_cannot_be_deleted(tmp_path):
 
 
 def test_relative_paths_resolve_against_the_root(tmp_path):
-    h.file_write("sub/f.txt", "hi")
+    h.write("sub/f.txt", "hi")
     assert (tmp_path / "sub" / "f.txt").read_text() == "hi"
-    assert h.dir_list(".").entries[0].path == "sub"
+    assert h.read(".").splitlines() == ["sub/"]
 
 
 # --- shell -----------------------------------------------------------------
 
 
-def test_run_command(tmp_path):
-    r = run(h.run_command("echo $FOO; pwd; echo e >&2; exit 2", env={"FOO": "bar"}))
+def test_bash(tmp_path):
+    r = run(h.bash("echo $FOO; pwd; echo e >&2; exit 2", env={"FOO": "bar"}))
     assert r.exit_code == 2
     assert r.stdout.split() == ["bar", str(tmp_path)]
     assert r.stderr == "e\n" and r.return_value is None and not r.truncated
 
 
-def test_run_command_cwd_is_confined(tmp_path):
+def test_bash_cwd_is_confined(tmp_path):
     (tmp_path / "d").mkdir()
-    assert run(h.run_command("pwd", cwd="d")).stdout.strip() == str(tmp_path / "d")
+    assert run(h.bash("pwd", cwd="d")).stdout.strip() == str(tmp_path / "d")
     with pytest.raises(PermissionError):
-        run(h.run_command("pwd", cwd="/"))
+        run(h.bash("pwd", cwd="/"))
 
 
 def test_output_is_truncated_with_totals():
     h.configure(None, 10)
-    r = run(h.run_command("printf 'x%.0s' $(seq 1 50)"))
+    r = run(h.bash("printf 'x%.0s' $(seq 1 50)"))
     assert len(r.stdout) == 10 and r.truncated and r.stdout_total == 50
 
 
@@ -89,7 +90,7 @@ def test_timeout_kills_the_whole_process_group(tmp_path):
     marker = tmp_path / "child_alive"
     cmd = f"(sleep 2; touch {marker}) & sleep 30"
     start = time.time()
-    r = run(h.run_command(cmd, timeout=0.5))
+    r = run(h.bash(cmd, timeout=0.5))
     assert time.time() - start < 10
     assert r.timed_out and r.exit_code == h.TIMEOUT_EXIT_CODE
     time.sleep(2.5)
@@ -97,18 +98,11 @@ def test_timeout_kills_the_whole_process_group(tmp_path):
 
 
 def test_timeout_returns_partial_output(tmp_path):
-    r = run(h.run_command("echo first; echo oops >&2; sleep 30", timeout=1))
+    r = run(h.bash("echo first; echo oops >&2; sleep 30", timeout=1))
     assert r.timed_out and r.exit_code == h.TIMEOUT_EXIT_CODE and r.truncated
     assert r.stdout == "first\n" and r.stderr == "oops\n"
     assert r.stdout_total == 6 and r.stderr_total == 5
     assert r.applied_timeout_s == 1 and r.elapsed_s is not None and r.elapsed_s < 15
-
-
-def test_run_python_timeout_keeps_output(tmp_path):
-    code = "import sys, time\nprint('tick', flush=True)\ntime.sleep(30)\n"
-    r = run(h.run_python(code, timeout=1))
-    assert r["timed_out"] and r["truncated"]
-    assert r["stdout"] == "tick\n" and r["returncode"] == h.TIMEOUT_EXIT_CODE
 
 
 def test_missing_binary_is_a_clear_error():
@@ -116,14 +110,10 @@ def test_missing_binary_is_a_clear_error():
         run(h._run(["definitely-not-a-binary"]))
 
 
-def test_run_python():
-    assert run(h.run_python("print(1 + 1)"))["stdout"] == "2\n"
-
-
 def test_a_slow_command_does_not_block_others():
     async def both():
         t0 = time.time()
-        await asyncio.gather(*(h.run_command("sleep 1") for _ in range(3)))
+        await asyncio.gather(*(h.bash("sleep 1") for _ in range(3)))
         return time.time() - t0
 
     assert run(both()) < 2.5  # concurrent, not 3s serial
@@ -132,37 +122,24 @@ def test_a_slow_command_does_not_block_others():
 # --- files -----------------------------------------------------------------
 
 
-def test_write_read_text_and_binary():
-    assert h.file_write("sub/f.txt", "héllo").success
-    assert h.file_write("sub/f.txt", " world", append=True).success
-    assert h.file_read("sub/f.txt").raw_text == "héllo world"
+def test_write_read_text_and_binary(tmp_path):
+    assert h.write("sub/f.txt", "héllo").success
+    assert h.write("sub/f.txt", " world", append=True).success
+    assert h.read("sub/f.txt") == "1: héllo world"
 
     payload = bytes(range(256))
-    assert h.file_write("b.bin", base64.b64encode(payload).decode(), binary=True).success
-    read = h.file_read("b.bin", binary=True)
-    assert base64.b64decode(read.content) == payload and read.raw_text is None and read.size == 256
+    assert h.write("b.bin", base64.b64encode(payload).decode(), binary=True).success
+    assert (tmp_path / "b.bin").read_bytes() == payload
 
-    bad = h.file_write("b.bin", "***", binary=True)
+    bad = h.write("b.bin", "***", binary=True)
     assert not bad.success and "base64" in bad.message
-
-
-def test_file_read_paging():
-    h.file_write("f.txt", "0123456789")
-    first = h.file_read("f.txt", limit=4)
-    assert (first.raw_text, first.truncated) == ("0123", True)
-    last = h.file_read("f.txt", offset=8, limit=4)
-    assert (last.raw_text, last.truncated) == ("89", False)
-    h.configure(None, 3)
-    capped = h.file_read("f.txt")
-    assert capped.raw_text == "012" and capped.truncated
-    assert base64.b64decode(h.file_read("f.txt", binary=True, offset=3, limit=2).content) == b"34"
 
 
 def test_overwrite_is_atomic_and_keeps_the_mode(tmp_path):
     p = tmp_path / "x.sh"
     p.write_text("old")
     p.chmod(0o755)
-    h.file_write("x.sh", "new")
+    h.write("x.sh", "new")
     assert p.read_text() == "new" and p.stat().st_mode & 0o777 == 0o755
     assert [f.name for f in tmp_path.iterdir()] == ["x.sh"]  # no temp files left behind
 
@@ -177,16 +154,41 @@ def test_file_delete(tmp_path):
     assert not missing.deleted and "does not exist" in missing.message
 
 
-def test_dir_list(tmp_path):
+def test_read_lists_directories(tmp_path):
     (tmp_path / "a").mkdir()
     (tmp_path / "a" / "x.txt").write_text("123")
     (tmp_path / "b.txt").write_text("")
-    flat = {e.name: e for e in h.dir_list(".").entries}
-    assert set(flat) == {"a", "b.txt"} and flat["a"].is_dir and not flat["b.txt"].is_dir
-    deep = {e.name: e for e in h.dir_list(".", recursive=True).entries}
-    assert deep["x.txt"].size == 3 and deep["x.txt"].mtime and deep["x.txt"].path == "a/x.txt"
-    with pytest.raises(NotADirectoryError):
-        h.dir_list("b.txt")
+    assert h.read(".").splitlines() == ["a/", "b.txt"]
+    assert h.read("a").splitlines() == ["x.txt"]
+    (tmp_path / "empty").mkdir()
+    assert h.read("empty") == "(empty directory)"
+
+
+def test_read_pageing_and_numbering(tmp_path):
+    (tmp_path / "t").write_text("a\nb\nc\nd\n")
+    r = h.read("t", offset=2, limit=2)
+    assert r.startswith("2: b\n3: c") and "continue with offset=4" in r
+    assert h.read("t", offset=4).startswith("4: d")
+    assert h.read("t") == "1: a\n2: b\n3: c\n4: d"
+    with pytest.raises(ValueError):
+        h.read("t", offset=5)
+    (tmp_path / "empty").write_text("")
+    assert h.read("empty") == "(empty file)"
+    with pytest.raises(ValueError, match="limit"):
+        h.read("t", limit=0)
+
+
+def test_read_respects_the_output_cap(tmp_path):
+    (tmp_path / "big").write_text("x" * 50 + "\n")
+    h.configure(None, 8)
+    r = h.read("big")
+    assert r.startswith("1: xxxxx")
+
+
+def test_read_truncates_long_lines(tmp_path):
+    (tmp_path / "long").write_text("y" * 3000 + "\nlast\n")
+    r = h.read("long")
+    assert "[... truncated]" in r and "2: last" in r
 
 
 def test_file_move(tmp_path):
@@ -198,54 +200,48 @@ def test_file_move(tmp_path):
     assert not h.file_move("new/b", "taken").moved and (tmp_path / "taken").read_text() == "2"
 
 
-def test_read_lines(tmp_path):
-    (tmp_path / "b.txt").write_text("1\n2\n3\n")
-    r = h.read_lines("b.txt", 2, 3)
-    assert r.text == "2\n3\n" and (r.start, r.end, r.total_lines, r.truncated) == (2, 3, 3, False)
-    assert h.read_lines("b.txt").text == "1\n2\n3\n"
-
-
-def test_edit_file(tmp_path):
+def test_edit(tmp_path):
     p = tmp_path / "f.txt"
     p.write_text("a a b")
     with pytest.raises(ValueError, match="2 times"):  # ambiguous
-        h.edit_file("f.txt", old_str="a", new_str="X")
+        h.edit("f.txt", old_string="a", new_string="X")
     assert p.read_text() == "a a b"
-    assert h.edit_file("f.txt", old_str="b", new_str="c").startswith("replaced 1 occurrence\n")
-    assert h.edit_file("f.txt", old_str="a", new_str="z", replace_all=True).startswith("replaced 2 occurrences")
+    assert h.edit("f.txt", old_string="b", new_string="c").startswith("replaced 1 occurrence\n")
+    assert h.edit("f.txt", old_string="a", new_string="z", replace_all=True).startswith("replaced 2 occurrences")
     assert p.read_text() == "z z c"
-    h.edit_file("f.txt", new_content="q")
-    assert p.read_text() == "q"
     with pytest.raises(ValueError):
-        h.edit_file("f.txt", old_str="missing", new_str="x")
+        h.edit("f.txt", old_string="missing", new_string="x")
     with pytest.raises(ValueError):
-        h.edit_file("f.txt", old_str="q")
-    with pytest.raises(ValueError):
-        h.edit_file("f.txt", old_str="", new_str="x")
-    with pytest.raises(FileNotFoundError):
-        h.edit_file("nope", new_content="x")
+        h.edit("f.txt", old_string="", new_string="x")
+
+
+def test_edit_dry_run(tmp_path):
+    (tmp_path / "f.txt").write_text("one\n")
+    out = h.edit("f.txt", old_string="one", new_string="two", dry_run=True)
+    assert out.startswith("dry run: would replace") and "+two" in out and "-one" in out
+    assert (tmp_path / "f.txt").read_text() == "one\n"
 
 
 # --- search ----------------------------------------------------------------
 
 
-def test_tree_skips_vcs_dirs(tmp_path):
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "m.py").write_text("")
-    (tmp_path / ".git").mkdir()
-    tree = h.tree_of_files(".")
-    assert tree["src"]["__files__"] == ["m.py"] and ".git" not in tree
-
-
-def test_find_files_without_git_skips_vendor_dirs(tmp_path):
+def test_glob_without_git_skips_vendor_dirs(tmp_path):
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "m.py").write_text("")
     (tmp_path / "node_modules" / "x").mkdir(parents=True)
     (tmp_path / "node_modules" / "x" / "n.py").write_text("")
     (tmp_path / "n.txt").write_text("")
-    assert run(h.find_files("**/*.py")) == ["pkg/m.py"]
-    assert run(h.find_files("*.txt")) == ["n.txt"]
-    assert run(h.find_files("*.py", limit=0)) == []
+    assert run(h.glob("**/*.py")) == ["pkg/m.py"]
+    assert run(h.glob("*.txt")) == ["n.txt"]
+    assert run(h.glob("*.py", limit=0)) == []
+
+
+def test_glob_is_sorted_newest_first(tmp_path):
+    (tmp_path / "old.py").write_text("")
+    os_time = 1_600_000_000
+    os.utime(tmp_path / "old.py", (os_time, os_time))
+    (tmp_path / "new.py").write_text("")
+    assert run(h.glob("*.py")) == ["new.py", "old.py"]
 
 
 def init_repo(path):
@@ -253,27 +249,27 @@ def init_repo(path):
         subprocess.run(["git", *cmd], cwd=path, check=True)
 
 
-def test_find_files_honours_gitignore(tmp_path):
+def test_glob_honours_gitignore(tmp_path):
     init_repo(tmp_path)
     (tmp_path / ".gitignore").write_text("ignored.py\n")
     (tmp_path / "ignored.py").write_text("")
     (tmp_path / "kept.py").write_text("")
-    assert run(h.find_files("*.py")) == ["kept.py"]
+    assert run(h.glob("*.py")) == ["kept.py"]
 
 
 @pytest.mark.skipif(not shutil.which("rg"), reason="ripgrep not installed")
-def test_ripgrep(tmp_path):
+def test_grep(tmp_path):
     (tmp_path / "f.txt").write_text("alpha\nBeta\ngamma\n")
     (tmp_path / "g.py").write_text("beta\n")
-    hit = run(h.ripgrep("Beta"))
+    hit = run(h.grep("Beta"))
     assert [(m.file, m.line_no, m.text, m.is_match) for m in hit.matches] == [("f.txt", 2, "Beta", True)]
-    assert len(run(h.ripgrep("beta", ignore_case=True)).matches) == 2
-    assert [m.file for m in run(h.ripgrep("beta", ignore_case=True, glob="*.py")).matches] == ["g.py"]
-    ctx = run(h.ripgrep("Beta", context=1)).matches
+    assert len(run(h.grep("beta", ignore_case=True)).matches) == 2
+    assert [m.file for m in run(h.grep("beta", ignore_case=True, include="*.py")).matches] == ["g.py"]
+    ctx = run(h.grep("Beta", context=1)).matches
     assert [(m.text, m.is_match) for m in ctx] == [("alpha", False), ("Beta", True), ("gamma", False)]
-    capped = run(h.ripgrep("a", ignore_case=True, max_results=1))
+    capped = run(h.grep("a", ignore_case=True, max_results=1))
     assert len(capped.matches) == 1 and capped.truncated
-    assert run(h.ripgrep("zzz")).matches == []
+    assert run(h.grep("zzz")).matches == []
 
 
 # --- git -------------------------------------------------------------------
@@ -352,25 +348,19 @@ def test_too_many_background_processes():
     run(scenario())
 
 
-def test_file_delete_directory_needs_recursive_by_default(tmp_path):
-    (tmp_path / "d" / "in").mkdir(parents=True)
-    assert not h.file_delete("d").deleted and (tmp_path / "d").exists()
-
-
 def test_read_lines_and_text_paging(tmp_path):
     (tmp_path / "t").write_text("a\nb\nc\nd\n")
-    assert h.read_lines("t", 2, 3).text == "b\nc"  # mid-file range: no trailing newline
-    assert h.read_lines("t", 3).text == "c\nd\n"
-    r = h.file_read("t", offset=2, limit=3)
-    assert r.raw_text == "b\nc"[:3] and r.truncated and r.size == 8
-    assert not h.file_read("t", offset=4).truncated
+    mid = h.read("t", offset=2, limit=2)
+    assert mid.startswith("2: b\n3: c")
+    tail = h.read("t", offset=3)
+    assert tail.startswith("3: c\n4: d")
 
 
-def test_ripgrep_max_results_truncates(tmp_path):
+def test_grep_max_results_truncates(tmp_path):
     (tmp_path / "g").write_text("hit\n" * 50)
-    r = run(h.ripgrep("hit", max_results=5))
+    r = run(h.grep("hit", max_results=5))
     assert len(r.matches) == 5 and r.truncated
-    assert not run(h.ripgrep("hit", max_results=500)).truncated
+    assert not run(h.grep("hit", max_results=500)).truncated
 
 
 def test_cleanup_kills_background_process_groups():
@@ -396,27 +386,9 @@ def test_cleanup_kills_background_process_groups():
     run(go())
 
 
-def test_dir_list_recursive_skips_dependency_trees_and_honours_limit(tmp_path):
-    for d in ("node_modules/pkg", ".direnv/x", "src"):
-        (tmp_path / d).mkdir(parents=True)
-    (tmp_path / "node_modules/pkg/deep.js").write_text("x")
-    (tmp_path / ".direnv/x/blob").write_text("x")
-    (tmp_path / "src/a.py").write_text("x")
-    h.configure(root=str(tmp_path))
-    res = h.dir_list(".", recursive=True)
-    paths = {e.path for e in res.entries}
-    assert "node_modules" in paths and ".direnv" in paths  # listed...
-    assert "node_modules/pkg" not in paths and ".direnv/x" not in paths  # ...not entered
-    assert "src/a.py" in paths and not res.truncated
-    # naming a skipped directory explicitly still lists what is inside it
-    inside = {e.path for e in h.dir_list("node_modules", recursive=True).entries}
-    assert "node_modules/pkg/deep.js" in inside
-
-    for i in range(30):
-        (tmp_path / "src" / f"f{i:02}.py").write_text("x")
-    cut = h.dir_list("src", recursive=True, limit=10)
-    assert len(cut.entries) == 10 and cut.truncated
-    flat = h.dir_list("src", limit=5)
-    assert len(flat.entries) == 5 and flat.truncated
-    with pytest.raises(ValueError):
-        h.dir_list("src", limit=0)
+def test_read_directory_lists_all_entries(tmp_path):
+    for i in range(12):
+        (tmp_path / f"f{i:02}.py").write_text("x")
+    (tmp_path / "d").mkdir()
+    out = h.read(".").splitlines()
+    assert out == ["d/"] + [f"f{i:02}.py" for i in range(12)]

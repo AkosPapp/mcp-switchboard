@@ -86,3 +86,46 @@ func TestBridgeQuestionWithoutPushConfigured(t *testing.T) {
 		t.Fatal("push reported without configuration")
 	}
 }
+
+func TestBridgeConversationThreadsOnTheLeaf(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	chat, err := e.m.CreateChat(ctx, CreateChatInput{Title: "threaded", Bridge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range []struct {
+		human bool
+		text  string
+	}{
+		{true, "turn one"},
+		{false, "reply one"},
+		{true, "turn two"},
+		{false, "reply two"},
+	} {
+		if in.human {
+			if _, err = e.m.Post(ctx, chat.ID, PostInput{Content: say(in.text)}); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if _, err = e.m.AppendBridge(ctx, chat.ID, BridgeAppend{Role: "assistant", Text: in.text}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The default GET /messages (ActivePath) is what the console renders and
+	// what the plugin's pump polls: every line must be on it, in order.
+	path, err := e.st.ActivePath(ctx, chat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantROLES := []string{store.RoleUser, store.RoleAssistant, store.RoleUser, store.RoleAssistant}
+	if len(path) != len(wantROLES) {
+		t.Fatalf("path length = %d, want %d: %+v", len(path), len(wantROLES), path)
+	}
+	for i, m := range path {
+		if m.Role != wantROLES[i] {
+			t.Errorf("path[%d].Role = %s, want %s", i, m.Role, wantROLES[i])
+		}
+	}
+}

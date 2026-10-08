@@ -7,7 +7,11 @@ A **client** on each machine spawns your local stdio MCP servers and opens one
 *outbound* WebSocket to a **hub**. The hub speaks MCP to each tunnelled server,
 aggregates every tool into one endpoint, and serves it over Streamable HTTP. It
 also gives you a console to browse what is connected, call any tool by hand, and
-read back every call that has ever been made.
+read back every call that has ever been made. When the agent orchestrator is on, the hub is also the
+agent's home config: its skills live as `SKILL.md` files and its prompts as Markdown under
+`$DATA_DIR/skills/` and `$DATA_DIR/prompts/` (editable from the console **or** with any text editor —
+the hub reconciles file edits into its index every turn), and scanned client skills appear for
+inspection and one-click import.
 
 ```
 ┌── your laptop, a NATed box, anywhere ─────────────────┐
@@ -186,10 +190,16 @@ printed snippet instead). The plugin turns every opencode project into a live
   model talk to any hub chat — the agent-to-agent comms the setup is for.
 
 A bridge chat is `kind: "bridge"` on the hub: sending to it never runs the hub
-agent (opencode is the brain); the plugin reaches the hub's **private** API, so
-that origin must serve `/api` (a loopback hub at `http://127.0.0.1:8099` works
-out of the box; the URL is derived from `--hub-url`, override with
-`MCP_SWITCHBOARD_MCP_URL`). The VS Code extension only adds selection/tab sharing.
+agent (opencode is the brain); the plugin reaches the hub's API, so that origin
+must serve `/api`. A loopback hub at `http://127.0.0.1:8099` works out of the
+box. For a remote hub, either expose the private listener where the plugin can
+reach it, or set `MCP_SWITCHBOARD_PUBLIC_API=1` on the hub (`public.api.enable`
+in the NixOS module): that mounts `/api/*` on the **tunnel** listener too,
+behind a bearer token — the same `--token` the client presents, so the origin
+you already pass to `install.sh --hub-url` just works. Override the plugin's
+hub origin with `MCP_SWITCHBOARD_HUB_URL`, and its bearer with
+`MCP_SWITCHBOARD_PRIVATE_TOKEN`. The VS Code extension only adds
+selection/tab sharing.
 
 Related editor tooling lives in this repo: [`editor/vscode`](editor/vscode) quotes
 the current selection into a chat's draft, and `.vscode/tasks.json`,
@@ -211,9 +221,14 @@ The usual shape, as used by Claude Desktop, Cursor and VS Code:
 ```
 
 An `mcp.json` is optional: with none in the current directory the client tunnels only the
-built-in harness. The client also adds a built-in `harness` server (files, search, git, shell, background
-processes) by default, confined to the directory you start the client in; pass
-`--no-harness` to leave it out. It gives a shell to anyone who can reach `/mcp`, so read
+built-in harness. The client also adds a built-in `harness` server by default, confined to the directory
+you start the client in; pass
+`--no-harness` to leave it out. Its core tools are the opencode suite — `bash`, `read`, `write`,
+`edit`, `glob`, `grep` — plus the extras the hub also offers in agent chats (`task`→chat spawn,
+`question`→user ask, `todowrite`, `webfetch`, `skill`): a hub agent sees one familiar tool set, half of
+it executed here, half by the hub. The client also scans SKILL.md skills on the host
+(`~/.claude/skills`, `.opencode/skills`, … — `MCP_SWITCHBOARD_SKILLS=false` or `--no-skills` off) and
+keeps the hub's `skills/hosts/` mirror current. It gives a shell to anyone who can reach `/mcp`, so read
 [the security model](spec.md#10-security-model) first.
 
 An entry may carry a `"project"` to group it (a top-level `"project"` sets the default

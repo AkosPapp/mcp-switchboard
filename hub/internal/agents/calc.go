@@ -37,7 +37,7 @@ var calcTool = &sbTool{
 	},
 }
 
-func init() { registerExtraTool(calcTool, nil) }
+func init() { registerExtraTool(calcTool, func(m *Manager) bool { return m.set.AgentDebugTools }) }
 
 type calcParser struct {
 	s     string

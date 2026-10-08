@@ -4,21 +4,23 @@ A first-party stdio MCP server that gives a coding agent the basics on a
 remote machine: filesystem, search, git and shell tools. It is a normal MCP
 server, so [mcp-switchboard-client](../../client) tunnels it like any other.
 
-Tools (34; full schemas and behaviour in [spec.md](../../spec.md#4-harness-server)):
+Tools (26; full schemas and behaviour in [spec.md](../../spec.md#4-harness-server)). The core
+set deliberately mirrors the tool suite a Claude Code / opencode-style agent already knows:
+`bash`, `read`, `write`, `edit`, `glob`, `grep` — plus the extras listed below.
 
-- **Files:** `file_read` (paged), `file_write`, `file_delete` (directories need `recursive=true` unless empty), `file_move`, `dir_list` (capped at `limit`, default 500, and does not descend into `node_modules`, `.git`, `.venv`, `.direnv` and caches), `tree_of_files`,
-  `find_files` (honours `.gitignore`), `ripgrep`, `read_lines`, `edit_file` (returns a diff; `dry_run`),
-  `multi_edit` (several atomic edits in one file), `apply_patch` (unified diff, multi-file, all-or-nothing, `dry_run`),
-  `data_query` (read-only JSON / JSONL / CSV / TSV queries)
-- **Code navigation:** `find_symbol` (definitions), `find_references` (universal-ctags if installed, else ripgrep heuristics)
-- **Run:** `run_command` and `run_python` (`mode` = `full`/`head`/`tail`/`grep`), `run_tests` (auto-detects
+- **Files:** `read` (line-numbered `N: ` output, paged with `offset`/`limit`, lists directories),
+  `write`, `edit` (exact-string replace, returns a diff; `dry_run`, `replace_all`),
+  `apply_patch` (unified diff, multi-file, all-or-nothing, `dry_run`),
+  `file_delete` (directories need `recursive=true` unless empty), `file_move`
+- **Search:** `glob` (honours `.gitignore`, newest first), `grep` (regex over contents)
+- **Run:** `bash` (`mode` = `full`/`head`/`tail`/`grep`), `run_tests` (auto-detects
   pytest / go / npm / cargo, returns structured failures), `output_read` / `output_grep` (page through output that was
   cut; commands return an `output_id`), and `process_start` / `process_read` / `process_kill` for
   long-running work. Long *waits* are never blocking calls: `wait_for_start` + `wait_for_poll`
   watch a shell predicate harness-side (satisfied when it exits non-zero) so no hub per-call
   deadline can kill them; a blocked command that hits a timeout returns its partial output
   (`timed_out`, `exit_code` 124), never an error
-- When driving cluster or fleet CLIs through `run_command`, prefer their machine-readable flags
+- When driving cluster or fleet CLIs through `bash`, prefer their machine-readable flags
   (`--json` / `--parsable` / `-h`) over default table output — Slurm table columns are
   misalignment-prone and mis-read silently
 - **Git:** `git_status`, `git_diff`, `git_show`, `git_log`, `git_branch`, `git_add`, `git_checkout`,

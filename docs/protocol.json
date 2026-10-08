@@ -9,7 +9,7 @@
       "direction": "client->hub",
       "required": ["type", "protocol", "client", "servers"],
       "optional": [],
-      "clientOptional": ["environment", "instructions", "environment_brief"]
+      "clientOptional": ["environment", "instructions", "environment_brief", "skills"]
     },
     "hello_ack": {
       "direction": "hub->client",
@@ -20,6 +20,11 @@
       "direction": "client->hub",
       "required": ["type"],
       "optional": ["instructions", "environment_brief"]
+    },
+    "skills_update": {
+      "direction": "client->hub",
+      "required": ["type", "skills"],
+      "optional": []
     },
     "mcp": {
       "direction": "both",

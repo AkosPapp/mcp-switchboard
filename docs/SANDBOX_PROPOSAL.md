@@ -7,8 +7,8 @@ harness does today is documented honestly instead — see the Security sections 
 
 ## The problem
 
-The harness's file tools confine paths to *root + scratch + temp*, but `run_command`,
-`run_python` and the `process_*` tools execute arbitrary code as the launching user, with that
+The harness's file tools confine paths to *root + scratch + temp*, but `bash`
+and the `process_*` tools execute arbitrary code as the launching user, with that
 user's full read access (`~/.git-credentials`, ssh keys, anything). Path confinement is a guard
 against mistakes and surprises, not a security boundary, and we deliberately keep the file-tool
 set exactly as wide as what the shell can already write, so the two execution paths never

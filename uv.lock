@@ -410,7 +410,7 @@ wheels = [
 
 [[package]]
 name = "mcp-switchboard-client"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "client" }
 dependencies = [
     { name = "certifi" },
@@ -439,7 +439,7 @@ provides-extras = ["test"]
 
 [[package]]
 name = "mcp-switchboard-server-harness"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "servers/harness" }
 dependencies = [
     { name = "mcp" },

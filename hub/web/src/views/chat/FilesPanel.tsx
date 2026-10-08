@@ -9,7 +9,7 @@ export interface TouchedFile {
   op: string;
 }
 
-const WRITE = ["file_write", "write_file", "edit_file", "file_edit", "patch", "file_patch", "create_file"];
+const WRITE = ["write", "edit", "file_write", "write_file", "edit_file", "file_edit", "patch", "file_patch", "create_file"];
 const MOVE = ["file_move", "move_file", "dir_move", "rename_file"];
 const DEL = ["file_delete", "delete_file", "remove_file", "dir_remove", "dir_delete"];
 

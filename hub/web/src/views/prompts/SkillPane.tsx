@@ -1,13 +1,23 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { useToast } from "../../components/Toast";
 import { buttonClass, fieldClass } from "../graph/ui";
 import { messageOf } from "./api";
-import { SKILL_NAME, useCreateSkill, useDeleteSkill, usePatchSkill, type Skill } from "./skills";
+import {
+  SKILL_NAME,
+  useCreateSkill,
+  useDeleteSkill,
+  usePatchSkill,
+  usePutSkillRaw,
+  useSkillRaw,
+  type Skill,
+} from "./skills";
 
 const HELP = "text-xs text-muted";
 
-/** The editor for one skill (or a new one), with its header. */
+/** The editor for one skill (or a new one), with its header. An existing
+ * skill also opens as the SKILL.md file itself — the format the hub stores
+ * and you can edit anywhere. */
 export default function SkillPane({
   skill,
   onBack,
@@ -23,18 +33,43 @@ export default function SkillPane({
   const create = useCreateSkill();
   const patch = usePatchSkill();
   const del = useDeleteSkill();
+  const rawQuery = useSkillRaw(skill?.id ?? null);
+  const putRaw = usePutSkillRaw();
+  const [mode, setMode] = useState<"fields" | "raw">("fields");
+  const [raw, setRaw] = useState("");
   const [name, setName] = useState(skill?.name ?? "");
   const [description, setDescription] = useState(skill?.description ?? "");
   const [body, setBody] = useState(skill?.body ?? "");
   const [auto, setAuto] = useState(skill?.auto ?? true);
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
-  const pending = create.isPending || patch.isPending;
+  const pending = create.isPending || patch.isPending || putRaw.isPending;
+
+  useEffect(() => {
+    if (rawQuery.data !== undefined && mode === "raw" && raw === "") setRaw(rawQuery.data);
+  }, [rawQuery.data, mode, raw]);
+
+  const submitRaw = (event: FormEvent) => {
+    event.preventDefault();
+    if (!skill) return;
+    setError(null);
+    putRaw.mutate(
+      { id: skill.id, markdown: raw },
+      {
+        onSuccess: (saved) => {
+          toast.show("SKILL.md saved");
+          setRaw("");
+          onSaved(saved);
+        },
+        onError: (e) => setError(messageOf(e)),
+      }
+    );
+  };
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const n = name.trim();
-    if (!SKILL_NAME.test(n)) return setError("Name: lowercase letters, digits, - or _ (e.g. code-review).");
+    if (!SKILL_NAME.test(n)) return setError("Name: lowercase letters, digits and single hyphens (e.g. code-review).");
     if (!body.trim()) return setError("Write the instructions.");
     setError(null);
     const input = { name: n, description: description.trim(), body, auto };
@@ -56,6 +91,31 @@ export default function SkillPane({
           ← Back
         </button>
         <h2 className="min-w-0 flex-1 truncate px-1 text-sm font-semibold">{skill ? `/${skill.name}` : "New skill"}</h2>
+        {skill && (
+          <div className="flex gap-1" role="tablist" aria-label="Skill editor mode">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "fields"}
+              className={`${buttonClass(mode === "fields" ? "primary" : "default")} min-h-[44px] md:min-h-[36px]`}
+              onClick={() => setMode("fields")}
+            >
+              Fields
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "raw"}
+              className={`${buttonClass(mode === "raw" ? "primary" : "default")} min-h-[44px] md:min-h-[36px]`}
+              onClick={() => {
+                setMode("raw");
+                if (rawQuery.data) setRaw(rawQuery.data);
+              }}
+            >
+              SKILL.md
+            </button>
+          </div>
+        )}
         {skill &&
           (confirming ? (
             <>
@@ -89,6 +149,35 @@ export default function SkillPane({
           ))}
       </div>
 
+      {skill && mode === "raw" && (
+        <form onSubmit={submitRaw} noValidate aria-label="SKILL.md" className="space-y-4 p-4">
+          <p className={HELP}>
+            The exact file at <span className="font-mono">skills/{skill.name}/SKILL.md</span> in the hub&apos;s data
+            directory. Frontmatter keys the hub does not model (license, metadata&hellip;) are preserved.
+          </p>
+          {rawQuery.isPending ? (
+            <p className={HELP}>Loading&hellip;</p>
+          ) : (
+            <textarea
+              className={`${fieldClass()} font-mono text-xs`}
+              rows={22}
+              value={raw}
+              onChange={(e) => setRaw(e.target.value)}
+              spellCheck={false}
+            />
+          )}
+          {error && (
+            <p role="alert" className="text-sm text-danger">
+              {error}
+            </p>
+          )}
+          <button type="submit" className={`${buttonClass("primary")} min-h-[44px] md:min-h-[36px]`} disabled={pending || rawQuery.isPending}>
+            Save SKILL.md
+          </button>
+        </form>
+      )}
+
+      {(!skill || mode === "fields") && (
       <form onSubmit={submit} noValidate aria-label="Skill" className="space-y-4 p-4">
         <p className={HELP}>
           A skill is a block of instructions. Type <span className="font-mono">/name</span> in a chat to run it, followed by
@@ -157,6 +246,7 @@ export default function SkillPane({
           </button>
         </div>
       </form>
+      )}
     </div>
   );
 }

@@ -313,6 +313,121 @@ def collect_instructions(cwd: Path) -> List[Dict[str, str]]:
     return out
 
 
+# ---------- Skills (hello skills / skills_update) -----------------------------
+#
+# SKILL.md directories on this host, scanned the same way instruction files are
+# (hello + a refresh frame; docs/PROTOCOL.md). opencode/Claude discovery
+# locations; the hub stores them read-only under skills/hosts/<label>/ and can
+# promote copies into its managed library. Budgets mirror the instruction ones.
+
+SKILL_MAX_SKILLS = 200
+SKILL_MAX_FILE_CHARS = 64 * 1024  # per SKILL.md
+SKILL_MAX_TOTAL_CHARS = 256 * 1024  # per hello/skills_update
+
+_SKILL_DIR_SETS = (".claude", ".opencode", ".agents")
+_CONFIG_SKILL_DIRS = (
+    (".claude", "skills"),
+    (".config/opencode", "skills"),
+    (".agents", "skills"),
+)
+SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+def _frontmatter_value(text: str, key: str) -> Optional[str]:
+    """First top-level ``key: value`` scalar from a ``---`` frontmatter block."""
+    if not text.startswith("---"):
+        return None
+    lines = text.splitlines()
+    for line in lines[1:]:
+        if line.strip() in ("---", "..."):
+            break
+        if not line or line[0] in " \t#-":
+            continue
+        m = re.match(rf"^{key}:\s*(.*)$", line)
+        if not m:
+            continue
+        value = m.group(1).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return value
+    return None
+
+
+def _scanned_skill_dir(d: Path, base: Path, source: str) -> List[Dict[str, Any]]:
+    """Valid skills from one ``.../skills/`` directory, sorted by name."""
+    found: List[Dict[str, Any]] = []
+    try:
+        if not d.is_dir():
+            return found
+        entries = sorted(p for p in d.iterdir() if p.is_dir())
+    except OSError:
+        return found
+    for skill_dir in entries:
+        name = skill_dir.name
+        if not SKILL_NAME_RE.match(name) or len(name) > 64:
+            continue
+        try:
+            text = (skill_dir / "SKILL.md").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        fm_name = _frontmatter_value(text, "name") or name
+        if fm_name != name:  # name must match the directory (opencode rule)
+            continue
+        description = _frontmatter_value(text, "description") or ""
+        if len(text) > SKILL_MAX_FILE_CHARS:
+            text = text[:SKILL_MAX_FILE_CHARS]
+        try:
+            path = skill_dir.relative_to(base).as_posix() + "/SKILL.md"
+        except ValueError:
+            path = str(skill_dir)
+        found.append({"name": name, "path": path, "source": source,
+                      "description": description[:1024], "content": text})
+    return found
+
+
+def scan_skills(cwd: Optional[Path] = None, home: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Every SKILL.md skill visible to an agent on this host, within budgets.
+
+    Global locations come first (``~/.claude/skills`` etc., ``source`` names the
+    location), then project locations at ``cwd`` and every ancestor up to the
+    git root; an earlier source wins a name clash, and only name/description/
+    content travel. Never raises.
+    """
+    out: List[Dict[str, str]] = []
+    try:
+        cwd = Path(cwd) if cwd is not None else Path(os.getcwd())
+        home = Path(home) if home is not None else Path.home()
+        seen: set = set()
+        used = 0
+
+        def add(found: List[Dict[str, Any]]) -> None:
+            nonlocal used
+            for item in found:
+                if len(out) >= SKILL_MAX_SKILLS or item["name"] in seen:
+                    continue
+                cost = len(item["content"]) + len(item["description"]) + len(item["name"])
+                if used + cost > SKILL_MAX_TOTAL_CHARS:
+                    continue
+                used += cost
+                seen.add(item["name"])
+                out.append(item)
+
+        for first, second in _CONFIG_SKILL_DIRS:
+            add(_scanned_skill_dir(home / first / second, home, f"global:{first}/{second}"))
+        git_root = find_git_root(cwd)
+        roots: List[Path] = []
+        for directory in _parents(cwd):
+            roots.append(directory)
+            if git_root is not None and directory == git_root:
+                break
+        for directory in roots:
+            for d in _SKILL_DIR_SETS:
+                add(_scanned_skill_dir(directory / d / "skills", directory, f"project:{d}/skills"))
+    except Exception:  # noqa: BLE001 - scanning must never break the tunnel
+        LOGGER.debug("skill scan failed", exc_info=True)
+    return out
+
+
 # ---------- Environment brief (hello environment_brief / context_update) -----
 #
 # A short, cheaply-computed description of the client host so the agent knows
@@ -428,7 +543,7 @@ def collect_environment_brief(
         lines.append(
             "file tools can write: the root, scratch "
             f"{scratch} (unless overridden), and temp {tempfile.gettempdir()}; "
-            "run_command/run_python are UNCONFINED and can write anything this user can"
+            "bash and the process_* tools are UNCONFINED and can write anything this user can"
         )
         lines.append(
             "harness output cap: "

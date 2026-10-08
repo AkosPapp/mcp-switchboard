@@ -202,7 +202,7 @@ func TestLiveProfileEditAffectsNextRunAndDeleteKeepsPrompt(t *testing.T) {
 		t.Fatalf("second system = %q", got)
 	}
 	// the catalog follows the profile's capabilities too
-	if names := toolNames(prov.Calls()[1].Tools); !strings.Contains(names, "switchboard_chat_spawn") {
+	if names := toolNames(prov.Calls()[1].Tools); !strings.Contains(names, "task") {
 		t.Fatalf("capabilities not live: %s", names)
 	}
 
@@ -256,7 +256,7 @@ func TestClientlessAgentSeesHubToolsOnlyAndPromptEndpointMatchesProvider(t *test
 		t.Fatal("expected hub tools")
 	}
 	for _, tl := range call.Tools {
-		if !strings.HasPrefix(tl.Name, "switchboard_") {
+		if !strings.HasPrefix(tl.Name, "switchboard_") && !aliasExtras[tl.Name] {
 			t.Errorf("client-less agent sees %s", tl.Name)
 		}
 	}

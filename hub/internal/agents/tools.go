@@ -71,6 +71,9 @@ func (m *Manager) buildCatalog(ctx context.Context, agent *store.Agent, chat *st
 	cat := &catalog{byName: map[string]*catalogTool{}, byProv: map[string]*catalogTool{}}
 	add := func(t *catalogTool) {
 		t.Provider = providerName(t.Name)
+		if t.sb != nil && t.sb.alias != "" {
+			t.Provider = providerName(t.sb.alias)
+		}
 		if prev, dup := cat.byProv[t.Provider]; dup {
 			m.log.Warn("dropping a duplicate tool name from an agent's catalog", "tool", t.Name, "clashes_with", prev.Name, "agent", agent.ID)
 			return

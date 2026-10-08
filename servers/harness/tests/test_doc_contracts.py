@@ -61,6 +61,6 @@ def test_wait_for_start_doc_points_at_the_deadline_it_avoids():
 
 
 def test_run_description_still_flags_the_timeout_shape():
-    # W3: a timed-out run_command is a result, not an error, and says so.
-    doc = doc_of(h.run_command)
+    # W3: a timed-out bash is a result, not an error, and says so.
+    doc = doc_of(h.bash)
     assert "timed_out" in doc or "partial" in doc, "the partial-output guarantee vanished"

@@ -56,6 +56,7 @@ class Settings:
     environment: Optional[Dict[str, Any]] = None  # detected at load_settings
     instruction_root: Optional[str] = None  # cwd by default; None disables shipping
     env_brief: bool = True  # host brief in hello + context_update
+    skills: bool = True  # SKILL.md skills in hello + skills_update
 
     def tunnel_settings(self) -> TunnelSettings:
         return TunnelSettings(
@@ -67,6 +68,7 @@ class Settings:
             environment=self.environment,
             instruction_root=self.instruction_root,
             env_brief=self.env_brief,
+            skills=self.skills,
         )
 
 
@@ -170,6 +172,14 @@ def build_parser() -> argparse.ArgumentParser:
             f"tool presence) to the hub (or set {envconf.PREFIX}ENV_BRIEF=false)"
         ),
     )
+    parser.add_argument(
+        "--no-skills",
+        action="store_true",
+        help=(
+            "Do not scan SKILL.md skills (~/.claude/skills, .opencode/skills, ...) on this "
+            f"host or report them to the hub (or set {envconf.PREFIX}SKILLS=false)"
+        ),
+    )
     return parser
 
 
@@ -257,6 +267,7 @@ def load_settings(args: argparse.Namespace) -> Settings:
             else str(Path.cwd())
         ),
         env_brief=not args.no_env_brief and envconf.get_bool("ENV_BRIEF", True),
+        skills=not args.no_skills and envconf.get_bool("SKILLS", True),
     )
 
 

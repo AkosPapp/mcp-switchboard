@@ -108,11 +108,17 @@ func (h *Handler) registerOrchestrator() {
 	m.HandleFunc("GET /api/models", h.models)
 
 	m.HandleFunc("GET /api/profiles", h.listProfiles)
+	m.HandleFunc("GET /api/persona", h.getPersona)
+	m.HandleFunc("PUT /api/persona", h.putPersona)
 	m.HandleFunc("POST /api/profiles", h.createProfile)
 	m.HandleFunc("GET /api/profiles/{id}", h.getProfile)
 	m.HandleFunc("PATCH /api/profiles/{id}", h.patchProfile)
 	m.HandleFunc("DELETE /api/profiles/{id}", h.deleteProfile)
 	m.HandleFunc("GET /api/skills", h.listSkills)
+	m.HandleFunc("GET /api/skills/hosts", h.listHostSkills)
+	m.HandleFunc("POST /api/skills/import", h.importHostSkill)
+	m.HandleFunc("GET /api/skills/{id}/raw", h.getRawSkill)
+	m.HandleFunc("PUT /api/skills/{id}/raw", h.putRawSkill)
 	m.HandleFunc("POST /api/skills", h.createSkill)
 	m.HandleFunc("PATCH /api/skills/{id}", h.patchSkill)
 	m.HandleFunc("DELETE /api/skills/{id}", h.deleteSkill)
@@ -1460,4 +1466,88 @@ func (h *Handler) bridgeQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"pushed": pushed})
+}
+
+// ---------------------------------------------------------------- library
+
+// listHostSkills shows the read-only mirrors of skills scanned on client hosts
+// ($DATA_DIR/skills/hosts/), each flagged whether a managed skill shadows it.
+func (h *Handler) listHostSkills(w http.ResponseWriter, r *http.Request) {
+	ks, err := h.opts.Agents.ListHostSkills(r.Context())
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	if ks == nil {
+		ks = []agents.HostSkillView{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"skills": ks})
+}
+
+// importHostSkill copies one scanned host skill into the managed library.
+func (h *Handler) importHostSkill(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Host string `json:"host"`
+		Name string `json:"name"`
+	}
+	if !h.readBody(w, r, &b) {
+		return
+	}
+	k, err := h.opts.Agents.ImportHostSkill(r.Context(), b.Host, b.Name)
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, k)
+}
+
+// getRawSkill returns a managed skill's SKILL.md text verbatim.
+func (h *Handler) getRawSkill(w http.ResponseWriter, r *http.Request) {
+	raw, err := h.opts.Agents.RawSkill(r.Context(), r.PathValue("id"))
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"markdown": raw})
+}
+
+// putRawSkill applies a whole SKILL.md to a managed skill (rename included).
+func (h *Handler) putRawSkill(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Markdown string `json:"markdown"`
+	}
+	if !h.readBody(w, r, &b) {
+		return
+	}
+	k, err := h.opts.Agents.PutRawSkill(r.Context(), r.PathValue("id"), b.Markdown)
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, k)
+}
+
+// getPersona returns the base.md prompt that leads every chat's system prompt.
+func (h *Handler) getPersona(w http.ResponseWriter, r *http.Request) {
+	text, err := h.opts.Agents.PersonaPrompt()
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"persona": text})
+}
+
+// putPersona replaces it; every following turn in every chat uses it.
+func (h *Handler) putPersona(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Persona string `json:"persona"`
+	}
+	if !h.readBody(w, r, &b) {
+		return
+	}
+	if err := h.opts.Agents.SetPersonaPrompt(b.Persona); err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

@@ -9,7 +9,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/AkosPapp/mcp-switchboard/hub/internal/events"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/llm"
 	"github.com/AkosPapp/mcp-switchboard/hub/internal/store"
 )
@@ -56,7 +55,7 @@ Use them in this order:
    - the weaknesses found, ranked, each with the proposed change to a prompt, a skill, or the harness itself;
    - for harness code changes: which repo, which file/function, and how the change would have altered the cited call — but code is OUT OF SCOPE for these tools; they edit prompts and skills only.
    - every bug: what you observed, the minimal reproduction, where it lives, severity.
-3. EDIT ONLY WITH ASSENT. Prompts and skills are live shared state: an edit here changes every other chat that follows them. Propose the exact new text, wait for the user's OK in this chat, then apply with optimize.prompt_set / optimize.skill_set / optimize.skill_delete, and say what you changed.
+3. EDIT ONLY WITH ASSENT. Prompts and skills are live shared state: an edit here changes every other chat that follows them. Propose the exact new text, wait for the user's OK in this chat, then apply with switchboard.prompt_set / switchboard.skill_set / switchboard.skill_delete, and say what you changed.
 4. Keep changes small, dated and reversible: preserve what works, rewrite only the part that hurt (except a delete, which the user asked for by name).
 
 You are allowed to improve yourself here — but it is the USER's harness and prompts; report and ask beat act.`
@@ -197,169 +196,9 @@ var optimizeChatReadTool = &sbTool{
 	},
 }
 
-var optimizePromptsListTool = &sbTool{
-	name:   optimizeCmdName + ".prompts_list",
-	desc:   "List the hub's prompts (profiles) with ids — each one is the live system prompt of every chat that follows it. Read-only. Example: optimize.prompts_list {}",
-	schema: obj(nil, map[string]any{}),
-	ann:    optAnnRead, visible: func(store.Capabilities) bool { return true }, needChat: optimizeGate,
-	run: func(m *Manager, ctx context.Context, cc *callCtx, _ map[string]any) (any, error) {
-		c, err := m.optChat(ctx, cc)
-		if err != nil {
-			return nil, err
-		}
-		prof, err := m.ListProfiles(ctx)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]map[string]any, 0, len(prof))
-		for _, p := range prof {
-			out = append(out, map[string]any{
-				"profile_id": p.ID, "name": p.Name, "description": p.Description,
-				"is_default": p.IsDefault, "this_chat_follows": c.ProfileID != nil && *c.ProfileID == p.ID,
-				"prompt_chars": utf8.RuneCountInString(p.SystemPrompt),
-			})
-		}
-		return map[string]any{"profiles": out}, nil
-	},
-}
-
-var optimizePromptSetTool = &sbTool{
-	name: optimizeCmdName + ".prompt_set",
-	desc: "REPLACE a prompt's (profile's) system prompt. It takes effect in every chat following that prompt on their next turn — show the user the new text and get an explicit OK in this chat BEFORE calling this. Include the whole replacement, not a diff. Example: optimize.prompt_set {profile_id: \"01a0…\", system_prompt: \"You are…\"}",
-	schema: obj([]string{"profile_id", "system_prompt"}, map[string]any{
-		"profile_id":    typ("string", "from optimize.prompts_list"),
-		"system_prompt": typ("string", "the complete new system prompt"),
-	}),
-	ann: optAnnWrite, visible: func(store.Capabilities) bool { return true }, needChat: optimizeGate,
-	run: func(m *Manager, ctx context.Context, cc *callCtx, args map[string]any) (any, error) {
-		if _, err := m.optChat(ctx, cc); err != nil {
-			return nil, err
-		}
-		sp := argStr(args, "system_prompt")
-		if strings.TrimSpace(sp) == "" {
-			return nil, fmt.Errorf("%w: system_prompt must not be empty (an empty prompt means this tool is the wrong one)", ErrInvalid)
-		}
-		p, err := m.UpdateProfile(ctx, argStr(args, "profile_id"), ProfileUpdate{SystemPrompt: &sp})
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"ok": true, "profile_id": p.ID, "name": p.Name, "prompt_chars": utf8.RuneCountInString(p.SystemPrompt)}, nil
-	},
-}
-
-var optimizeSkillsListTool = &sbTool{
-	name:   optimizeCmdName + ".skills_list",
-	desc:   "List the hub's skills with ids, names and auto-load flags (the reusable instructions offered to every chat). Read-only. Example: optimize.skills_list {}",
-	schema: obj(nil, map[string]any{}),
-	ann:    optAnnRead, visible: func(store.Capabilities) bool { return true }, needChat: optimizeGate,
-	run: func(m *Manager, ctx context.Context, cc *callCtx, _ map[string]any) (any, error) {
-		if _, err := m.optChat(ctx, cc); err != nil {
-			return nil, err
-		}
-		skills, err := m.ListSkills(ctx)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]map[string]any, 0, len(skills))
-		for _, sk := range skills {
-			out = append(out, map[string]any{
-				"skill_id": sk.ID, "name": sk.Name, "description": sk.Description,
-				"auto": sk.Auto, "body_chars": utf8.RuneCountInString(sk.Body),
-			})
-		}
-		return map[string]any{"skills": out}, nil
-	},
-}
-
-var optimizeSkillSetTool = &sbTool{
-	name: optimizeCmdName + ".skill_set",
-	desc: "Create a skill, or update one by name (body/description/auto). Every chat may load skills, and auto-skills enter every chat's system prompt — agree the text with the user first. Example: optimize.skill_set {name: \"run-tests\", description: \"How to run this repo's tests\", body: \"From repo root: …\", auto: true}",
-	schema: obj([]string{"name"}, map[string]any{
-		"name":        typ("string", "lowercase [a-z0-9_-], starts with a letter or digit; existing name = update"),
-		"description": typ("string", "one line the model sees when deciding to load it"),
-		"body":        typ("string", "the instructions, markdown; only used on create or when set"),
-		"auto":        map[string]any{"type": "boolean", "description": "the model may load it unasked (its name+description ride in every system prompt)"},
-	}),
-	ann: optAnnWrite, visible: func(store.Capabilities) bool { return true }, needChat: optimizeGate,
-	run: func(m *Manager, ctx context.Context, cc *callCtx, args map[string]any) (any, error) {
-		if _, err := m.optChat(ctx, cc); err != nil {
-			return nil, err
-		}
-		name := strings.TrimSpace(argStr(args, "name"))
-		skills, err := m.ListSkills(ctx)
-		if err != nil {
-			return nil, err
-		}
-		var existing *store.Skill
-		for i := range skills {
-			if skills[i].Name == name {
-				existing = &skills[i]
-			}
-		}
-		body := argStr(args, "body")
-		if existing == nil {
-			if body == "" {
-				return nil, fmt.Errorf("%w: a new skill needs a body", ErrInvalid)
-			}
-			auto, _ := argBool(args, "auto")
-			sk, err := m.CreateSkill(ctx, SkillInput{Name: name, Description: argStr(args, "description"), Body: body, Auto: auto})
-			if err != nil {
-				return nil, err
-			}
-			return map[string]any{"ok": true, "created": sk.Name, "skill_id": sk.ID}, nil
-		}
-		up := SkillUpdate{}
-		if body != "" {
-			up.Body = &body
-		}
-		if d, ok := args["description"].(string); ok {
-			up.Description = &d
-		}
-		if a, ok := argBool(args, "auto"); ok {
-			up.Auto = &a
-		}
-		sk, err := m.UpdateSkill(ctx, existing.ID, up)
-		if err != nil {
-			return nil, err
-		}
-		m.publish(events.Event{Type: events.TypeSkill})
-		return map[string]any{"ok": true, "updated": sk.Name, "skill_id": sk.ID}, nil
-	},
-}
-
-var optimizeSkillDeleteTool = &sbTool{
-	name: optimizeCmdName + ".skill_delete",
-	desc: "Delete a skill by exact name, only after the user named that skill and agreed to lose it (there is no undo). Example: optimize.skill_delete {name: \"run-tests\"}",
-	schema: obj([]string{"name"}, map[string]any{
-		"name": typ("string", "the skill's exact name"),
-	}),
-	ann:     &mcp.ToolAnnotations{DestructiveHint: bp(true), OpenWorldHint: bp(false)},
-	visible: func(store.Capabilities) bool { return true }, needChat: optimizeGate,
-	run: func(m *Manager, ctx context.Context, cc *callCtx, args map[string]any) (any, error) {
-		if _, err := m.optChat(ctx, cc); err != nil {
-			return nil, err
-		}
-		name := strings.TrimSpace(argStr(args, "name"))
-		skills, err := m.ListSkills(ctx)
-		if err != nil {
-			return nil, err
-		}
-		for _, sk := range skills {
-			if sk.Name == name {
-				if err := m.DeleteSkill(ctx, sk.ID); err != nil {
-					return nil, err
-				}
-				return map[string]any{"ok": true, "deleted": name}, nil
-			}
-		}
-		return nil, fmt.Errorf("%w: no skill named %q", ErrNotFound, name)
-	},
-}
-
 func init() {
 	for _, t := range []*sbTool{
-		optimizeChatsListTool, optimizeChatReadTool, optimizePromptsListTool,
-		optimizePromptSetTool, optimizeSkillsListTool, optimizeSkillSetTool, optimizeSkillDeleteTool,
+		optimizeChatsListTool, optimizeChatReadTool,
 	} {
 		registerExtraTool(t, nil)
 	}

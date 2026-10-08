@@ -21,9 +21,9 @@ def run(coro):
 def test_scratch_is_created_on_demand_and_writable(tmp_path):
     assert h.scratch_dir() == tmp_path / ".harness" / "scratch"
     assert not h.scratch_dir().exists()
-    assert h.file_write(".harness/scratch/x.txt", "hi").success
+    assert h.write(".harness/scratch/x.txt", "hi").success
     assert h.scratch_dir().is_dir()
-    assert h.file_read(".harness/scratch/x.txt").raw_text == "hi"
+    assert h.read(".harness/scratch/x.txt") == "1: hi"
 
 
 def test_scratch_outside_the_root_is_allowed(tmp_path):
@@ -31,13 +31,13 @@ def test_scratch_outside_the_root_is_allowed(tmp_path):
     inner.mkdir()
     outside = tmp_path / "build" / "scratch"
     h.configure(str(inner), None, str(outside))
-    assert h.file_write(str(outside / "o.txt"), "data").success
+    assert h.write(str(outside / "o.txt"), "data").success
     assert (outside / "o.txt").read_text() == "data"
-    assert h.file_read(str(outside / "o.txt")).raw_text == "data"
+    assert h.read(str(outside / "o.txt")) == "1: data"
     # ... but the rest of the neighbourhood is still refused
     (tmp_path / "elsewhere.txt").write_text("no")
     with pytest.raises(PermissionError):
-        h.file_read(str(tmp_path / "elsewhere.txt"))
+        h.read(str(tmp_path / "elsewhere.txt"))
     # patches stay inside the root even with a scratch outside it
     patch = f"--- a/{outside / 'p.txt'}\n+++ b/{outside / 'p.txt'}\n@@ -1 +1 @@\n-x\n+y\n"
     with pytest.raises(PermissionError):
@@ -50,7 +50,7 @@ def test_refusal_message_names_all_three_locations(tmp_path):
     outside = tmp_path / "s"
     h.configure(str(inner), None, str(outside))
     with pytest.raises(PermissionError) as e:
-        h.file_read("/etc/hostname")
+        h.read("/etc/hostname")
     msg = str(e.value)
     assert "outside the allowed locations" in msg
     assert str(inner) in msg and str(outside) in msg and str(h.temp_dir()) in msg
@@ -63,12 +63,12 @@ def test_temp_dir_is_reachable_outside_the_root(monkeypatch, tmp_path):
     t.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(t))
     h.configure(str(inner))
-    assert h.file_write(str(t / "f.txt"), "data").success
-    assert h.file_read(str(t / "f.txt")).raw_text == "data"
+    assert h.write(str(t / "f.txt"), "data").success
+    assert h.read(str(t / "f.txt")) == "1: data"
 
 
 def test_shell_and_file_tools_agree_on_the_temp_dir(monkeypatch, tmp_path):
-    """Whatever run_command writes into $TMPDIR, file_read must see."""
+    """Whatever bash writes into $TMPDIR, read must see."""
     inner = tmp_path / "root"
     inner.mkdir()
     t = tmp_path / "mytmp"
@@ -76,8 +76,8 @@ def test_shell_and_file_tools_agree_on_the_temp_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(tempfile, "tempdir", str(t))
     monkeypatch.setenv("TMPDIR", str(t))
     h.configure(str(inner))
-    run(h.run_command('echo hi > "$TMPDIR/agreed.txt"'))
-    assert h.file_read(str(t / "agreed.txt")).raw_text == "hi\n"
+    run(h.bash('echo hi > "$TMPDIR/agreed.txt"'))
+    assert h.read(str(t / "agreed.txt")) == "1: hi"
 
 
 def test_configure_rejects_non_directory_scratch(tmp_path):
@@ -96,7 +96,7 @@ def test_cli_scratch_flag_reaches_the_server(tmp_path):
          "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-         "params": {"name": "file_write", "arguments": {"path": str(outside / "x.txt"), "content": "hi"}}},
+         "params": {"name": "write", "arguments": {"path": str(outside / "x.txt"), "content": "hi"}}},
     ]
     proc = subprocess.Popen(
         SERVER + ["--root", str(inner), "--scratch", str(outside)],

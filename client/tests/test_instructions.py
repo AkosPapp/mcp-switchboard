@@ -142,6 +142,7 @@ def make_connection(tmp_path, ws, **overrides):
         max_retries=1,
         instruction_root=str(root) if root is not None else None,
         instructions_interval=overrides.pop("instructions_interval", 0.2),
+        skills=overrides.pop("skills", False),  # the shared factory keeps scanning off unless asked
         **overrides,
     )
     return HubConnection(SPECS, settings, version="0", connect=FakeConnect([ws]), server_factory=FakeServer)
@@ -177,7 +178,7 @@ async def test_hello_omits_instructions_when_disabled(tmp_path):
 async def test_refresh_loop_pushes_context_update_on_change(tmp_path):
     (tmp_path / "AGENTS.md").write_text("before\n")
     ws = FakeWebSocket([])
-    connection = make_connection(tmp_path, ws, instructions_interval=0.2, env_brief=False)
+    connection = make_connection(tmp_path, ws, instructions_interval=0.2, env_brief=False, skills=False)
     sent = []
 
     async def fake_send(frame):
@@ -213,7 +214,7 @@ async def test_refresh_loop_pushes_context_update_on_change(tmp_path):
 
 async def test_refresh_loop_stays_quiet_when_disabled(tmp_path):
     ws = FakeWebSocket([])
-    connection = make_connection(tmp_path, ws, instruction_root=None, env_brief=False)
+    connection = make_connection(tmp_path, ws, instruction_root=None, env_brief=False, skills=False)
 
     async def fake_send(frame):
         raise AssertionError("must not send")

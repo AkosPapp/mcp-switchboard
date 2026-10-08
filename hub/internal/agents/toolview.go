@@ -58,8 +58,9 @@ func (m *Manager) HubTools() []HubTool {
 }
 
 // ChatTools implements Service. It runs buildCatalog, the function the run
-// loop calls each turn (5.4), so the two cannot drift. Names are the real
-// exposed names; the provider-safe mapping stays internal.
+// loop calls each turn (5.4), so the two cannot drift. Name is the real
+// exposed name; Alias is the opencode-facing name the model's catalog shows,
+// present only when the two differ.
 func (m *Manager) ChatTools(ctx context.Context, chatID string) (*ChatToolsView, error) {
 	chat, agent, err := m.liveAgentForChat(ctx, chatID)
 	if err != nil {
@@ -87,6 +88,9 @@ func (m *Manager) ChatTools(ctx context.Context, chatID string) (*ChatToolsView,
 			ann.IrreversibleHint = &yes
 		}
 		ct := ChatTool{Name: t.Name, Description: t.Desc, Origin: "hub", InputSchema: t.Schema, Annotations: &ann}
+		if t.sb != nil && t.sb.alias != "" && t.sb.alias != providerName(t.Name) {
+			ct.Alias = t.sb.alias
+		}
 		if t.sb == nil {
 			ct.Origin = "mcp"
 			ct.Server = &ToolServer{Label: t.Ref.Label, Project: t.Ref.Project, Server: t.Ref.Server}
